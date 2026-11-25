@@ -38,8 +38,8 @@ from ._vendored import helper, kit_sources, load
 
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
 CLIENT_COMMANDS = (
-    "connect", "disconnect", "agent", "catalog", "api", "scan", "check", "mcp", "hunt", "approve", "deny",
-    "knowledge", "secrets", "targets", "record", "doctor", "version",
+    "connect", "disconnect", "agent", "catalog", "api", "scan", "evidence", "check", "mcp", "hunt", "approve",
+    "deny", "knowledge", "secrets", "targets", "record", "doctor", "version",
 )
 AGENTS = ("codex", "claude", "opencode", "pi")
 CONNECT_PATH = "/_enterprise/connect/"
@@ -1008,6 +1008,15 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     return int(helper("_agent_catalog").main(["--api-url", url, *rest], mcp_module=mcp))
 
 
+def cmd_evidence(args: argparse.Namespace) -> int:
+    """``evidence export``: the runtime CLI's export, against the connected instance (any host)."""
+    url = apply_connection(args)
+    rest = list(args.args) or ["--help"]
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    return int(load("_v2_cli").main(["--api-url", url, "evidence", *rest]))
+
+
 def scan_ui_url(api_url: str) -> str:
     """Recognize a bare local IP, not every reverse proxy listening on 8080.
 
@@ -1523,13 +1532,14 @@ COMMANDS = {
     "agent": cmd_agent,
     "api": cmd_api,
     "catalog": cmd_catalog,
+    "evidence": cmd_evidence,
     "scan": cmd_scan,
     "check": cmd_check,
     "record": cmd_record,
 }
 
 # Commands that forward their arguments to a runtime CLI after the connection options.
-FORWARDING_COMMANDS = ("api", "catalog", "scan", "hunt", "approve", "deny", "knowledge", "secrets")
+FORWARDING_COMMANDS = ("api", "catalog", "scan", "evidence", "hunt", "approve", "deny", "knowledge", "secrets")
 _CONNECTION_OPTIONS = ("--url", "--token-file", "--timeout")
 
 
@@ -1691,6 +1701,13 @@ def build_parser() -> argparse.ArgumentParser:
         "args", nargs=argparse.REMAINDER,
         help="the scan CLI's arguments: TARGET [options]; `shakerscan scan --help` lists them",
     )
+    evidence = commands.add_parser(
+        "evidence",
+        help="export evidence from the connected instance: evidence export [--scan-id ID | --finding-id ID] "
+             "[--format manifest|json|zip] [--output FILE]",
+    )
+    connection(evidence)
+    evidence.add_argument("args", nargs=argparse.REMAINDER, help="export and its options (`evidence export --help`)")
     check = commands.add_parser(
         "check",
         help="run a free bounded public posture check via https://pub.shakerscan.com (no engine or account)",
@@ -1789,13 +1806,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `shakerscan scan --budget-profile fast URL` failed unless `--` came first.
         # Only the leading connection options are the client's; the rest is forwarded as is.
         own, forwarded = split_connection_options(argv[1:])
-        if argv[0] in {"catalog", "scan", "hunt", "approve", "deny", "knowledge", "secrets"}:
+        if argv[0] in {"catalog", "scan", "evidence", "hunt", "approve", "deny", "knowledge", "secrets"}:
             # The runtime CLI's own options and subcommands are what `scan --help` and
             # `hunt --help` should list; the wrapper's usage named none of them.
             if any(token in ("-h", "--help") for token in own):
                 own = [token for token in own if token not in ("-h", "--help")]
                 forwarded = ["--help", *forwarded]
-        if argv[0] in {"catalog", "hunt", "approve", "deny", "knowledge", "secrets"}:
+        if argv[0] in {"catalog", "evidence", "hunt", "approve", "deny", "knowledge", "secrets"}:
             extra, forwarded = extract_connection_options(forwarded)
             own += extra
         args = parser.parse_args([argv[0], *own])

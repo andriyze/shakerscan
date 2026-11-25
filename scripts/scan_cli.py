@@ -50,8 +50,9 @@ def _parser(prog: str | None = None) -> argparse.ArgumentParser:
         # client's ``shakerscan scan`` when it runs this file.
         prog=prog or "scanner.sh scan",
         description=(
-            "Submit one deterministic V2 Scan. Policy selects permission and families; "
-            "the budget profile supplies hard ceilings."
+            "Submit and follow deterministic V2 Scans. `scan TARGET` submits one: policy selects "
+            "permission and families; the budget profile supplies hard ceilings. Follow it with "
+            "`scan status|coverage|result|cancel SCAN_ID` and `scan list [--status S] [--target-id ID]`."
         ),
     )
     parser.add_argument("target", help="Authorized HTTP(S) target")
@@ -548,7 +549,66 @@ def _active_template_hint(args: argparse.Namespace, contract: dict[str, Any]) ->
             "refuses them when the ceiling cannot hold their sweep).")
 
 
+FOLLOW_COMMANDS = ("status", "coverage", "result", "list", "cancel")
+
+
+def _follow_parser(prog: str | None) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=prog or "scanner.sh scan",
+                                     description="Follow Scans: status, coverage, result, list, cancel.")
+    parser.add_argument("command", choices=FOLLOW_COMMANDS)
+    parser.add_argument("scan_id", nargs="?", help="the Scan id (status, coverage, result, cancel)")
+    parser.add_argument("--status", help="list: only Scans in this status")
+    parser.add_argument("--target-id", help="list: only this target's Scans")
+    parser.add_argument("--limit", type=int, default=20, help="list: rows (at most 200)")
+    parser.add_argument("--json", action="store_true", help="print the API answer as JSON")
+    parser.add_argument("--api-url", required=True, help=argparse.SUPPRESS)
+    parser.add_argument("--ui-url", required=True, help=argparse.SUPPRESS)
+    return parser
+
+
+def _follow(argv: list[str], prog: str | None) -> int:
+    """`scan status|coverage|result|list|cancel`: read or stop Scans already submitted."""
+    parser = _follow_parser(prog)
+    args = parser.parse_args(argv)
+    api_url = args.api_url.rstrip("/")
+    if args.command != "list" and not args.scan_id:
+        parser.error(f"scan {args.command} needs a SCAN_ID")
+    scan = urllib.parse.quote(str(args.scan_id or ""), safe="")
+    try:
+        if args.command == "list":
+            query = {key: value for key, value in (("status", args.status), ("target_id", args.target_id),
+                                                   ("limit", max(1, min(args.limit, 200)))) if value}
+            answer = _request_json(f"{api_url}/scans?{urllib.parse.urlencode(query)}")
+        elif args.command == "cancel":
+            answer = _request_json(f"{api_url}/scans/{scan}/cancel", payload={})
+        else:
+            path = {"status": "", "coverage": "/coverage", "result": "/result"}[args.command]
+            answer = _request_json(f"{api_url}/scans/{scan}{path}")
+    except ScanCliError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return getattr(exc, "exit_code", 1)
+    if args.json or args.command in {"coverage", "result"}:
+        print(json.dumps(answer, indent=None if args.json else 2, sort_keys=True))
+    elif args.command == "list":
+        for row in answer.get("scans") or answer.get("items") or []:
+            print(f"{row.get('id')}  {str(row.get('status')):<10} {row.get('created_at') or ''}  {row.get('target_url') or ''}")
+    elif args.command == "status":
+        print(f"Scan ID: {answer.get('id') or args.scan_id}")
+        for key in ("status", "current_phase", "progress", "target_url", "findings_count", "error_message"):
+            if answer.get(key) not in (None, ""):
+                print(f"{key.replace('_', ' ').capitalize()}: {answer[key]}")
+        print(f"View: {args.ui_url.rstrip('/')}/scans/{args.scan_id}")
+    else:
+        print(f"Cancel requested: {answer.get('status') or answer}")
+    return 0
+
+
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    positional = [token for index, token in enumerate(argv)
+                  if not token.startswith("-") and (index == 0 or argv[index - 1] not in ("--api-url", "--ui-url"))]
+    if positional and positional[0] in FOLLOW_COMMANDS:
+        return _follow(argv, prog)
     parser = _parser(prog)
     args = parser.parse_args(argv)
     if args.target == "help":

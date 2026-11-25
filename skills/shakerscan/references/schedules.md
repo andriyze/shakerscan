@@ -3,6 +3,9 @@
 A schedule runs a Scan (`normal_scan`) or a Continuous ASM improvement (`asm_improve`) for one
 target, daily or weekly. The server checks the target and the options exactly as for a Scan.
 
+With MCP: `shakerscan_schedules` (actions `list`, `get`, `create`, `update`, `delete`). The REST steps
+follow.
+
 1. **List**: `shakerscan api GET '/schedules?target_id=<target_id>'` (each with `schedule_health`).
 2. **Read one**: `shakerscan api GET /schedules/<schedule_id>`.
 3. **Create**:

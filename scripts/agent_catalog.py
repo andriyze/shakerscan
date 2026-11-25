@@ -94,7 +94,9 @@ CLI_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("agent", "person", "start Claude Code, Codex, OpenCode or Pi in the ShakerScan agent workspace"),
     ("catalog", "agent", "this catalog: tools, commands, REST routes, Hunt capabilities, person decisions"),
     ("api", "agent", "call any REST route: shakerscan api METHOD PATH [JSON]"),
-    ("scan", "agent", "submit a Scan: scan TARGET [options]; follow it with shakerscan api GET /scans/{scan_id}"),
+    ("scan", "agent", "submit and follow Scans: scan TARGET [options]; scan status|coverage|result|cancel SCAN_ID; "
+                      "scan list"),
+    ("evidence", "agent", "evidence export [--scan-id|--finding-id] [--format manifest|json|zip] [--output FILE]"),
     ("check", "agent", "bounded public DNS/email/HTTP/TLS posture check of a public host"),
     ("mcp", "agent", "run the MCP server; mcp install|uninstall|status registers it in an agent"),
     ("hunt", "agent", "Hunt lifecycle: start, get, list, query, call, candidate, verify, finish, cancel, resume, "
@@ -117,7 +119,7 @@ PERSON_DECISIONS: tuple[dict[str, str], ...] = (
      "routes": "POST /hunts/{hunt_id}/permission-requests/{request_id}/decision",
      "request": "automatic: a Hunt call answers awaiting_permission with permission_request_id",
      "person": "shakerscan approve <request_id> | shakerscan deny <request_id> (or the UI)",
-     "outcome": "shakerscan_hunt_permission_wait; shakerscan hunt permissions list|wait"},
+     "outcome": "shakerscan_hunt_permission_wait; shakerscan_hunts action=permissions; shakerscan hunt permissions list"},
     {"decision": "hunt_budget_raise",
      "routes": "POST /hunts/{hunt_id}/budget-amendments",
      "request": "a Hunt call that runs out answers awaiting_permission (kind budget.raise)",
@@ -125,18 +127,20 @@ PERSON_DECISIONS: tuple[dict[str, str], ...] = (
      "outcome": "shakerscan_hunt_permission_wait, then shakerscan_hunt_get"},
     {"decision": "target_authorization",
      "routes": "POST /targets/{target_id}/authorization; DELETE /targets/{target_id}/authorization",
-     "request": "in a Hunt: the target.authorize / capability.enable permission request; outside a Hunt: a "
-                "refused active Scan, retest or schedule names it; tell the person the command",
+     "request": "in a Hunt: the target.authorize / capability.enable permission request; outside a Hunt: "
+                "shakerscan_target action=request_authorization (an active shakerscan_scans start or a "
+                "shakerscan_finding retest answers the same), which names the person's command",
      "person": "shakerscan targets authorize <url-or-id> | shakerscan targets unauthorize <url-or-id> --reason R",
-     "outcome": "GET /targets/{target_id}/authorization"},
+     "outcome": "shakerscan_target action=get (authorized_for_active_testing)"},
     {"decision": "finding_dismissal",
      "routes": "PATCH /findings/{finding_id} (status or verdict false_positive / accepted_risk); "
                "POST /targets/{target_id}/findings/{finding_id}/dismiss|reopen; POST /findings/bulk; "
                "POST|PATCH|DELETE /finding-exceptions",
-     "request": "tell the person the finding, the verdict you recommend and why",
+     "request": "shakerscan_finding action=triage with verdict false_positive or accepted_risk answers the "
+                "person's exact command and changes nothing",
      "person": "shakerscan knowledge dismiss <target_id> <finding_id> --reason false_positive|accepted_risk "
                "--note N (or the UI)",
-     "outcome": "GET /findings/{finding_id} (status, analyst_verdict)"},
+     "outcome": "shakerscan_finding action=get (status, analyst_verdict)"},
     {"decision": "instruction_proposal",
      "routes": "POST /targets/{target_id}/instruction-proposals/{proposal_id}/accept|reject",
      "request": "the targets.skill.propose Hunt capability records a proposal",
@@ -154,10 +158,11 @@ PERSON_DECISIONS: tuple[dict[str, str], ...] = (
      "person": "shakerscan secrets reveal|grant|promote ...",
      "outcome": "shakerscan secrets list <target_id> (never values)"},
     {"decision": "access_control_contract",
-     "routes": "POST /targets/{target_id}/invariants/{contract_id}/approve|retire",
-     "request": "POST /targets/{target_id}/invariants records a draft contract",
-     "person": "approve or retire it in the UI (target > Access control)",
-     "outcome": "GET /targets/{target_id}/invariants (status)"},
+     "routes": "POST /targets/{target_id}/invariants (save a draft, with an approval receipt); "
+               "POST /targets/{target_id}/invariants/{contract_id}/approve|retire",
+     "request": "shakerscan_access_control action=draft compiles a rule into draft contracts to show the person",
+     "person": "save, approve or retire it in the UI (target > Access control)",
+     "outcome": "shakerscan_access_control action=contracts (status)"},
     {"decision": "hunt_authority",
      "routes": "PUT /targets/{target_id}/hunt-authority",
      "request": "tell the person what you need and why",
