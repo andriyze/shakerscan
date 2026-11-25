@@ -313,6 +313,9 @@ class HuntQueryRequest(BaseModel):
         # What changed for this Hunt since filter.after (its settled actions, decided permission
         # requests, moved leads); filter.wait_seconds holds the read until something does.
         "activity",
+        # This web Hunt's open coverage: discovery steps, known endpoints and the test classes not
+        # yet run on them, untested first (filter: class; cursor: the next offset).
+        "coverage",
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
@@ -418,6 +421,8 @@ class HuntCandidateUpdateRequest(BaseModel):
 async def query_hunt(hunt_id: str, request: HuntQueryRequest):
     if request.kind == "activity":
         return await _hunt_activity(hunt_id, request)
+    if request.kind == "coverage":
+        return await _hunt_coverage_query(hunt_id, request)
     async with _pool().acquire() as conn:
         run = await _hunt_run_or_404(conn, hunt_id)
         if request.kind == "summary":
@@ -446,6 +451,62 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
     if request.kind in {"changes", "continue"}:
         result = _arsenal_routes._redact_agent_payload(_json_safe_row(result))
     return {"hunt_id": hunt_id, **result}
+
+
+async def _hunt_coverage_query(hunt_id: str, request: HuntQueryRequest) -> dict[str, Any]:
+    """query kind=coverage: one page of the Hunt's open coverage (``coverage_map``)."""
+    from .coverage_map import coverage_page, load_coverage
+    unknown = sorted(set(request.filter) - {"class"})
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"coverage takes filter.class only, not {unknown}")
+    try:
+        offset = int(request.cursor or 0)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="coverage cursor is the next offset") from exc
+    async with _pool().acquire() as conn:
+        run = await _hunt_run_or_404(conn, hunt_id)
+        report = await load_coverage(conn, dict(run))
+    if report is None:
+        raise HTTPException(status_code=409, detail="coverage is reported for web and API Hunts")
+    page = coverage_page(report, limit=min(request.limit, 200), offset=offset,
+                         class_filter=str(request.filter.get("class") or "") or None)
+    rows = page.pop("open")
+    return {"hunt_id": hunt_id, "kind": "coverage", "count": len(rows), "rows": rows,
+            "has_more": page.pop("has_more"), "next_cursor": (
+                str(page["next_offset"]) if page.get("next_offset") is not None else None),
+            "coverage": page}
+
+
+# Open coverage rides on every capability answer of a web Hunt; one read per Hunt per this many
+# seconds at most (the answer says how old it is through ``as_of_actions``).
+_COVERAGE_HINT_SECONDS = 10.0
+_coverage_hints: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+async def _with_open_coverage(hunt_id: str, result: Any) -> Any:
+    """Add ``open_coverage`` (compact) to a capability answer; never fails the call."""
+    if not isinstance(result, dict):
+        return result
+    try:
+        from .coverage_map import COVERAGE_TARGET_KINDS, compact_open_coverage, load_coverage
+        now = asyncio.get_running_loop().time()
+        cached = _coverage_hints.get(hunt_id)
+        if cached is None or now - cached[0] > _COVERAGE_HINT_SECONDS:
+            async with _pool().acquire() as conn:
+                run = await _hunt_run_or_404(conn, hunt_id)
+                if str(run["target_kind"] or "") not in COVERAGE_TARGET_KINDS:
+                    return result
+                report = await load_coverage(conn, dict(run))
+            if report is None:
+                return result
+            if len(_coverage_hints) > 512:
+                _coverage_hints.clear()
+            cached = (now, compact_open_coverage(report, hunt_id))
+            _coverage_hints[hunt_id] = cached
+        return {**result, "open_coverage": cached[1]}
+    except Exception as exc:  # noqa: BLE001 - guidance never breaks a capability answer
+        print(f"[hunt] open coverage unavailable: {type(exc).__name__}", file=sys.stderr, flush=True)
+        return result
 
 
 async def _hunt_activity(hunt_id: str, request: HuntQueryRequest) -> dict[str, Any]:
@@ -481,13 +542,16 @@ async def execute_hunt_capability(
     # input. Only an idempotent replay of an action the Hunt already recorded stays answerable.
     await _require_executable_hunt_or_recorded_action(hunt_id, request.idempotency_key, capability_name=name)
     try:
-        return await HUNT_ACTION_SERVICE.execute(
+        result = await HUNT_ACTION_SERVICE.execute(
             name,
             request.input,
             lambda lifecycle: _execute_hunt_capability_lifecycle(
                 hunt_id, name, request, lifecycle,
             ),
         )
+        if str(request.idempotency_key).startswith("auto-discovery:"):
+            return result
+        return await _with_open_coverage(hunt_id, result)
     except HuntActionNotFound as exc:
         # D45: a hard limit with its code from the closed list, never a request.
         shown = "".join(char for char in name[:128] if char.isprintable())
@@ -1436,7 +1500,20 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
                 conn, run=dict(run), references=request.evidence_refs))
             used["candidates"] = int(used.get("candidates") or 0) + 1
             await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
-    return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
+        answer = {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
+        try:
+            # The verifier that proves this family, and a second issue the cited evidence shows.
+            from .candidate_guidance import candidate_guidance
+            suggestions = await candidate_guidance(
+                conn, run=dict(run), family=request.family, title=request.title, claim=request.claim,
+                locus=request.locus, evidence_refs=request.evidence_refs,
+            )
+        except Exception as exc:  # noqa: BLE001 - guidance never fails a recorded candidate
+            print(f"[hunt] candidate guidance unavailable: {type(exc).__name__}", file=sys.stderr, flush=True)
+            suggestions = []
+        if suggestions:
+            answer["next"] = suggestions
+    return answer
 
 
 async def _require_candidate_evidence(conn: Any, run: Any, references: list[str] | None) -> None:

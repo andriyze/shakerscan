@@ -883,6 +883,7 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
         ),
         (frozenset({"GET"}), "/hunts/{hunt_id}", "get_hunt"),
         (frozenset({"GET"}), "/hunts/{hunt_id}/checkpoint", "get_hunt_checkpoint"),
+        (frozenset({"GET"}), "/hunts/{hunt_id}/coverage", "get_hunt_coverage"),
         (frozenset({"GET"}), "/hunts/{hunt_id}/coverage-angles", "get_hunt_coverage_angles"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/coverage-angles", "record_hunt_coverage_angle"),
         (frozenset({"GET"}), "/hunts/{hunt_id}/record", "export_hunt_record"),

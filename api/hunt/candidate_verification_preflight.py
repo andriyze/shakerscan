@@ -61,7 +61,14 @@ def _mapping(value: Any) -> dict[str, Any]:
 
 
 def unsupported_family_detail(family: str) -> str:
-    return f"verification bridge supports {sorted(VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'"
+    detail = f"verification bridge supports {sorted(VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'"
+    if family == "injection":
+        # sqli, xss, nosqli and ssti are aliases of injection: name the verifiers that do prove
+        # the first two, so a search-box SQL injection is not left as an unproven candidate.
+        detail += ("; injection is proven by its own verifiers: sqli.verify for SQL injection and "
+                   "xss.verify for XSS, on the candidate's route and parameter (they record the "
+                   "finding themselves)")
+    return detail
 
 
 def public_verification_families() -> dict[str, Any]:

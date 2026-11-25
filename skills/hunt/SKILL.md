@@ -252,6 +252,15 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   Bounds are also in bytes (`max_event_bytes`, `max_bytes_per_hunt` in the contract): one event
   holds at most 32,768 bytes of text and locus values together, and a Hunt 8 MiB, so keep
   hypotheses short and long material in evidence actions.
+- A web Hunt maps its target itself at start: the engine runs the crawl, content discovery, API
+  description and known-product probes and the passive template pack as this Hunt's own recorded
+  actions. Work from what they map: `GET /hunts/{hunt_id}/coverage` (or query `kind=coverage`)
+  lists each known endpoint with the test classes nothing in this Hunt has run on it, and
+  `class_guide` names the check that closes each (`sqli.verify`/`xss.verify` on parameters,
+  default credentials on every login form and JSON login, authorization checks on object and admin
+  routes, reading every exposed file). Every capability answer carries a compact `open_coverage`.
+  A pair closes when you run its check, record a candidate on the route, or record a coverage
+  angle with status `negative` or `blocked` for it.
 - Use `GET /hunts/{hunt_id}/checkpoint` after context compaction, planner handoff, or resume.
   It is a bounded server-derived view of current coverage, candidates, action outcomes, budgets,
   and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. When
@@ -528,6 +537,9 @@ claim. Never describe a candidate as verified unless the returned proof contract
 
 Finish with `POST /hunts/{hunt_id}/finish`, providing a concise evidence-based summary and next
 actions. Cancel with `/cancel`; resume only when the server reports an awaiting-planner state.
+A web Hunt with open coverage and wall time and budget left is refused (409) with what is open:
+keep testing it. Finish anyway only with `force: true` and a `force_reason` saying why the rest
+stays untested; the debrief records the reason and the open coverage.
 
 Stop when the objective is answered, remaining hypotheses are falsified, authorization fails or
 expires, the target changes or is deactivated, the user cancels, a circuit breaker freezes traffic,

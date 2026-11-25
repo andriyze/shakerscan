@@ -32,7 +32,7 @@ _DRAFT = r'[0-9a-f]{64}'
 # verification, permission-request decisions and grant revocation) are deliberately absent:
 # the planner may read and wait on its permission requests, never decide them.
 _ROUTES = {
-    'GET': (r'', r'/record', r'/budget-amendments', r'/checkpoint', r'/coverage-angles',
+    'GET': (r'', r'/record', r'/budget-amendments', r'/checkpoint', r'/coverage', r'/coverage-angles',
             r'/permission-requests', rf'/permission-requests/{_UUID}', r'/permission-grants',
             r'/preauthorization', r'/permission-events',
             rf'/candidates/{_UUID}/boundary-context',

@@ -144,6 +144,17 @@ class HuntFinishRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     summary: str = Field(min_length=1, max_length=20_000)
     next_actions: list[str] = Field(default_factory=list, max_length=100)
+    force: bool = Field(
+        default=False,
+        description=(
+            "Finish a web Hunt although coverage is still open (discovery not finished, or known "
+            "endpoints with untested test classes) and wall and budget remain; needs force_reason."
+        ),
+    )
+    force_reason: str | None = Field(
+        default=None, max_length=2_000,
+        description="Why the open coverage is left untested; recorded in the debrief with it.",
+    )
 
 
 class HuntCoverageAngleRequest(BaseModel):
@@ -397,6 +408,19 @@ async def start_hunt(request: Request, response: Response):
     if isinstance(result, Mapping) and result.get("hunt_id"):
         from .lead_seeding import seed_started_hunt
         await seed_started_hunt(result["hunt_id"])
+        # A web Hunt maps its target itself (crawl, content discovery, description and product
+        # probes, templates), in the background, through its own capability calls.
+        from .auto_discovery import start as start_auto_discovery
+        from .coverage_map import COVERAGE_TARGET_KINDS
+        if (str(result.get("target_kind") or "") in COVERAGE_TARGET_KINDS and isinstance(result, dict)
+                and start_auto_discovery(str(result["hunt_id"])) is not None):
+            result["auto_discovery"] = {
+                "started": True,
+                "progress": f"GET /hunts/{result['hunt_id']}/coverage",
+                "note": ("The engine is crawling, running content discovery and probing for API "
+                         "descriptions and known products in this Hunt; its actions appear in the "
+                         "record. Test what it maps: the coverage report lists what is untested."),
+            }
     # Budget warnings and the verifiable families: advisory, never a refusal.
     return with_start_guidance(result)
 
@@ -610,9 +634,25 @@ async def list_hunts(
 
 @router.post("/hunts/{hunt_id}/finish")
 async def finish_hunt(hunt_id: str, request: HuntFinishRequest):
+    """Finish with a debrief. A web Hunt with open coverage and time and budget left is refused
+    (409, naming what is open) unless ``force`` with a ``force_reason``; the debrief records the
+    coverage at finish."""
     return await _service().finish(
-        hunt_id, summary=request.summary, next_actions=request.next_actions
+        hunt_id, summary=request.summary, next_actions=request.next_actions,
+        force=request.force, force_reason=request.force_reason,
     )
+
+
+@router.get("/hunts/{hunt_id}/coverage", tags=["Hunt"])
+async def get_hunt_coverage(
+    hunt_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    test_class: str | None = Query(None, max_length=40, alias="class"),
+):
+    """Open coverage of a web Hunt: discovery steps, known endpoints and the test classes not yet
+    run on them, each with the check that closes it (``class_guide``). A worklist, never proof."""
+    return await _service().coverage(hunt_id, limit=limit, offset=offset, class_filter=test_class)
 
 
 @router.post("/hunts/{hunt_id}/cancel")
@@ -653,6 +693,7 @@ __all__ = [
     "finish_hunt",
     "get_hunt",
     "get_hunt_checkpoint",
+    "get_hunt_coverage",
     "get_hunt_coverage_angles",
     "get_hunt_contract",
     "get_hunt_lifecycle_metrics",
