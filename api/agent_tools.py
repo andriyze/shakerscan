@@ -321,6 +321,9 @@ HUNT_THOROUGH_SCANNER_HOLDS: dict[str, dict[str, int]] = {
 # rather than being refused. The verifiers do not: at their registry hold they time out with no
 # verdict, which is traffic spent on nothing.
 HUNT_STEP_DOWN_CAPABILITIES = frozenset({"web.crawl", "web.browser_crawl"})
+# The out-of-band interactions one Hunt template call holds when the Hunt's policy allows them:
+# the policy's OOB authority is used only by a call that reserves it (resolve_hunt_interactsh_config).
+HUNT_TEMPLATE_OOB_HOLD = 1
 # The longer process ceiling a single (non-batch) verification may run under, on the same argv.
 # Only a reservation that covers all of it runs with it; any other reservation at or above the
 # floor runs at the floor, so a paced call only ever runs one of these two reviewed shapes.
@@ -873,6 +876,7 @@ def canonical_hunt_scanner_budget(
     deep_domxss: bool = False,
     device_target: bool = False,
     body_test: bool = False,
+    oob_allowed: bool = False,
 ) -> dict[str, int]:
     """Admission ceiling for the exact server-owned Hunt scanner selection.
 
@@ -893,6 +897,11 @@ def canonical_hunt_scanner_budget(
     budget = dict(CAPABILITY_REGISTRY.require(capability_name).budget_cost)
     if capability_name == "templates.scan":
         budget["http_requests"] = canonical_passive_nuclei_request_upper_bound()
+        if oob_allowed:
+            # The Hunt's out-of-band authority is used only by a call that reserves it
+            # (resolve_hunt_interactsh_config): without this hold no Hunt template call could
+            # ever enable the operator's private OOB server, whatever the policy allowed.
+            budget["oob_interactions"] = HUNT_TEMPLATE_OOB_HOLD
         return budget
     tier = HUNT_THOROUGH_SCANNER_HOLDS.get(capability_name)
     if (
@@ -915,11 +924,19 @@ def hunt_scanner_budget_context(
     Admission and the worker's re-derivation both read it here: the action digest covers the
     hold, so the two must derive the same one.
     """
+    policy = run.get("policy_json")
+    if isinstance(policy, str):
+        try:
+            policy = json.loads(policy)
+        except ValueError:
+            policy = None
+    policy = policy if isinstance(policy, Mapping) else {}
     return {
         "budget_profile": run.get("budget_profile"),
         "deep_domxss": capability_input.get("deep_domxss") is True,
         "device_target": bool(run.get("device_target_id")),
         "body_test": hunt_body_input(capability_input),
+        "oob_allowed": bool(policy.get("active_testing") and policy.get("allow_oob_interactions")),
     }
 
 
@@ -945,6 +962,7 @@ def hunt_scanner_dispatch_budgets(
     deep_domxss: bool = False,
     device_target: bool = False,
     body_test: bool = False,
+    oob_allowed: bool = False,
 ) -> tuple[dict[str, int], ...]:
     """The holds a Hunt scanner call may run at, the current one first.
 
@@ -955,7 +973,7 @@ def hunt_scanner_dispatch_budgets(
     """
     current = canonical_hunt_scanner_budget(
         capability_name, budget_profile=budget_profile, deep_domxss=deep_domxss,
-        device_target=device_target, body_test=body_test,
+        device_target=device_target, body_test=body_test, oob_allowed=oob_allowed,
     )
     legacy = canonical_hunt_scanner_budget(capability_name, body_test=body_test)
     holds = [current, legacy]
