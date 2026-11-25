@@ -252,6 +252,46 @@ def test_an_arithmetic_evaluator_without_a_shell_is_not_command_injection():
     assert result.observations[0]["proof_state"] == "not_proven"
 
 
+def _substituting_shell(request, value):
+    """A shell without arithmetic expansion (a restricted or emulated one): after ``;`` it runs
+    ``echo`` and substitutes ``$(echo x)``, and prints ``$((..))`` as it is."""
+    if ";" not in value:
+        return _answer(request, b"PING ok\n")
+    command = value.split(";", 1)[1].rstrip(";")
+    if not command.startswith("echo "):
+        return _answer(request, b"PING ok\n")
+    output = re.sub(r"\$\(echo (\w+)\)", r"\1", command[len("echo "):])
+    return _answer(request, f"PING ok\n{output}\n".encode())
+
+
+def test_command_injection_is_proven_by_a_substitution_joining_a_marker():
+    transport = Recorder(_substituting_shell)
+    result = _run(
+        _request(url="https://app.example.test/render?q=127.0.0.1"), _candidate(), transport,
+        classes=("command_injection",),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "verified"
+    assert proof["technique"] == "substitution_echo_semicolon_repeated"
+    assert proof["proof_contract"] == PROOF_CONTRACTS["command_injection"]
+    # The control carries neither the separator nor the substitution syntax.
+    control = [value for value in transport.values if "(echo " in value and "$(" not in value]
+    assert control and all(";" not in value for value in control)
+
+
+def test_an_endpoint_that_strips_shell_syntax_and_reflects_is_not_command_injection():
+    """Removes ``$(``, ``)`` and separators and reflects the rest: the halves join in the probe,
+    and in the control too, which must stay silent."""
+    def stripper(request, value):
+        return _answer(request, re.sub(r"[;|&`$()]|echo ", "", value).encode())
+
+    result = _run(
+        _request(url="https://app.example.test/render?q=127.0.0.1"), _candidate(),
+        Recorder(stripper), classes=("command_injection",),
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+
+
 def test_blind_command_injection_is_proven_by_a_repeated_delay():
     transport = Recorder(lambda request, value: _answer(
         request, b"ok", elapsed_ms=1100 if "|sleep 1" in value else 15,
