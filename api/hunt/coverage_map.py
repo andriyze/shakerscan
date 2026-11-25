@@ -570,13 +570,18 @@ def http_budget_left(run: Mapping[str, Any]) -> bool:
 
 
 def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, force: bool,
-                 force_reason: str | None, now: datetime | None = None) -> str | None:
+                 force_reason: str | None, now: datetime | None = None,
+                 can_test: bool = True) -> str | None:
     """Why this finish is refused, or None.
 
-    Never refuses a Hunt whose wall or HTTP budget is spent, a budget-exhausted Hunt, one with
-    nothing open, or a forced finish with a reason (the engine's own sweep, not the planner, does
-    the remaining work; a finish while it runs is deferred until it ends, see ``run_service``)."""
+    Never refuses a Hunt that cannot test (``can_test`` false: passive, or its approval revoked
+    or expired; it has no checks to close the open pairs with), a Hunt whose wall or HTTP budget
+    is spent, a budget-exhausted Hunt, one with nothing open, or a forced finish with a reason
+    (the engine's own sweep, not the planner, does the remaining work; a finish while it runs is
+    deferred until it ends, see ``run_service``)."""
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or report is None:
+        return None
+    if not can_test:
         return None
     if force:
         if len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:

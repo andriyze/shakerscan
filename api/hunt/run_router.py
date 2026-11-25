@@ -408,11 +408,13 @@ async def start_hunt(request: Request, response: Response):
     if isinstance(result, Mapping) and result.get("hunt_id"):
         from .lead_seeding import seed_started_hunt
         await seed_started_hunt(result["hunt_id"])
-        # A web Hunt maps its target itself (crawl, content discovery, description and product
-        # probes, templates), in the background, through its own capability calls.
-        from .auto_discovery import start as start_auto_discovery
+        # A web Hunt with active testing authority maps its target itself (crawl, content
+        # discovery, description and product probes, templates), in the background, through its
+        # own capability calls. A passive Hunt keeps its zero authority: the engine adds nothing.
+        from .auto_discovery import start as start_auto_discovery, testing_authority
         from .coverage_map import COVERAGE_TARGET_KINDS
         if (str(result.get("target_kind") or "") in COVERAGE_TARGET_KINDS and isinstance(result, dict)
+                and testing_authority(result)
                 and start_auto_discovery(str(result["hunt_id"])) is not None):
             result["auto_discovery"] = {
                 "started": True,

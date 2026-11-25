@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import importlib
 import logging
@@ -29,7 +30,7 @@ from .hypothesis_release import release_hunt_claims
 from .permission_grants import settle_for_ended_hunt
 from .permission_store import pending_summary
 from .finding_verifications import HUNT_FINDINGS_QUERY
-from .auto_discovery import defer_finish, sweep_running
+from .auto_discovery import defer_finish, stop as stop_engine_work, sweep_running, testing_authority, wait_stopped
 from .coverage_map import (
     COVERAGE_TARGET_KINDS,
     MIN_FORCE_REASON_CHARS,
@@ -57,6 +58,9 @@ from .skills import (
 )
 
 logger = logging.getLogger(__name__)
+# How long a finish waits for the engine's stopped discovery calls to settle (a client's finish
+# call must still answer well within its own timeout).
+ENGINE_STOP_SETTLE_SECONDS = 15.0
 
 try:
     from runtime.hunt_http_exchange_contract import public_capture_references
@@ -893,6 +897,57 @@ class HuntRunService:
             logger.warning("hunt finish: coverage unavailable: %s", type(exc).__name__)
             return None
 
+    async def _can_test(self, connection: Any, row: Mapping[str, Any]) -> bool:
+        """Whether the Hunt can still run checks: active testing with an approval that is neither
+        revoked nor expired. A failed read keeps the policy's answer (it is logged)."""
+        if not testing_authority(row):
+            return False
+        policy = _decode_json(row.get("policy_json"), {})
+        try:
+            async with connection.transaction():  # a savepoint: a failed read is contained
+                approval = await connection.fetchrow(
+                    "SELECT status, revoked_at, expires_at FROM approval_receipts WHERE id=$1::uuid",
+                    str(policy.get("approval_receipt_id")),
+                )
+        except Exception as exc:  # noqa: BLE001 - guidance only; the dispatch checks authority itself
+            logger.warning("hunt finish: approval unreadable: %s", type(exc).__name__)
+            return True
+        if approval is None or approval["status"] != "active" or approval["revoked_at"] is not None:
+            return False
+        expires = approval["expires_at"]
+        return expires is None or expires > datetime.now(timezone.utc)
+
+    async def _stop_engine_work(self, run_uuid: Any) -> None:
+        """Before a finish of a Hunt that can no longer test: stop the engine's own discovery and
+        sweep and give their cancelled calls a bounded moment to settle, so the finish is not held
+        by them. What is still settling after it is named by the finish's in-flight refusal."""
+        hunt_id = str(run_uuid)
+        if not sweep_running(hunt_id):
+            return
+        async with self._pool().acquire() as connection:
+            row = await hunt_run_or_404(connection, hunt_id)
+            if str(row.get("target_kind") or "") not in COVERAGE_TARGET_KINDS:
+                return
+            if await self._can_test(connection, dict(row)):
+                return  # the engine keeps testing; the finish is deferred to it
+        if not stop_engine_work(hunt_id):
+            return
+        deadline = asyncio.get_running_loop().time() + ENGINE_STOP_SETTLE_SECONDS
+        await wait_stopped(hunt_id, timeout=ENGINE_STOP_SETTLE_SECONDS)
+        while asyncio.get_running_loop().time() < deadline:
+            async with self._pool().acquire() as connection:
+                busy = await connection.fetchval(
+                    """SELECT EXISTS(SELECT 1 FROM hunt_actions WHERE hunt_run_id=$1
+                                         AND status IN ('reserved','running'))
+                           OR EXISTS(SELECT 1 FROM budget_reservations
+                                     WHERE owner_kind='hunt' AND owner_id=$1::text
+                                       AND status IN ('reserved','running'))""",
+                    run_uuid,
+                )
+            if not busy:
+                return
+            await asyncio.sleep(0.5)
+
     async def coverage(self, hunt_id: str, *, limit: int = 50, offset: int = 0,
                        class_filter: str | None = None) -> dict[str, Any]:
         """The open coverage of one web Hunt: discovery, endpoints and untested test classes."""
@@ -1613,7 +1668,10 @@ class HuntRunService:
         endpoints with test classes nothing ran) and wall and HTTP budget left is refused (409)
         with what is open, unless ``force`` and a ``force_reason`` are given; the debrief records
         the coverage at finish either way, and the reason when forced. Recording candidates and
-        findings is never affected."""
+        findings is never affected. A Hunt that can no longer test (passive, or its approval
+        revoked or expired) is never refused for open coverage, and the engine's own work, if it
+        still runs, is stopped rather than waited for."""
+        await self._stop_engine_work(_uuid_or_400(hunt_id, "hunt id"))
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 run_uuid = _uuid_or_400(hunt_id, "hunt id")
@@ -1645,8 +1703,9 @@ class HuntRunService:
                         status_code=409,
                         detail=f"Hunt is already {row['status']}; it was not finished again",
                     )
-                if (str(row.get("target_kind") or "") in COVERAGE_TARGET_KINDS
-                        and sweep_running(str(run_uuid))):
+                can_test = (str(row.get("target_kind") or "") in COVERAGE_TARGET_KINDS
+                            and await self._can_test(connection, dict(row)))
+                if can_test and sweep_running(str(run_uuid)):
                     # The engine is still mapping and testing this target itself. The planner's
                     # finish ends the planner's part: its debrief (and reason) is kept and the Hunt
                     # finishes with it when the engine's sweep ends, never earlier.
@@ -1691,7 +1750,8 @@ class HuntRunService:
                                   "until in_flight_actions is 0, then finish again"),
                     )
                 coverage = await self._finish_coverage(connection, dict(row))
-                refusal = finish_guard(dict(row), coverage, force=force, force_reason=force_reason)
+                refusal = finish_guard(dict(row), coverage, force=force, force_reason=force_reason,
+                                       can_test=can_test)
                 if refusal:
                     raise HTTPException(status_code=409, detail=refusal)
                 if coverage is not None:
