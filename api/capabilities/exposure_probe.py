@@ -118,14 +118,27 @@ SENSITIVE_SEED_PATHS: tuple[str, ...] = (
     "/backup.sql",
     "/database.sql",
     "/dump.sql",
-    # Secret-bearing files deployments commonly leave in a web root: a dotenv-style secrets file,
-    # a kubeconfig, an AI coding assistant's MCP configuration (server tokens), and a PHP
-    # application's shipped configuration template.
+)
+# Read besides the list above on the profiles that plan their work to completion (thorough and
+# deep): fast and balanced plans, and what they send, are unchanged. Secret-bearing files
+# deployments commonly leave in a web root: a dotenv-style secrets file, a kubeconfig, an AI
+# coding assistant's MCP configuration (server tokens), and a PHP application's shipped
+# configuration template.
+THOROUGH_SEED_PATHS: tuple[str, ...] = (
     "/secrets.env",
     "/kubeconfig.yaml",
     "/.claude/mcp.json",
     "/config/config.inc.php.dist",
 )
+_THOROUGH_SEED_PROFILES = frozenset({"thorough", "deep"})
+
+
+def seed_paths(profile: Any = None) -> tuple[str, ...]:
+    """The seed list a Scan of ``profile`` reads (a profile name, or a batch action's
+    ``<profile>_batch_v1`` argument)."""
+    if str(profile or "").strip().lower().split("_batch", 1)[0] in _THOROUGH_SEED_PROFILES:
+        return SENSITIVE_SEED_PATHS + THOROUGH_SEED_PATHS
+    return SENSITIVE_SEED_PATHS
 
 
 
@@ -158,7 +171,7 @@ SOFT_404_CONTROL_COUNT = 2
 DIRECTORY_FOLLOW_UP_FLOOR = 10
 
 
-def exposure_first_slice_hold(slice_count: int) -> dict[str, int]:
+def exposure_first_slice_hold(slice_count: int, profile: Any = None) -> dict[str, int]:
     """The reservation the first slice needs beyond its endpoint share.
 
     The seed list is probed once, in the first slice, on top of that slice's
@@ -167,7 +180,7 @@ def exposure_first_slice_hold(slice_count: int) -> dict[str, int]:
     One request and one wall second per seed, the soft-404 controls and the
     directory follow-up floor are held explicitly.
     """
-    seeds = len(SENSITIVE_SEED_PATHS) + GRAPHQL_SEED_PROBE_COUNT + SOFT_404_CONTROL_COUNT
+    seeds = len(seed_paths(profile)) + GRAPHQL_SEED_PROBE_COUNT + SOFT_404_CONTROL_COUNT
     endpoints = max(0, int(slice_count))
     return {
         "http_requests": seeds + endpoints + DIRECTORY_FOLLOW_UP_FLOOR,
@@ -1601,6 +1614,8 @@ __all__ = [
     "EXPOSURE_PROOF_CONTRACTS",
     "SECRET_MATERIAL_CLASSES",
     "SENSITIVE_SEED_PATHS",
+    "THOROUGH_SEED_PATHS",
+    "seed_paths",
     "SOFT_404_CONTROL_COUNT",
     "ExposureSignature",
     "classify_confidential_file",
