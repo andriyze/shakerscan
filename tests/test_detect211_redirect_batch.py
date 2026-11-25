@@ -59,6 +59,11 @@ class _Transport:
         if parts.path == "/go":  # vulnerable: redirects anywhere
             return ReplayTransportResult(status_code=302, connected_address="192.0.2.10", final_url=request.url,
                                          response_headers={"Location": query.get("next", "/")}, response_body=b"", elapsed_ms=2)
+        if parts.path == "/sso":  # an allow-list that only checks the value mentions its own origin
+            value = query.get("return", "")
+            allowed = "https://app.example.test" in value
+            return ReplayTransportResult(status_code=302, connected_address="192.0.2.10", final_url=request.url,
+                                         response_headers={"Location": value if allowed else "/"}, response_body=b"", elapsed_ms=2)
         if parts.path == "/login":  # safe: only same-site paths
             return ReplayTransportResult(status_code=302, connected_address="192.0.2.10", final_url=request.url,
                                          response_headers={"Location": "/home"}, response_body=b"", elapsed_ms=2)
@@ -98,9 +103,12 @@ def test_only_the_redirect_that_follows_the_parameter_is_proven(monkeypatch):
     assert {(urllib.parse.urlsplit(p["url"]).path, p["proof_state"]) for p in proofs} == {
         ("/go", "verified"), ("/login", "not_proven"),
     }
-    # One GET per redirect-named parameter; routes without one are never requested.
-    assert sorted(urllib.parse.urlsplit(url).path for url in transport.sent) == ["/go", "/login"]
+    # One GET per redirect-named parameter, then the three allow-list bypass destinations for the
+    # one that did not redirect to the canary; routes without such a parameter are never requested.
+    assert sorted(urllib.parse.urlsplit(url).path for url in transport.sent) == ["/go"] + ["/login"] * 4
     assert all("shakerscan-redirect-probe.invalid" in urllib.parse.unquote(url) for url in transport.sent)
+    # A bypass probe is extra work on an attempted candidate: it adds no attempt.
+    assert len([item for item in receipt.observations if item.get("kind") == "candidate_attempt"]) == 2
     inapplicable = {item["reason"] for item in receipt.observations if item.get("kind") == "candidate_inapplicable"}
     assert inapplicable == {"no_redirect_parameter"}
     assert receipt.status == "success"
@@ -110,8 +118,32 @@ def test_the_request_ceiling_stops_the_batch_and_resume_finishes_it(monkeypatch)
     receipt, transport, backend, manifest, scan_id = _run(monkeypatch, ROUTES, http=1)
     assert receipt.status == "partial" and len(transport.sent) == 1
     resumed, transport, *_ = _run(monkeypatch, ROUTES, backend=backend, manifest=manifest, scan_id=scan_id)
-    assert len(transport.sent) == 1  # the checkpointed probe is not sent again
+    # The checkpointed probe is not sent again: /login's first probe and its three bypasses.
+    assert [_path(url) for url in transport.sent] == ["/login"] * 4
     assert len([item for item in resumed.observations if item.get("kind") == "open_redirect_proof"]) == 2
+    # Nor are the checkpointed bypass probes, on a third run.
+    again, transport, *_ = _run(monkeypatch, ROUTES, backend=backend, manifest=manifest, scan_id=scan_id)
+    assert transport.sent == []
+    assert len([item for item in again.observations if item.get("kind") == "open_redirect_proof"]) == 2
+
+
+def test_an_allow_list_that_only_looks_for_its_own_address_is_bypassed(monkeypatch):
+    receipt, transport, *_ = _run(monkeypatch, (("/sso", ("return",)), ("/login", ("returnUrl",))))
+    proofs = [item for item in receipt.observations if item.get("kind") == "open_redirect_proof"]
+    verified = [item for item in proofs if item["proof_state"] == "verified"]
+    assert len(verified) == 1 and _path(verified[0]["url"]) == "/sso"
+    assert verified[0]["bypass"] == "own_origin_in_query"
+    assert "shakerscan-redirect-probe.invalid" in verified[0]["location"]
+    # The plain canary first for both, then bypasses: /sso stops at the one that worked.
+    assert sorted(_path(url) for url in transport.sent[:2]) == ["/login", "/sso"]
+    assert [_path(url) for url in transport.sent].count("/sso") == 2
+
+
+def test_bypass_probes_wait_for_every_first_probe_and_never_pass_the_ceiling(monkeypatch):
+    receipt, transport, *_ = _run(monkeypatch, (("/login", ("returnUrl",)), ("/sso", ("return",))), http=3)
+    # Two first probes, then one bypass with the request that is left.
+    assert [_path(url) for url in transport.sent] == ["/login", "/sso", "/login"]
+    assert receipt.budget_consumed["http_requests"] == 3
 
 
 def _path(url):
@@ -166,7 +198,9 @@ def test_a_probe_that_got_no_answer_is_a_gap_not_an_examined_negative(monkeypatc
     receipt, transport, backend, manifest, _ = _run(
         monkeypatch, UNANSWERED_ROUTES, unanswered={"/go": error_code},
     )
-    assert sorted(_path(url) for url in transport.sent) == ["/go", "/login"]
+    # /login answered without redirecting to the canary, so its three bypass destinations follow;
+    # /go got no answer and is not probed further.
+    assert sorted(_path(url) for url in transport.sent) == ["/go"] + ["/login"] * 4
     proofs = {_path(item["url"]): item for item in _kind(receipt, "open_redirect_proof")}
     # The parameter was never tested: inconclusive for that reason, never "not proven".
     assert proofs["/go"]["proof_state"] == "unproven"
@@ -181,10 +215,14 @@ def test_a_probe_that_got_no_answer_is_a_gap_not_an_examined_negative(monkeypatc
     assert attempts["unproven"]["verdict"] == "inconclusive"
     assert attempts["unproven"]["inconclusive_reason"] == reason
     assert attempts["not_proven"]["status"] == "success"
-    # Only the answered probe is checkpointed, so a resumed batch sends the other again.
+    # Only answered probes are checkpointed, so a resumed batch sends the other again: the
+    # answered candidate's own probe, and its three bypass probes, which record no observation.
     checkpoints = backend.attempts["verify.redirect"]
-    assert set(checkpoints) == {attempts["not_proven"]["attempt_id"]}
+    assert attempts["unproven"]["attempt_id"] not in checkpoints
     assert checkpoints[attempts["not_proven"]["attempt_id"]]["proof_state"] == "not_proven"
+    bypasses = [item for key, item in checkpoints.items() if key != attempts["not_proven"]["attempt_id"]]
+    assert len(bypasses) == 3
+    assert all(item["proof_state"] == "not_proven" and not item["observations"] for item in bypasses)
     # Every candidate was attempted, so the batch did not time out; it is partial and says why.
     assert receipt.status == "partial" and receipt.partial is True and receipt.timed_out is False
     assert receipt.errors[0] == stated
