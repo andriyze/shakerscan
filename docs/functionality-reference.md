@@ -229,9 +229,9 @@ operation ID, request/response schema digest, and component-schema digest is che
 `scripts/generate_public_api_contract.py` also generates the six release-critical UI client surfaces
 (Scan, Hunt, credentials, request collections, evidence, and Model Intake) from that same live
 OpenAPI document. `GET /hunts/contract` remains the runtime Hunt policy/budget discovery endpoint.
-The canonical action compiler implements eleven families: `recon`, `nuclei_passive`,
-`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli`, `authz_surface`, `graphql`
-and `recon_active` (`SCAN_V2_FAMILY_NAMES` in `api/scan/contracts.py`). Any other registry family,
+The canonical action compiler implements twelve families: `recon`, `nuclei_passive`,
+`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli`, `authz_surface`, `graphql`,
+`recon_active` and `server_injection` (`SCAN_V2_FAMILY_NAMES` in `api/scan/contracts.py`). Any other registry family,
 including the planned `ssrf`, `lfi`, `rce` and `business_logic`, is rejected rather than accepted as
 a successful no-op. Every family except `recon`, `nuclei_passive` and `sensitive_exposure` requires
 active permission. A Scan that names BOLA is also refused without two distinct credential profiles
@@ -369,10 +369,10 @@ per seed plus the controls and ten listing follow-ups on top of its endpoint sha
 wordlist is 125 entries.
 
 **Family presets and the active default.** The canonical Scan families are `recon`, `nuclei_passive`,
-`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli`, `authz_surface`, `graphql`
-and `recon_active` (`api/scan/contracts.py`), and only these run. A name outside the check registry
-is rejected, a registry family outside the eleven is refused ("families are not implemented by
-canonical Scan"), and a `custom` selection with none of the eleven is refused. `policy.preset`
+`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli`, `authz_surface`, `graphql`,
+`recon_active` and `server_injection` (`api/scan/contracts.py`), and only these run. A name outside
+the check registry is rejected, a registry family outside the twelve is refused ("families are not
+implemented by canonical Scan"), and a `custom` selection with none of the twelve is refused. `policy.preset`
 selects the family set: `passive` (recon, reviewed passive templates, verified exposure checks),
 `standard_active` (passive plus XSS and SQLi; on the `thorough` and `deep` budget profiles also
 `nuclei_active`, the active templates, unless the request ceiling is lowered below 8,000 (twice
@@ -380,7 +380,7 @@ what their sweep holds at admission) or, with state-changing HTTP, the mutation 
 (a quarter above the sweep's 4,000 mutations, under `thorough`'s own 6,000); the floors are
 published as `family_preset_addition_floors` in `GET /scan/contracts`) or `custom` (exactly `include_families`,
 from the
-eleven above). A submission that allows active testing and names no preset resolves to `standard_active`;
+twelve above). A submission that allows active testing and names no preset resolves to `standard_active`;
 one that does not allow it resolves to `passive`. `include_families` is exact only under `custom`:
 with any other preset, named or implied, it adds to that preset, so `active_testing: true` with
 `include_families: ["sensitive_exposure"]` runs the standard active set (XSS and SQLi included);
@@ -489,9 +489,10 @@ contract.
 
 V2 exposes only checks backed by a registered semantic capability and deterministic output/evidence
 contract. The current Scan family surface is intentionally narrower than the historical module
-inventory. A Scan runs its eleven families (§3) and the baseline checks of headers, session cookies,
+inventory. A Scan runs its twelve families (§3) and the baseline checks of headers, session cookies,
 CORS, TLS and DNS. For the checks in this section that means XSS (with the open-redirect probe), SQL
-injection, NoSQL operator injection, two-principal BOLA, function-level authorization, GraphQL
+injection, NoSQL operator injection, server-side injection (template injection, path traversal,
+command injection and XXE, each proven by a repeated differential), two-principal BOLA, function-level authorization, GraphQL
 limits, verified exposure checks, the six reviewed passive Nuclei templates and the opt-in active
 Nuclei pack (a severity-and-tag selection from the pinned, checksum-verified bundle). The modules
 below describe available detector implementations; modules not yet wired to the canonical action

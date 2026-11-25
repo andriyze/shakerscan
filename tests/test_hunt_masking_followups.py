@@ -126,6 +126,8 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/capabilities/browser_login_action.py", "prepare"): "request",
     ("api/capabilities/browser_steps.py", "browser_surface"): "redacted",
     ("api/capabilities/http.py", "_read_bounded_response"): "integrity",
+    ("api/capabilities/injection_verify.py", "_marker"): "request",
+    ("api/capabilities/injection_verify.py", "_numbers"): "request",
     ("api/capabilities/nosqli_verify.py", "execute"): "request",
     # The attempt key of an engine-built probe URL (a manifest route with the canary as the
     # only query value); the same URL is published beside it, so the digest reveals nothing.
