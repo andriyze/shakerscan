@@ -17,6 +17,10 @@ import urllib.parse
 from typing import Any, Mapping, Sequence
 
 NO_REFLECTION = "no_reflection"
+# The canary came back, but in a response no browser renders as a page: a JSON document. Script
+# in it cannot run where it is, so the reflected-XSS tool has nothing to prove there (a value an
+# application later writes into a page is stored or DOM XSS, which this tool does not test).
+NOT_A_PAGE = "response_not_a_page"
 
 
 def new_canary() -> str:
@@ -48,6 +52,19 @@ def has_inputs(url: str, body_request: Mapping[str, Any]) -> bool:
     if body_request.get("body_field_names"):
         return True
     return bool(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query, keep_blank_values=True))
+
+
+def not_a_page(headers: Mapping[str, Any] | None) -> bool:
+    """True when the response declares a JSON media type (``application/json``, ``+json``).
+
+    Only JSON: a browser never renders it as HTML whatever its body holds. Plain text, XML,
+    JavaScript (JSONP) and a missing or unknown type all stay candidates.
+    """
+    for name, value in (headers or {}).items():
+        if str(name).lower() == "content-type":
+            media = str(value).split(";", 1)[0].strip().lower()
+            return media == "application/json" or media.endswith("+json")
+    return False
 
 
 def reflects(status: Any, body: bytes | None, canary: str) -> bool | None:
