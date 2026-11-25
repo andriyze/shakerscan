@@ -147,7 +147,7 @@ def test_triage_records_the_agents_verdicts_and_answers_the_persons_command_for_
     assert done["analyst_verdict"] == "true_positive"
     patch = [c for c in engine.calls if c[0] == "PATCH"]
     assert patch[0][3] == {"analyst_verdict": "true_positive", "notes": "reproduced"}
-    for verdict in ("false_positive", "accepted_risk"):
+    for verdict in ("false_positive", "accepted_risk", "duplicate"):
         engine = Engine()
         answer = call(engine, "shakerscan_finding", action="triage", finding_id=FINDING, verdict=verdict)
         assert answer["status"] == "person_decision_required"
@@ -335,3 +335,20 @@ def test_the_client_forwards_evidence_export_to_the_connected_instance(monkeypat
     monkeypatch.setattr(cli, "load", lambda name: Runtime)
     assert cli.main(["evidence", "export", "--scan-id", SCAN, "--url", "http://127.0.0.1:8080"]) == 0
     assert forwarded == [["--api-url", "http://127.0.0.1:8080", "evidence", "export", "--scan-id", SCAN]]
+
+
+def test_the_dismissing_verdicts_are_the_shared_person_decision_list():
+    from scripts import person_decision_routes
+
+    assert set(tools.PERSON_VERDICTS) == set(person_decision_routes.DISMISSING_VERDICTS)
+    assert not set(tools.AGENT_VERDICTS) & set(person_decision_routes.DISMISSING_VERDICTS)
+
+
+def test_a_write_that_would_record_a_persons_decision_is_refused_before_it_is_sent():
+    engine = Engine()
+    with pytest.raises(mcp.MCPError, match="person decision required") as refused:
+        tools._send(engine, "POST", f"/targets/{TARGET}/authorization", {"approved_by": "agent"})
+    assert refused.value.code == -32010 and engine.calls == []
+    with pytest.raises(mcp.MCPError, match="person decision required"):
+        tools._send(engine, "PATCH", f"/findings/{FINDING}", {"analyst_verdict": "duplicate"})
+    assert engine.calls == []

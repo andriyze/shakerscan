@@ -86,7 +86,8 @@ def catalog_descriptor() -> dict[str, Any]:
         "inputSchema": {
             "type": "object",
             "properties": {
-                "section": {"type": "string", "enum": list(catalog.SECTIONS)},
+                "section": {"type": "string", "enum": list(catalog.SECTIONS),
+                            "description": "what to list (default overview, which says what the others hold)"},
                 "area": {"type": "string", "enum": list(catalog.AREAS), "description": "section=rest: one area"},
                 "search": {"type": "string", "minLength": 1, "maxLength": catalog.MAX_SEARCH,
                            "description": "only rows containing this text"},
@@ -139,6 +140,24 @@ def _q(path: str, **query: Any) -> str:
 
 def _seg(value: str) -> str:
     return urllib.parse.quote(str(value), safe="")
+
+
+def _person_routes() -> Any:
+    try:
+        import person_decision_routes  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        from scripts import person_decision_routes  # type: ignore[no-redef]
+    return person_decision_routes
+
+
+def _send(client: Any, method: str, path: str, body: Any = None) -> dict[str, Any]:
+    """Every write of these tools: refused before it is sent if it would record a person's decision
+    (scripts/person_decision_routes.py, the list `shakerscan api` refuses too)."""
+    encoded = None if body is None else json.dumps(body)
+    refusal = _person_routes().refusal(method, path, encoded, api_url=getattr(client, "base_url", None))
+    if refusal is not None:
+        raise _mcp(client).MCPError(-32010, refusal)
+    return client.request_json(method, path, body) if method != "DELETE" else client.request_json(method, path)
 
 
 def _get(client: Any, path: str, **query: Any) -> dict[str, Any]:
@@ -204,11 +223,54 @@ def _authorize_command(target: Mapping[str, Any], target_id: str) -> str:
     return f"shakerscan targets authorize {target.get('url') or target_id}"
 
 
+# What each argument holds, wherever a tool takes it (a tool's own description wins).
+ARGUMENT_DESCRIPTIONS = {
+    "budget_profile": "budget ceilings: fast, balanced, thorough (or deep for a Scan)",
+    "contract_id": "the access-control contract's id",
+    "credential_profile_ids": "saved credential profiles the Scan signs in with (ids, at most 2)",
+    "device_id": "the connected device's id",
+    "discovery_id": "the discovery run's id",
+    "finding_id": "the finding's id",
+    "frequency": "daily or weekly",
+    "hunt_id": "the Hunt's id",
+    "idempotency_key": "your key for this start: a retry with the same key starts nothing new",
+    "is_active": "false pauses the schedule, true resumes it",
+    "jitter_minutes": "random delay added to each run, 0-1440 minutes",
+    "method": "HTTP method the rule is about (GET, POST, ...)",
+    "name": "a display name",
+    "notes": "your reasoning, recorded with the verdict",
+    "offset": "rows to skip",
+    "path": "URL path the rule is about, e.g. /api/invoices/{id}",
+    "profile_id": "the credential profile's or saved login's id",
+    "reason": "why the authorization is needed (shown to the person)",
+    "retention_class": "only evidence of this retention class",
+    "root_domain": "a registered domain, e.g. example.com",
+    "rule_text": "one short access rule in plain words, e.g. 'a user reads only their own invoices'",
+    "scan_id": "the Scan's id",
+    "schedule_id": "the schedule's id",
+    "schedule_kind": "normal_scan (a passive Scan) or asm_improve",
+    "search": "only rows whose name contains this text",
+    "status": "only rows in this status",
+    "target_id": "the target's id",
+    "time_of_day": "HH:MM in timezone",
+    "timezone": "IANA time zone, e.g. UTC or Europe/Berlin",
+    "url": "the target's URL, e.g. https://app.example.com",
+    "verdict": "the triage verdict",
+    "view": "summary (default), coverage, result or actions",
+}
+
+
+def _described(properties: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value if value.get("description") or key not in ARGUMENT_DESCRIPTIONS
+            else {**value, "description": ARGUMENT_DESCRIPTIONS[key]} for key, value in properties.items()}
+
+
 def _descriptor(name: str, description: str, actions: Mapping[str, tuple[str, ...]], properties: dict[str, Any],
                 annotations: dict[str, bool], api: str) -> dict[str, Any]:
+    action = {"type": "string", "enum": list(actions),
+              "description": "what to do; an argument this action does not take is refused, naming the ones it does"}
     return {"name": name, "description": description,
-            "inputSchema": {"type": "object",
-                            "properties": {"action": {"type": "string", "enum": list(actions)}, **properties},
+            "inputSchema": {"type": "object", "properties": {"action": action, **_described(properties)},
                             "required": ["action"], "additionalProperties": False},
             "annotations": annotations, "_meta": {"shakerscan/api": api, "shakerscan/maturity": "v1"}}
 
@@ -273,7 +335,7 @@ def _scan_start(client: Any, arguments: dict[str, Any]) -> Any:
     key = arguments.get("idempotency_key")
     token = mcp._IDEMPOTENCY_KEY.set(mcp.server_idempotency_key(key)) if key else None
     try:
-        started = client.request_json("POST", "/scans", body)
+        started = _send(client, "POST", "/scans", body)
     finally:
         if token is not None:
             mcp._IDEMPOTENCY_KEY.reset(token)
@@ -303,7 +365,7 @@ def _scan_get(client: Any, arguments: dict[str, Any]) -> Any:
 
 
 def _scan_cancel(client: Any, arguments: dict[str, Any]) -> Any:
-    return client.request_json("POST", f"/scans/{_seg(arguments['scan_id'])}/cancel", {})
+    return _send(client, "POST", f"/scans/{_seg(arguments['scan_id'])}/cancel", {})
 
 
 SCANS = Tool(
@@ -333,8 +395,9 @@ SCANS = Tool(
 
 # --- shakerscan_finding ----------------------------------------------------------------------------
 
-AGENT_VERDICTS = ("needs_review", "true_positive", "duplicate", "retest_needed")
-PERSON_VERDICTS = ("false_positive", "accepted_risk")
+AGENT_VERDICTS = ("needs_review", "true_positive", "retest_needed")
+# The verdicts that dismiss a finding: a person's (one list, scripts/person_decision_routes.py).
+PERSON_VERDICTS = ("false_positive", "accepted_risk", "duplicate")
 
 
 def _finding(client: Any, finding_id: str) -> dict[str, Any]:
@@ -361,7 +424,7 @@ def _finding_triage(client: Any, arguments: dict[str, Any]) -> Any:
             f"{verdict} dismisses the finding: a person's decision. Give the person your evidence and reasoning.",
             finding_id=arguments["finding_id"], recommended_verdict=verdict, notes=arguments.get("notes"))
     body = {"analyst_verdict": verdict, **({"notes": arguments["notes"]} if "notes" in arguments else {})}
-    updated = client.request_json("PATCH", f"/findings/{_seg(arguments['finding_id'])}", body)
+    updated = _send(client, "PATCH", f"/findings/{_seg(arguments['finding_id'])}", body)
     return {"finding_id": arguments["finding_id"], "analyst_verdict": updated.get("analyst_verdict", verdict),
             "status": updated.get("status")}
 
@@ -376,7 +439,7 @@ def _finding_retest(client: Any, arguments: dict[str, Any]) -> Any:
                 "target_authorization", _authorize_command(target, str(target_id)),
                 "A retest sends requests to the target (active testing): it needs the target's standing "
                 "authorization, which only a person grants.", target_id=target_id, finding_id=arguments["finding_id"])
-    queued = client.request_json("POST", f"/findings/{_seg(arguments['finding_id'])}/retest", {"requested_by": "mcp"})
+    queued = _send(client, "POST", f"/findings/{_seg(arguments['finding_id'])}/retest", {"requested_by": "mcp"})
     return {**_pick(queued, ("retest_id", "status", "mode", "finding_id", "finding_type", "operation_id")),
             "follow": "shakerscan_finding action=retests"}
 
@@ -390,8 +453,9 @@ def _finding_retests(client: Any, arguments: dict[str, Any]) -> Any:
 FINDING = Tool(
     "shakerscan_finding",
     "One finding: get (target text under untrusted_data), evidence, retests, retest (needs the target's "
-    "standing authorization), triage. Your verdicts: needs_review, true_positive, duplicate, retest_needed. "
-    "false_positive / accepted_risk are the person's: you get their exact command, nothing changes.",
+    "standing authorization), triage. Your verdicts: needs_review, true_positive, retest_needed. "
+    "false_positive, accepted_risk and duplicate dismiss it, the person's decision: you get their exact command, "
+    "nothing changes.",
     {"finding_id": UUID, "verdict": {"type": "string", "enum": [*AGENT_VERDICTS, *PERSON_VERDICTS]},
      "notes": {"type": "string", "minLength": 1, "maxLength": 4000}, "limit": LIMIT},
     {"get": (("finding_id",), _finding_get), "evidence": (("finding_id",), _finding_evidence),
@@ -420,7 +484,7 @@ def _hunt_list(client: Any, arguments: dict[str, Any]) -> Any:
 
 
 def _hunt_resume(client: Any, arguments: dict[str, Any]) -> Any:
-    resumed = client.request_json("POST", f"/hunts/{_seg(arguments['hunt_id'])}/resume", {})
+    resumed = _send(client, "POST", f"/hunts/{_seg(arguments['hunt_id'])}/resume", {})
     return {**_pick(resumed, ("hunt_id", "id", "status")), "follow": "shakerscan_hunt_get"}
 
 
@@ -458,7 +522,7 @@ def _target_get(client: Any, arguments: dict[str, Any]) -> Any:
 def _target_create(client: Any, arguments: dict[str, Any]) -> Any:
     # Never authorized_by: registering a target is not authorizing it.
     body = {"url": arguments["url"], **({"name": arguments["name"]} if "name" in arguments else {})}
-    created = client.request_json("POST", "/targets", body)
+    created = _send(client, "POST", "/targets", body)
     return {**_pick(created, ("id", "url", "name", "is_active", "authorized_for_active_testing")),
             "authorization": "not granted: active testing needs the person's `shakerscan targets authorize`"}
 
@@ -509,16 +573,16 @@ def _schedule_get(client: Any, arguments: dict[str, Any]) -> Any:
 
 def _schedule_create(client: Any, arguments: dict[str, Any]) -> Any:
     body = {"target_id": arguments["target_id"], **{key: arguments[key] for key in SCHEDULE_FIELDS if key in arguments}}
-    return client.request_json("POST", "/schedules", body)
+    return _send(client, "POST", "/schedules", body)
 
 
 def _schedule_update(client: Any, arguments: dict[str, Any]) -> Any:
     body = {key: arguments[key] for key in (*SCHEDULE_FIELDS, "is_active") if key in arguments}
-    return client.request_json("PATCH", f"/schedules/{_seg(arguments['schedule_id'])}", body)
+    return _send(client, "PATCH", f"/schedules/{_seg(arguments['schedule_id'])}", body)
 
 
 def _schedule_delete(client: Any, arguments: dict[str, Any]) -> Any:
-    return client.request_json("DELETE", f"/schedules/{_seg(arguments['schedule_id'])}")
+    return _send(client, "DELETE", f"/schedules/{_seg(arguments['schedule_id'])}")
 
 
 SCHEDULES = Tool(
@@ -575,7 +639,7 @@ EXPORTS = Tool(
     "large answers are cut to fit and say what was left out.",
     {"finding_id": UUID, "scan_id": UUID, "hunt_id": {"type": "string", "minLength": 1, "maxLength": 128},
      "retention_class": {"type": "string", "enum": ["standard", "short", "audit", "legal_hold", "sensitive"]},
-     "limit": {"type": "integer", "minimum": 1, "maximum": 1000}},
+     "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "evidence objects (default 200)"}},
     {"evidence": (("finding_id", "scan_id", "retention_class", "limit"), _export_evidence),
      "scan": (("scan_id",), _export_scan), "hunt": (("hunt_id",), _export_hunt)},
     _annotations(read_only=True, idempotent=True), "/evidence/export-bundle",
@@ -611,12 +675,12 @@ def _asm_read(view: str) -> Callable[[Any, dict[str, Any]], Any]:
 
 
 def _asm_discovery_start(client: Any, arguments: dict[str, Any]) -> Any:
-    return client.request_json("POST", _q("/discovery", root_domain=arguments["root_domain"]), {})
+    return _send(client, "POST", _q("/discovery", root_domain=arguments["root_domain"]), {})
 
 
 def _asm_recon(client: Any, arguments: dict[str, Any]) -> Any:
     body = {"budget_profile": arguments["budget_profile"]} if "budget_profile" in arguments else {}
-    return client.request_json("POST", f"/targets/{_seg(arguments['target_id'])}/asm/recon", body)
+    return _send(client, "POST", f"/targets/{_seg(arguments['target_id'])}/asm/recon", body)
 
 
 _ASM_TARGET_VIEWS = ("coverage", "endpoints", "diff", "activity", "policy")
@@ -700,7 +764,7 @@ def _ac_read(kind: str) -> Callable[[Any, dict[str, Any]], Any]:
 def _ac_draft(client: Any, arguments: dict[str, Any]) -> Any:
     body = {"rule_text": arguments["rule_text"], "persist_drafts": False,
             **{key: arguments[key] for key in ("method", "path") if key in arguments}}
-    compiled = client.request_json("POST", f"/targets/{_seg(arguments['target_id'])}/invariants/compile", body)
+    compiled = _send(client, "POST", f"/targets/{_seg(arguments['target_id'])}/invariants/compile", body)
     return {**compiled, "saved": False,
             "next": "Show the person these draft contracts. Saving and approving one is the person's decision, in "
                     "the UI (target > Access control); read the outcome with action=contracts."}

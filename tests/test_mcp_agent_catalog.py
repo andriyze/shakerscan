@@ -120,20 +120,20 @@ def test_hunt_permissions_arsenal_and_tools_sections_come_from_the_live_contract
         ("shakerscan_findings", "read"), ("shakerscan_hunt_capability", "destructive")]
 
 
-def test_person_decisions_name_a_way_to_request_and_never_a_tool_that_decides():
+def test_person_decisions_are_the_routes_shakerscan_api_refuses():
+    from scripts import person_decision_routes
+
     answer = catalog(Engine(), section="person_decisions", limit=200)
-    assert answer["total"] == len(agent_catalog.PERSON_DECISIONS)
+    assert answer["total"] == len(person_decision_routes.ROUTES), "one source: scripts/person_decision_routes.py"
     assert "never makes a person's decision" in answer["rule"] and "open-source" in answer["rule"]
-    for row in answer["decisions"]:
-        assert row["request"] and row["outcome"]
-        assert "shakerscan " in row["person"] or "UI" in row["person"], row
     routes = {(method, path) for method, path, _summary in ROUTES}
-    named = {"/hunts/{hunt_id}/permission-requests/{request_id}/decision": "POST",
-             "/targets/{target_id}/authorization": "POST",
-             "/targets/{target_id}/invariants/{contract_id}/approve": "POST",
-             "/hunts/{hunt_id}/budget-amendments": "POST"}
-    for path, method in named.items():
-        assert (method, path) in routes and any(path in row["routes"] for row in answer["decisions"])
+    for row, entry in zip(answer["decisions"], person_decision_routes.ROUTES):
+        assert row["route"].startswith(f"{entry.method} {entry.template}") and row["request"] and row["outcome"]
+        assert "shakerscan " in row["person"] or "UI" in row["person"], row
+        assert (entry.method, entry.template) in routes, "every person route is an engine route"
+    requested = {row["route"].split(" ")[1]: row["request"] for row in answer["decisions"]}
+    assert "request_authorization" in requested["/targets/{target_id}/authorization"]
+    assert "triage" in requested["/findings/{finding_id}"]
 
 
 def test_the_cli_section_lists_every_client_command():
@@ -318,3 +318,9 @@ def test_mcp_remote_refuses_another_origin(tmp_path, monkeypatch, capsys):
     cli.save_profile("https://scanner.example.com", "fixture-token-value")
     assert cli.main(["mcp", "--remote", "https://elsewhere.example/_enterprise/mcp"]) == 2
     assert "connected instance" in capsys.readouterr().err
+
+
+def test_the_connected_instructions_point_at_the_catalog():
+    server = mcp.MCPServer(Engine())
+    answer = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    assert "shakerscan_catalog" in answer["result"]["instructions"]
