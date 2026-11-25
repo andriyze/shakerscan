@@ -75,8 +75,9 @@ def test_unrequested_inventory_is_open_and_listed_before_requested_routes():
     )
     open_routes = {item["endpoint"]: item for item in report["open"]}
     assert set(open_routes) == {"GET /.env", "GET /hub/api/users/{id}", "GET /search"}
-    # Requested: review/exposure closed, authorization still open.
-    assert open_routes["GET /hub/api/users/{id}"]["untested"] == ["object_authz"]
+    # Requested and answered 200: only review closes; authorization and the anonymous-access
+    # judgement stay open until a check, a candidate or a settled angle closes them.
+    assert open_routes["GET /hub/api/users/{id}"]["untested"] == ["object_authz", "unauthenticated_api"]
     assert open_routes["GET /hub/api/users/{id}"]["requested"] is True
     assert open_routes["GET /search"]["untested"][:2] == ["sqli", "xss"]
     assert report["open"][-1]["endpoint"] == "GET /hub/api/users/{id}"  # never-requested first
@@ -179,8 +180,9 @@ def test_finish_guard_refuses_open_coverage_with_time_left_and_names_it():
 
 def test_finish_guard_lets_the_hunt_finish_when_it_should():
     report = build_coverage(actions=[], endpoints=[_endpoint("/search", params="q")])
-    # Forced with a reason; refused when forced without one.
-    assert finish_guard(_run(), report, force=True, force_reason="the person asked to stop now", now=NOW) is None
+    # Forced with a reason after half the open pairs closed; refused when forced without one.
+    assert finish_guard(_run(), report, force=True, force_reason="the person asked to stop now", now=NOW,
+                        closed_since_refusal=2, open_at_refusal=3) is None
     assert "force_reason" in finish_guard(_run(), report, force=True, force_reason=" ", now=NOW)
     # Wall nearly spent, HTTP budget spent, budget exhausted, not a web Hunt, nothing open.
     late = _run(created_at=NOW - timedelta(seconds=5400 - 30))
@@ -195,19 +197,32 @@ def test_finish_guard_lets_the_hunt_finish_when_it_should():
     assert finish_guard(_run(), None, force=False, force_reason=None, now=NOW) is None
 
 
-def test_a_forced_finish_with_many_pairs_open_needs_real_work_first():
+def test_a_forced_finish_needs_open_pairs_closed_first():
     many = build_coverage(actions=[], endpoints=[_endpoint(f"/api/v1/thing{index}/{index}", params="q")
                                                  for index in range(20)])
-    assert many["pairs_open"] > coverage_map.FORCE_MIN_ACTIONS
+    assert many["pairs_open"] > 2 * coverage_map.FORCE_MIN_CLOSED
+    assert coverage_map.force_threshold(many["pairs_open"]) == coverage_map.FORCE_MIN_CLOSED
+    assert coverage_map.force_threshold(6) == 3 and coverage_map.force_threshold(1) == 1
     reason = "the remaining routes are unrelated to the objective"
-    refused = finish_guard(_run(), many, force=True, force_reason=reason, now=NOW, actions_since_refusal=3)
-    assert refused and "3 of the 40 actions" in refused and "kind=coverage" in refused
+    refused = finish_guard(_run(), many, force=True, force_reason=reason, now=NOW,
+                           closed_since_refusal=3, open_at_refusal=many["pairs_open"])
+    assert refused and "3 of the 40 pairs" in refused and "kind=coverage" in refused
     assert finish_guard(_run(), many, force=True, force_reason=reason, now=NOW,
-                        actions_since_refusal=coverage_map.FORCE_MIN_ACTIONS) is None
-    # Spent wall still lets it finish without any work.
+                        closed_since_refusal=40, open_at_refusal=many["pairs_open"]) is None
     late = _run(created_at=NOW - timedelta(seconds=5400 - 30))
-    assert finish_guard(late, many, force=True, force_reason=reason, now=NOW, actions_since_refusal=0) is None
-    # Running discovery holds even a forced finish until it settles.
+    assert finish_guard(late, many, force=True, force_reason=reason, now=NOW) is None
     running = build_coverage(actions=[_action("web.crawl", status="running")], endpoints=[])
     assert "discovery is still running" in finish_guard(
-        _run(), running, force=True, force_reason=reason, now=NOW, actions_since_refusal=100)
+        _run(), running, force=True, force_reason=reason, now=NOW, closed_since_refusal=100, open_at_refusal=0)
+
+
+def test_an_exposure_closes_by_judgement_or_a_refusal_not_by_a_bare_request():
+    endpoints = [_endpoint("/.env"), _endpoint("/backup/db.sql"), _endpoint("/api/v1/keys")]
+    report = build_coverage(actions=[
+        _action("http.request", path="/.env", http_status=200),
+        _action("http.request", path="/backup/db.sql", http_status=403),
+        _action("http.request", path="/api/v1/keys", http_status=200),
+    ], endpoints=endpoints, angles=[{"family": "data_exposure", "locus": {"path": "/api/v1/keys"},
+                                     "status": "negative"}])
+    open_routes = {item["endpoint"]: item["untested"] for item in report["open"]}
+    assert open_routes == {"GET /.env": ["exposure"]}
