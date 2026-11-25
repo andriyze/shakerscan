@@ -4126,6 +4126,15 @@ class DatabaseNeutralScanActionDispatcher:
             }
             for manifest_index, reason in inapplicable
         )
+        def not_testable(manifest_index: int, candidate_id: str, reason: str) -> None:
+            # A candidate this Scan may not test is inapplicable with its reason: left as
+            # unattempted it read as work the budget cut off, a gap no budget closes.
+            skipped.add(manifest_index)
+            observations.append({
+                "kind": "candidate_inapplicable", "family": "nosqli",
+                "candidate_id": candidate_id, "reason": reason,
+            })
+
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
             if manifest_index in skipped:
@@ -4149,6 +4158,7 @@ class DatabaseNeutralScanActionDispatcher:
             if request_mode:
                 request = self._private_requests.get(str(candidate.get("request_ref_id") or ""))
                 if request is None:
+                    not_testable(manifest_index, candidate_id, "private_request_unavailable")
                     continue
                 if (
                     request_class == "confirmed_mutation"
@@ -4157,6 +4167,7 @@ class DatabaseNeutralScanActionDispatcher:
                         and self.policy.approval_receipt_id
                     )
                 ):
+                    not_testable(manifest_index, candidate_id, "state_changing_http_not_allowed")
                     continue
             else:
                 proof_candidate = _candidate_for_synthetic_proof(candidate)
@@ -4169,6 +4180,7 @@ class DatabaseNeutralScanActionDispatcher:
                         and self.policy.approval_receipt_id
                     )
                 ):
+                    not_testable(manifest_index, candidate_id, "state_changing_http_not_allowed")
                     continue
                 request = proof_request_for_candidate(
                     endpoints, manifest, manifest_index,
