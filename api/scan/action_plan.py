@@ -1228,7 +1228,15 @@ class ScanActionPlanCompiler:
         # Read-only (ADR 0001 passive): runs whenever selected, active authority or not.
         sensitive_exposure = enabled("sensitive_exposure")
         nosqli = active and enabled("nosqli")
-        server_injection = active and enabled("server_injection")
+        # Only when named, like recon_active: it is in no preset, so a plan that names no families
+        # (a legacy plan without resolved families enables every family it does not exclude)
+        # never runs it.
+        server_injection = (
+            active and enabled("server_injection")
+            and "server_injection" in set(
+                execution_plan.resolved_families or execution_plan.policy.include_families
+            )
+        )
         authz_surface = active and enabled("authz_surface")
         graphql = active and enabled("graphql")
         # Only an explicit selection: recon_active is in no preset, so a policy that names no
