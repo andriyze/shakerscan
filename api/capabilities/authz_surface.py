@@ -149,6 +149,20 @@ def boundary_established(comparisons: Iterable[RouteComparison]) -> bool:
     return False
 
 
+def gated_route(comparison: RouteComparison) -> int | None:
+    """The status the route answers the principal when it refused every anonymous request (401 or
+    403) and answered the principal the same 2xx every time, both at least twice; else None."""
+    anon, authed = comparison.anonymous, comparison.authenticated
+    if len(anon) < 2 or len(authed) < 2 or any(item.error for item in (*anon, *authed)):
+        return None
+    if any(item.status not in {401, 403} for item in anon):
+        return None
+    statuses = {item.status for item in authed}
+    if len(statuses) != 1 or not _is_success(authed[0]):
+        return None
+    return authed[0].status
+
+
 def bfla_finding(comparison: RouteComparison) -> Mapping[str, object] | None:
     """Return a verified BFLA observation for one route, or ``None``.
 
@@ -238,4 +252,5 @@ __all__ = [
     "RouteComparison",
     "boundary_established",
     "bfla_finding",
+    "gated_route",
 ]
