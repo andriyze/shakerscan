@@ -115,7 +115,7 @@ def test_real_admission_accepts_device_and_reserves_fragility(name, values):
     assert store.run["budget_used_json"]["device_fragility_points"] > 0
 
 
-@pytest.mark.parametrize("busy,daily,message", [(True, 0, "in flight"), (False, 10000, "Daily fragility")])
+@pytest.mark.parametrize("busy,daily,message", [(True, 0, "in flight"), (False, 10**6, "Daily fragility")])
 def test_ordinary_http_obeys_shared_device_limits(busy, daily, message):
     store = DeviceStore()
     store.busy, store.daily = busy, daily

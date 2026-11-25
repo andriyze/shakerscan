@@ -124,11 +124,11 @@ CONTROL_CLEANUP_ADAPTERS = frozenset({
 MAX_ACTIONS_PER_SESSION = 36
 MAX_SCANS_PER_SESSION = 3
 MAX_FRAGILITY_PER_SESSION = 40
-# A single thorough Hunt is allowed up to 500 device-fragility points, so the
-# per-device daily aggregate must sit above that (with headroom for repeat and
-# verification runs) or an authorized thorough run could never start. Per-run
-# fragility limits and pacing still bound each individual run's device wear.
-MAX_FRAGILITY_PER_DEVICE_DAY = 2_000
+# A single thorough Hunt is allowed up to 40,000 device-fragility points (a device target is
+# charged one point per held request), so the per-device daily aggregate must sit above that
+# (with headroom for repeat and verification runs) or an authorized thorough run could never
+# start. Per-run fragility limits and pacing still bound each individual run's device wear.
+MAX_FRAGILITY_PER_DEVICE_DAY = 160_000
 CONFIRMED_SHELL_FRAGILITY_COST = 12
 DEVICE_HTTP_REQUEST_SESSION_LIMIT = 40
 DEVICE_HTTP_REQUEST_MIN_INTERVAL_SECONDS = 1.0

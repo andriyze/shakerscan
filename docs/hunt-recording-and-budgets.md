@@ -142,10 +142,14 @@ even when the run ended early.
 
 The approval-gated call ceiling (`max_active_actions`) is the call ceiling, up from 4 / 20 / 80
 in 2.11.0: any call can need an approval (a session, a principal, a write), and each such call
-still checks its approval receipt, so the count is not what gates it. The safety ceilings keep
-their values: TCP ports (100 / 1,200 / 10,000), state-changing requests (4 / 20 / 80), hosts, UDP
-ports, out-of-band interactions and device fragility, as do the policy switches and approvals
-that turn them on. Records cost no traffic and no wall and get one per call.
+still checks its approval receipt, so the count is not what gates it. The ceilings that are
+not paced (state-changing requests, TCP and UDP ports, hosts, out-of-band interactions and device
+fragility) each belong to an authority a person grants separately, and once it is granted they
+fund the work it was granted for, several times over on `fast`. Their earlier values (4 / 20 / 80
+writes, 100 TCP ports and 20 fragility points on `fast`) refused whole capabilities: a workflow
+or a 25-request replay on `fast`, a mass-assignment proof (12 writes), a top-1000 port scan, and
+on a device target, where every held request is charged as fragility, the crawls and both
+verifiers. The policy switches and approvals that turn the ceilings on are unchanged. Records cost no traffic and no wall and get one per call.
 
 `sqli.verify` reserves 1,800 requests / 1,200 s and `xss.verify` 1,800 requests / 480 s on every
 profile (a device target and a headless `deep_domxss` call keep the registry holds). One sqli.verify
@@ -183,16 +187,16 @@ action waits for a `budget.raise` request the person approves with
 its status: the planner and every action that needs none of that dimension carry on, and once the
 limit has room the action's retry with the same key goes through full admission. A
 dimension whose permission is off is 0 for the Hunt and is refused with
-`budget_dimension_needs_permission`; a raise cannot grant it. The ceiling values are unchanged:
+`budget_dimension_needs_permission`; a raise cannot grant it. The ceiling values:
 
 | Used-up ceiling | `fast` / `balanced` / `thorough` | Refused | Hunt status |
 |---|---|---|---|
-| State-changing requests | 4 / 20 / 80 | `http.request` with a write method, `browser.workflow`, `browser.login_check`, `collections.replay_active`, a mutating `candidate.verify`, any call that reserves writes | keeps running |
-| TCP ports | 100 / 1,200 / 10,000 | `ports.discover`, `service.fingerprint`, `service.nse_check`, `tls.inspect`, `ssh.connect` / `ssh.exec`, `device.service.verify`, a device TCP service verification | keeps running |
-| Hosts | 50 / 500 / 5,000 | `ports.discover`, `service.fingerprint`, `service.nse_check`, `service.snmp.inspect`, `subdomains.discover`, `ssh.connect` / `ssh.exec` | keeps running |
-| UDP ports | 100 / 1,000 / 5,000 | `service.snmp.inspect`, `device.service.verify` and a device UDP service verification | keeps running |
-| Out-of-band interactions | 10 / 50 / 200 | calls that reserve out-of-band callbacks | keeps running |
-| Device fragility | 20 / 100 / 500 | device probes, scans, service checks and SSH, and on a device Hunt the web and network calls that reserve fragility for their traffic | keeps running |
+| State-changing requests | 200 / 1,000 / 5,000 | `http.request` with a write method, `browser.workflow`, `browser.login_check`, `collections.replay_active`, a mutating `candidate.verify`, any call that reserves writes | keeps running |
+| TCP ports | 2,000 / 20,000 / 200,000 | `ports.discover`, `service.fingerprint`, `service.nse_check`, `tls.inspect`, `ssh.connect` / `ssh.exec`, `device.service.verify`, a device TCP service verification | keeps running |
+| Hosts | 100 / 500 / 5,000 | `ports.discover`, `service.fingerprint`, `service.nse_check`, `service.snmp.inspect`, `subdomains.discover`, `ssh.connect` / `ssh.exec` | keeps running |
+| UDP ports | 1,000 / 5,000 / 20,000 | `service.snmp.inspect`, `device.service.verify` and a device UDP service verification | keeps running |
+| Out-of-band interactions | 50 / 200 / 1,000 | calls that reserve out-of-band callbacks | keeps running |
+| Device fragility | 2,000 / 8,000 / 40,000 | device probes, scans, service checks and SSH, and on a device Hunt the web and network calls that reserve fragility for their traffic | keeps running |
 | Duration | 3,600 / 14,400 / 86,400 s | every call that runs | `budget_exhausted` |
 
 Hosts and TCP ports are counted once per Hunt where the action names them. A network action

@@ -135,40 +135,46 @@ class HuntBudget:
 # least one second, so one call, one approval-gated call and one verification per second, a login
 # check's 32 browser actions and 128 requests per second. No paced limit runs out before the clock.
 # Approval-gated calls may use the whole call allowance; each one still checks its approval
-# receipt. Records cost no traffic and no wall and get one per call. The safety ceilings (TCP
-# ports, state-changing requests, device fragility, hosts, UDP ports, out-of-band interactions)
-# are not paced and keep their values.
+# receipt. Records cost no traffic and no wall and get one per call.
+#
+# The remaining ceilings (state-changing requests, TCP and UDP ports, device fragility, hosts,
+# out-of-band interactions) are not paced. Each is an authority a person grants separately, and
+# once granted it has to fund the work it was granted for: every capability several times over
+# on fast, and none of them the first limit a Hunt meets. The earlier values (4, 20 and 80
+# writes; 100 TCP ports on fast; 20 fragility points) refused whole capabilities outright: a
+# workflow or a 25-request replay on fast, a mass-assignment proof (12 writes), a top-1000 port
+# scan, and on a device target, where every held request is charged as fragility, the crawls and
+# both verifiers.
 #
 # Verifier writes are the POST/PUT/PATCH requests a verifier (sqli.verify, xss.verify) sends to
 # test a request body, and its proof's: a ceiling of their own beside the state-changing ceiling,
 # which bounds the planner's own writes. Admission reserves a body test's whole request hold here
 # (1,800, HUNT_THOROUGH_SCANNER_HOLDS) and the action settles its measured requests. Measured: a
 # body test sends 103-286 requests over two fields with sqlmap and up to about 1,300 per field with
-# Dalfox. Each profile funds one body-test hold per planner write it allows (4/20/80 x 1,800):
-# twice the two long actions a Hunt runs at once on fast, and every measured body test settles
+# Dalfox. The profiles fund 16, 64 and 256 body-test holds: every measured body test settles
 # well under its hold, so the ceiling is never the first limit a planned test meets.
 VERIFIER_WRITE_HOLD = 1_800
 HUNT_BUDGET_PROFILES: Mapping[str, HuntBudget] = {
     "fast": HuntBudget(
         max_duration_seconds=3_600, max_capability_calls=3_600, max_http_requests=460_800,
-        max_active_actions=3_600, max_candidates=3_600, max_verifications=3_600, max_tcp_ports=100,
-        max_browser_actions=115_200, max_state_changing_requests=4, max_device_fragility_points=20,
-        max_hosts=50, max_udp_ports=100, max_oob_interactions=10,
-        max_verifier_write_requests=4 * VERIFIER_WRITE_HOLD,
+        max_active_actions=3_600, max_candidates=3_600, max_verifications=3_600, max_tcp_ports=2_000,
+        max_browser_actions=115_200, max_state_changing_requests=200, max_device_fragility_points=2_000,
+        max_hosts=100, max_udp_ports=1_000, max_oob_interactions=50,
+        max_verifier_write_requests=16 * VERIFIER_WRITE_HOLD,
     ),
     "balanced": HuntBudget(
         max_duration_seconds=14_400, max_capability_calls=14_400, max_http_requests=1_843_200,
-        max_active_actions=14_400, max_candidates=14_400, max_verifications=14_400, max_tcp_ports=1_200,
-        max_browser_actions=460_800, max_state_changing_requests=20, max_device_fragility_points=100,
-        max_hosts=500, max_udp_ports=1_000, max_oob_interactions=50,
-        max_verifier_write_requests=20 * VERIFIER_WRITE_HOLD,
+        max_active_actions=14_400, max_candidates=14_400, max_verifications=14_400, max_tcp_ports=20_000,
+        max_browser_actions=460_800, max_state_changing_requests=1_000, max_device_fragility_points=8_000,
+        max_hosts=500, max_udp_ports=5_000, max_oob_interactions=200,
+        max_verifier_write_requests=64 * VERIFIER_WRITE_HOLD,
     ),
     "thorough": HuntBudget(
         max_duration_seconds=86_400, max_capability_calls=86_400, max_http_requests=11_059_200,
-        max_active_actions=86_400, max_candidates=86_400, max_verifications=86_400, max_tcp_ports=10_000,
-        max_browser_actions=2_764_800, max_state_changing_requests=80, max_device_fragility_points=500,
-        max_hosts=5_000, max_udp_ports=5_000, max_oob_interactions=200,
-        max_verifier_write_requests=80 * VERIFIER_WRITE_HOLD,
+        max_active_actions=86_400, max_candidates=86_400, max_verifications=86_400, max_tcp_ports=200_000,
+        max_browser_actions=2_764_800, max_state_changing_requests=5_000, max_device_fragility_points=40_000,
+        max_hosts=5_000, max_udp_ports=20_000, max_oob_interactions=1_000,
+        max_verifier_write_requests=256 * VERIFIER_WRITE_HOLD,
     ),
 }
 
