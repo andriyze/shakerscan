@@ -635,3 +635,41 @@ def test_the_extended_stages_are_off_unless_asked_for():
     assert result.observations[0]["proof_state"] == "not_proven"
     assert len(transport.values) == 14
     assert not any(" AND 1=" in value or " OR " in value for value in transport.values)
+
+
+def test_the_numeric_pair_never_takes_the_timing_stages_requests():
+    """A proof funded for exactly the error, boolean and timing pairs still reaches the timing
+    pairs on a numeric value: time-based injection there was provable before the numeric pair."""
+    class Blind:
+        def __init__(self):
+            self.values = []
+
+        async def send(self, request, **_kwargs):
+            value = _query_value(request, "id")
+            self.values.append(value)
+            return _answer(request, b'{"item":1}', elapsed_ms=1100 if "SLEEP(1)" in value else 12)
+
+    for extended in (False, True):
+        transport = Blind()
+        adapter = SQLiProofAdapter(
+            specification=CAPABILITY_REGISTRY.require("sqli.prove_batch"), target=_target(),
+            request=_request(url="https://app.example.test/item?id=7"),
+            candidate={"candidate_id": "c" * 64, "method": "GET", "parameter_name": "id",
+                       "request_class": "safe_read"},
+            transport=transport,
+            requested_budget={"http_requests": 14, "state_changing_requests": 0,
+                              "tool_wall_seconds": 60},
+            extended=extended,
+        )
+        result = asyncio.run(adapter.execute(
+            heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
+        ))
+        assert result.observations[0]["proof_contract"] == "sqli_time_differential/v1", extended
+        assert len(transport.values) == 14
+
+
+def test_a_hunts_proof_allowance_funds_every_stage():
+    from api.hunt.scanner_sqli_proof import PROOF_REQUESTS
+
+    # Error (4), boolean (4), numeric (4), one delay screen per engine (3), timing (6).
+    assert PROOF_REQUESTS >= 4 + 4 + 4 + 3 + 6

@@ -29,9 +29,10 @@ import json
 from typing import Any, Awaitable, Callable, Mapping
 
 JWT_FORGERY_CONTRACT = "authz_surface_jwt_forgery/v1"  # the proof_contract of every observation
-# The altered signature and its repeat (2), each ``none`` spelling and the repeat of one accepted
-# once (at most 8), the token signed with a guessed secret and its repeat (2).
-MAXIMUM_REQUESTS = 12
+# The request without a bearer (1), the altered signature and its repeat (2), each ``none``
+# spelling and the repeat of one accepted once (at most 8), the token signed with a guessed secret
+# and its repeat (2).
+MAXIMUM_REQUESTS = 13
 MINIMUM_REQUESTS = 2
 _NONE_SPELLINGS = ("none", "None", "NONE", "nOnE")
 _HMAC = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}
@@ -138,23 +139,32 @@ def signed_with(token: str, secret: str) -> str:
     return f"{head}.{body}.{_encode(signature)}"
 
 
-Send = Callable[[str], Awaitable[int | None]]
+# ``send(token)`` requests the route with that bearer token, every other header of the principal
+# unchanged; ``send(None)`` sends those other headers with no Authorization header at all. Both
+# answer ``(status, keyed body digest)``, the status None for no answer.
+Send = Callable[[str | None], Awaitable[tuple[int | None, str]]]
 
 
 async def check_token_handling(
-    token: str, *, send: Send, accepted_status: int, left: Callable[[], int],
+    token: str, *, send: Send, accepted_status: int, accepted_digest: str,
+    left: Callable[[], int],
 ) -> dict[str, Any] | None:
     """A verified observation when the route accepts a token it should refuse, else None.
 
-    ``send`` requests the route with the given token and answers the status (None for no
-    answer). ``accepted_status`` is what the route answers the principal's own token; a forged
-    token is accepted only when it gets exactly that, twice.
+    ``accepted_status`` and ``accepted_digest`` are what the route answers the principal's own
+    token. A forged token is accepted only when it gets exactly that answer, body included,
+    twice: an API that answers a bad token 200 with an error document did not accept it.
+
+    The token must be what authenticates the principal there. The request is first sent with
+    every other header the principal carries (a session cookie, an API key) and no bearer: a
+    route that still answers the principal's page does not read the token, so nothing it does
+    with a forged one says anything about its signature check.
     """
     async def accepted_twice(forged: str) -> tuple[bool, int | None]:
         first = await send(forged)
-        if first != accepted_status or left() < 1:
-            return False, first
-        return (await send(forged)) == accepted_status, first
+        if first != (accepted_status, accepted_digest) or left() < 1:
+            return False, first[0]
+        return (await send(forged)) == (accepted_status, accepted_digest), first[0]
 
     def observation(technique: str, forged_status: int | None, **fields: Any) -> dict[str, Any]:
         return {
@@ -165,7 +175,12 @@ async def check_token_handling(
             **fields,
         }
 
-    if left() < MINIMUM_REQUESTS:
+    if left() < MINIMUM_REQUESTS + 1:
+        return None
+    without_bearer = await send(None)
+    if without_bearer[0] is None or without_bearer == (accepted_status, accepted_digest):
+        # No answer, or the principal's page without the token: the token is not what the
+        # route checks.
         return None
     hit, status = await accepted_twice(altered_signature(token))
     if hit:

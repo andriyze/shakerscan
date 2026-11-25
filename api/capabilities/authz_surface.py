@@ -151,14 +151,15 @@ def boundary_established(comparisons: Iterable[RouteComparison]) -> bool:
 
 def gated_route(comparison: RouteComparison) -> int | None:
     """The status the route answers the principal when it refused every anonymous request (401 or
-    403) and answered the principal the same 2xx every time, both at least twice; else None."""
+    403) and answered the principal the same 2xx with the same body every time, both at least
+    twice; else None. The same body, so a later answer can be compared with it."""
     anon, authed = comparison.anonymous, comparison.authenticated
     if len(anon) < 2 or len(authed) < 2 or any(item.error for item in (*anon, *authed)):
         return None
     if any(item.status not in {401, 403} for item in anon):
         return None
-    statuses = {item.status for item in authed}
-    if len(statuses) != 1 or not _is_success(authed[0]):
+    answers = {(item.status, item.body_sha256) for item in authed}
+    if len(answers) != 1 or not _is_success(authed[0]):
         return None
     return authed[0].status
 

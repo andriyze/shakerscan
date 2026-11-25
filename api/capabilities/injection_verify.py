@@ -122,6 +122,8 @@ _TIME_SCREEN_MS = 750
 # Loopback spellings of the application's own address. A URL parameter that fetches any of them
 # reaches an interface no outside client can.
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+# A reserved name that never resolves (RFC 6761): the control destination no server can fetch.
+_UNRESOLVED_HOST = "shakerscan-probe.invalid"
 _SSRF_CHUNK_BYTES = 32
 _SSRF_MINIMUM_PAGE_BYTES = 256
 # The front page is read for at most this many chunks, spread over its first 200 kB, each searched
@@ -391,8 +393,12 @@ class InjectionVerifyAdapter:
             if probe.error_code or not _contains(probe, echoed[0]):
                 continue
             repeat = await send(self._with(original + wrapper % command(second)))
-            # The same text with no shell syntax around it: nothing may evaluate it.
-            control = await send(self._with(original + command(first).replace("$((", "((")))
+            # The same expansion with no separator before it, inside single quotes: a shell
+            # leaves it as written, so only something that expands arithmetic in plain text (a
+            # template or macro expander, no shell) returns the sum here.
+            control = await send(self._with(
+                f"{original} '{marker}$(({first[0]}+{first[1]})){marker}'"
+            ))
             if (
                 not repeat.error_code and not control.error_code
                 and _contains(repeat, echoed[1]) and not _contains(control, echoed[0])
@@ -440,7 +446,10 @@ class InjectionVerifyAdapter:
             screen = await send(delayed)
             if screen.error_code or screen.elapsed_ms - quiet_ms < _TIME_SCREEN_MS:
                 continue
-            control_request = self._with(original)
+            # The control is the same payload with no delay, not the unchanged value: an
+            # endpoint that is slow for any unusual input (a failed name lookup, a validation
+            # path) is as slow for ``sleep 0`` and shows no difference.
+            control_request = self._with(original + wrapper % "sleep 0")
             pairs = [(await send(control_request), await send(delayed)) for _ in range(3)]
             control_ms = sorted(pair[0].elapsed_ms for pair in pairs)
             payload_ms = sorted(pair[1].elapsed_ms for pair in pairs)
@@ -563,7 +572,7 @@ class InjectionVerifyAdapter:
             if left() < 3:
                 break
             for scheme in dict.fromkeys((parts.scheme, "http")):
-                if left() < 3:
+                if left() < 4:
                     break
                 loopback = f"{scheme}://{host}:{port}"
                 probe = await send(self._with(loopback + "/"))
@@ -573,9 +582,12 @@ class InjectionVerifyAdapter:
                 # The same address, a page that does not exist: an application that answers any
                 # URL with its front page (a catch-all route) is not fetching what was named.
                 control = await send(self._with(loopback + missing))
+                # The same path on a host that does not resolve: an application that renders its
+                # own route from the URL's path, with no request, shows the front page here too.
+                unresolved = await send(self._with(f"{scheme}://{_UNRESOLVED_HOST}:{port}/"))
                 if (
-                    not repeat.error_code and not control.error_code
-                    and shown(repeat) >= 3 and shown(control) == 0
+                    not repeat.error_code and not control.error_code and not unresolved.error_code
+                    and shown(repeat) >= 3 and shown(control) == 0 and shown(unresolved) == 0
                 ):
                     return self._observation(
                         "ssrf", proof_contract=PROOF_CONTRACTS["ssrf"],

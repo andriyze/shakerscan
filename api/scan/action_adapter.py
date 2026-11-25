@@ -4380,6 +4380,25 @@ class DatabaseNeutralScanActionDispatcher:
                 "candidate_id": str(candidate.get("candidate_id") or ""), "reason": reason,
             })
 
+        async def failed_attempt(attempt_id: str, candidate_id: str, exc: Exception) -> None:
+            nonlocal attempted
+            reason = f"candidate_request_invalid:{type(exc).__name__}"
+            head = {
+                "kind": "candidate_attempt", "attempt_id": attempt_id,
+                "candidate_id": candidate_id, "family": "server_injection",
+                "status": "failed", "proof_state": "not_proven", "budget_consumed": {},
+            }
+            observations.append(head)
+            errors.append(reason)
+            attempt_statuses.append({"status": "failed", "timed_out": False})
+            attempted += 1
+            if not self.cancelled():
+                await checkpoint_attempt(action.action_id, {
+                    "attempt_id": attempt_id, "candidate_id": candidate_id, "status": "failed",
+                    "timed_out": False, "budget_consumed": {}, "observations": (head,),
+                    "errors": (reason,), "proof_state": "not_proven",
+                })
+
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
             # A fragment never reaches the server.
@@ -4402,25 +4421,34 @@ class DatabaseNeutralScanActionDispatcher:
             if self.cancelled():
                 break
             proof_candidate = dict(candidate)
+            # A candidate this Scan cannot test is recorded as inapplicable with its reason: left
+            # as merely unattempted it read as work the budget cut off, a gap no budget closes.
             if request_mode:
                 request = self._private_requests.get(str(candidate.get("request_ref_id") or ""))
                 if request is None:
+                    inapplicable(manifest_index, candidate, "private_request_unavailable")
                     continue
                 if request.method not in {"GET", "HEAD", "OPTIONS"} and not may_write:
+                    inapplicable(manifest_index, candidate, "state_changing_http_not_allowed")
                     continue
             else:
                 proof_candidate = _candidate_for_synthetic_proof(candidate)
                 # A body candidate mutates, so it needs the authority a private request needs.
                 if candidate.get("body_field_names") and not may_write:
+                    inapplicable(manifest_index, candidate, "state_changing_http_not_allowed")
                     continue
-                request = proof_request_for_candidate(
-                    endpoints, manifest, manifest_index,
-                    request_id=f"candidate:{candidate_id}",
-                    ordinal=manifest_index,
-                    name="canonical injection candidate",
-                    headers=tuple(primary.headers().items()),
-                    authenticated=primary.authenticated,
-                )
+                try:
+                    request = proof_request_for_candidate(
+                        endpoints, manifest, manifest_index,
+                        request_id=f"candidate:{candidate_id}",
+                        ordinal=manifest_index,
+                        name="canonical injection candidate",
+                        headers=tuple(primary.headers().items()),
+                        authenticated=primary.authenticated,
+                    )
+                except (ScanWorkManifestError, KeyError, TypeError, ValueError) as exc:
+                    await failed_attempt(attempt_id, candidate_id, exc)
+                    continue
             # The credential profile's own sign-in endpoint receives a paced, counted probe set
             # from the checks written for it; this verifier sends it nothing.
             if sign_in_checks.endpoint(request.url, request.method) is not None:
@@ -4438,12 +4466,18 @@ class DatabaseNeutralScanActionDispatcher:
             if sub_budget.get("http_requests", 0) < INJECTION_MINIMUM_REQUESTS:
                 break
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
-            adapter = InjectionVerifyAdapter(
-                specification=specification, target=self.target, request=request,
-                candidate=proof_candidate,
-                transport=self._scan_replay_transport(action, private=True),
-                requested_budget=sub_budget,
-            )
+            # One candidate must never fail the batch: a request that does not match its
+            # candidate is that candidate's failed attempt, and the rest are still tested.
+            try:
+                adapter = InjectionVerifyAdapter(
+                    specification=specification, target=self.target, request=request,
+                    candidate=proof_candidate,
+                    transport=self._scan_replay_transport(action, private=True),
+                    requested_budget=sub_budget,
+                )
+            except ValueError as exc:
+                await failed_attempt(attempt_id, candidate_id, exc)
+                continue
             result = await CapabilityExecutor().execute(
                 CapabilityExecutionContext(
                     specification=specification, target=self.target,
@@ -4718,22 +4752,28 @@ class DatabaseNeutralScanActionDispatcher:
                 observations.extend(prior_token.get("observations") or ())
             elif (
                 gated is not None and not self.cancelled()
-                and http_ceiling - consumed["http_requests"] >= jwt_forgery.MINIMUM_REQUESTS
+                and http_ceiling - consumed["http_requests"] > jwt_forgery.MINIMUM_REQUESTS
             ):
                 gated_comparison, gated_status = gated
                 sent_before = consumed["http_requests"]
 
-                async def send_token(forged: str) -> int | None:
+                async def send_token(forged: str | None) -> tuple[int | None, str]:
+                    # Every other header the principal carries stays; None drops the bearer.
                     nonlocal ordinal
                     ordinal += 1
                     result = await send(gated_comparison.url, tuple(
                         (name, f"Bearer {forged}" if str(name).lower() == "authorization" else value)
                         for name, value in primary_headers
+                        if forged is not None or str(name).lower() != "authorization"
                     ), ordinal)
-                    return None if result.error_code else result.status_code
+                    return (
+                        None if result.error_code else result.status_code,
+                        keyed_body_digest(result.response_body),
+                    )
 
                 token_proof = await jwt_forgery.check_token_handling(
                     token, send=send_token, accepted_status=int(gated_status),
+                    accepted_digest=gated_comparison.authenticated[0].body_sha256,
                     left=lambda: http_ceiling - consumed["http_requests"],
                 )
                 if token_proof is not None:

@@ -403,9 +403,10 @@ class SQLiProofAdapter:
                     proof_contract = "sqli_boolean_differential/v1"
                     technique = "boolean_pair_repeated"
                     proof_pairs = boolean_pairs
-                # A delay payload the external verifier supplied for this candidate keeps the six
-                # requests its confirmation needs: the pairs below are tried with what is left.
-                held = 6 if self.candidate.get("time_payload") else 0
+                # The timing stage always keeps its six requests: it proved blind injection
+                # before the numeric pair existed, and a Hunt's proof reservation was once
+                # exactly the error, boolean and timing pairs.
+                held = 6
                 if (
                     proof_contract is None and self.extended and original.isdigit()
                     and budget - attempted >= 4 + held
