@@ -19,6 +19,12 @@ check never runs twice):
 4. **Injection verifiers**: ``sqli.verify`` then ``xss.verify`` on every endpoint parameter (query
    parameters; body fields when state-changing HTTP is allowed). They record proven findings
    themselves.
+5. **Product templates**: for every product discovery recognised (``products``), its own templates
+   from the pinned bundle (``templates.scan`` with ``product``; ``runtime/product_templates.py``),
+   at the root and at the path the product answered under. The read-only checks run right after
+   the reads; the state-changing ones (non-GET and exploit-class templates) after the default
+   credentials, when the Hunt may send writes. Each template match becomes a candidate citing the
+   templates.scan action; an exposure match is handed to ``candidate.verify``.
 
 Only checks a deterministic verifier settles run here; everything else stays on the coverage
 report for the planner. A check the Hunt may not run (not in its capabilities, refused by the
@@ -33,6 +39,12 @@ import json
 import re
 import time
 from typing import Any
+import urllib.parse
+
+try:
+    from runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
 
 KEY_PREFIX = "auto-sweep"
 # Engine checks at once: leaves the planner a long slot (agent_job_concurrency gives a Hunt two
@@ -162,6 +174,7 @@ class Sweep:
         self.state = state
         self._live = live
         self.counts: dict[str, int] = {}
+        self.product_checks_run: set[str] = set()
         self.tested: set[tuple[str, str]] = set()  # pairs a sweep check ran on
         self.considered: set[tuple[str, str]] = set()  # pairs a round has looked at (never repeated)
         self.logins: dict[str, tuple[str, str, str, bool]] = {}
@@ -200,7 +213,7 @@ class Sweep:
         self._count(capability)
         return result
 
-    async def _candidate_and_verify(self, values: Mapping[str, Any]) -> None:
+    async def _candidate_and_verify(self, values: Mapping[str, Any], *, verify: bool = True) -> None:
         try:
             recorded = await self._create(values)
         except Exception as exc:  # noqa: BLE001 - a refused candidate is named, never fatal
@@ -211,6 +224,8 @@ class Sweep:
         if not candidate_id:
             return
         self._count("candidates")
+        if not verify:
+            return
         await self._safe("candidate.verify", {"candidate_id": candidate_id},
                          sweep_key("verify", candidate_id))
 
@@ -221,9 +236,14 @@ class Sweep:
         allowed = {str(name) for name in policy.get("allowed_capabilities") or ()}
         writes = bool(policy.get("allow_state_changing_http"))
         slots = _signed_in_slots(run)
+        templates = ("templates.scan" in allowed and bool(policy.get("active_testing"))
+                     and bool(policy.get("approval_receipt_id")))
         self.state["sweep"] = "running"
         rounds = 0
         try:
+            if templates:
+                # The products discovery recognised are known before the first round.
+                await self._product_templates("read_only")
             while rounds < MAX_ROUNDS:
                 current = report if (rounds == 0 and report is not None) else (
                     await load_report() if load_report is not None else None)
@@ -242,6 +262,8 @@ class Sweep:
                     found += await self._javascript(items)
                 if "http.request" in allowed and writes:
                     await self._default_credentials()
+                if templates and writes and "state_changing" not in self.product_checks_run:
+                    await self._product_templates("state_changing")
                 if "authz.verify" in allowed and {"primary", "secondary"} <= set(slots):
                     await self._function_authz(fresh)
                 await self._injection(fresh, allowed=allowed, writes=writes, slots=slots)
@@ -266,6 +288,8 @@ class Sweep:
                 self._stats()
                 if load_report is None:
                     break
+            if templates and writes and "state_changing" not in self.product_checks_run:
+                await self._product_templates("state_changing")
             self.state["sweep"] = "done"
         except asyncio.CancelledError:
             self.state["sweep"] = "stopped"
@@ -380,6 +404,36 @@ class Sweep:
                     })
                     break
 
+    async def _product_templates(self, checks: str) -> None:
+        """Run each recognised product's own templates; every match becomes a candidate."""
+        self.product_checks_run.add(checks)
+        paths = self.state.get("product_paths") if isinstance(self.state.get("product_paths"), Mapping) else {}
+        seen: set[tuple[str, str]] = set()
+        for product in [str(key) for key in self.state.get("products") or () if key in PRODUCT_TEMPLATE_TAGS]:
+            hits = [str(path) for path in paths.get(product) or ()]
+            bases = ["/", *(mount for mount in PRODUCT_MOUNTS.get(product, ())
+                            if any(hit.startswith(mount) for hit in hits))]
+            for base in bases:
+                for window in range(product_window_count(product, checks)):
+                    values: dict[str, Any] = {"product": product, "product_checks": checks,
+                                              "product_window": window}
+                    if base != "/":
+                        values["path"] = base
+                    result = await self._safe("templates.scan", values,
+                                              sweep_key("product", product, checks, base, str(window)))
+                    action = _action_id(result)
+                    for match in template_matches(result):
+                        candidate = product_candidate(product, checks, match, action)
+                        if candidate is None:
+                            continue
+                        identity = (str(match.get("template_id")), candidate["locus"]["path"])
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
+                        self._count("product_template_matches")
+                        # Only an exposure has a verifier that settles it from an anonymous read.
+                        await self._candidate_and_verify(candidate, verify=candidate["family"] == "data_exposure")
+
     async def _function_authz(self, items: Sequence[Mapping[str, Any]]) -> None:
         routes = []
         for item in items:
@@ -426,6 +480,65 @@ class Sweep:
         await asyncio.gather(*(one(job) for job in jobs))
 
 
+# Template tags that make a match an exposure ``candidate.verify`` can settle (a sensitive value
+# an anonymous read returns), a code-execution or file-read claim, or a bare detection.
+_EXPOSURE_TAGS = frozenset({"exposure", "disclosure", "config", "token", "secret", "secrets", "logs",
+                            "debug", "backup", "files", "listing"})
+_EXECUTION_TAGS = frozenset({"rce", "cmdi", "code-injection", "injection", "deserialization", "ssti"})
+_FILE_READ_TAGS = frozenset({"lfi", "pathtraversal", "path-traversal", "traversal"})
+_DETECTION_TAGS = frozenset({"detect", "tech", "panel"})
+_FINDING_TAGS = frozenset({"exposure", "misconfig", "unauth", "vuln", "cve", "auth-bypass", "disclosure"})
+_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
+
+
+def template_matches(result: Any) -> list[Mapping[str, Any]]:
+    """The template matches a ``templates.scan`` call answered with."""
+    if not isinstance(result, Mapping):
+        return []
+    sources = [result.get("observations"), (result.get("action_result") or {}).get("observations")
+               if isinstance(result.get("action_result"), Mapping) else None]
+    return [item for source in sources for item in source or ()
+            if isinstance(item, Mapping) and item.get("kind") == "template_match" and item.get("matched_at")]
+
+
+def product_candidate(product: str, checks: str, match: Mapping[str, Any],
+                      action: str | None) -> dict[str, Any] | None:
+    """The candidate a product template match records, or None (a bare detection, no action)."""
+    template_id = str(match.get("template_id") or "")
+    try:
+        parsed = urllib.parse.urlsplit(str(match.get("matched_at") or ""))
+    except ValueError:
+        return None
+    path = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+    tags = frozenset(str(tag).lower() for tag in match.get("tags") or ())
+    severity = str(match.get("severity") or "info").lower()
+    if not template_id or not action or not path.startswith("/"):
+        return None
+    if severity == "info" and tags & _DETECTION_TAGS and not tags & _FINDING_TAGS:
+        return None
+    name = str(match.get("name") or template_id)[:200]
+    if tags & _EXECUTION_TAGS:
+        family = "command_injection"
+    elif tags & _FILE_READ_TAGS:
+        family = "path_traversal"
+    elif tags & _EXPOSURE_TAGS and checks == "read_only":
+        family = "data_exposure"
+    else:
+        family = "security_misconfiguration"
+    locus: dict[str, Any] = {"path": path}
+    if checks == "read_only":
+        locus["method"] = "GET"
+    return {
+        "family": family,
+        "title": f"{name} ({template_id})"[:300],
+        "claim": (f"The {product} template {template_id} matched {path} (engine template sweep of a "
+                  "recognised product; the match is the template's own matcher, not yet re-executed proof)."),
+        "severity": severity if severity in _SEVERITIES else "info",
+        "locus": locus,
+        "evidence_refs": [f"action:{action}"],
+    }
+
+
 def _json(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         try:
@@ -460,4 +573,5 @@ def _two_principals(run: Mapping[str, Any]) -> bool:
     return {"primary", "secondary"} <= slots
 
 
-__all__ = ["KEY_PREFIX", "Refused", "Sweep", "concrete", "exposure_signal", "login_form", "sweep_key"]
+__all__ = ["KEY_PREFIX", "Refused", "Sweep", "concrete", "exposure_signal", "login_form", "product_candidate",
+           "sweep_key", "template_matches"]
