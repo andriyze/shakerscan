@@ -48,6 +48,7 @@ COVERAGE_TARGET_KINDS = frozenset({"web", "api"})
 SETTING = "SHAKERSCAN_HUNT_AUTO_DISCOVERY"
 KEY_PREFIX = "auto-discovery"
 CONTENT_WORDLISTS = ("corporate", "api", "admin")
+SIGNED_IN_WORDLISTS = ("corporate", "api")
 MAX_SIGNED_IN_CRAWLS = 2
 MAX_PROBES = 160
 # A probe answer within this share of the control's length (same status) is the control's page.
@@ -212,7 +213,8 @@ def probe_paths() -> tuple[str, ...]:
 
 
 _STEP_NAMES = ("crawl", *(f"content:{name}" for name in CONTENT_WORDLISTS), "crawl:primary",
-               "crawl:secondary", "templates", "probe:control")
+               "crawl:secondary", "templates", "probe:control", "browser_crawl",
+               *(f"content:{name}:{slot}" for name in SIGNED_IN_WORDLISTS for slot in ("primary", "secondary")))
 _PROBE_DIGESTS = frozenset(key_digest(_probe_key(path)) for path in probe_paths()) | {
     key_digest(step_key(name)) for name in _STEP_NAMES}
 
@@ -300,6 +302,14 @@ def plan_steps(run: Mapping[str, Any]) -> tuple[list[Step], list[str]]:
     if "web.crawl" in allowed:
         steps.extend(Step(f"crawl:{slot}", "web.crawl", {"as_principal": slot})
                      for slot in signed_in_slots(run))
+    if "web.content_discover" in allowed:
+        # What only a signed-in role sees: content discovery as each selected principal.
+        steps.extend(Step(f"content:{name}:{slot}", "web.content_discover",
+                          {"wordlist": name, "as_principal": slot})
+                     for slot in signed_in_slots(run) for name in SIGNED_IN_WORDLISTS)
+    if "web.browser_crawl" in allowed:
+        # The routes the application's own scripts call at runtime.
+        steps.append(Step("browser_crawl", "web.browser_crawl"))
     if "templates.scan" in allowed and policy.get("active_testing") and policy.get("approval_receipt_id"):
         steps.append(Step("templates", "templates.scan"))
     elif "templates.scan" in allowed:
@@ -507,8 +517,16 @@ class DiscoveryRunner:
         create = self._create_candidate
         sweep = Sweep(call=call, create_candidate=lambda values: create(self.hunt_id, values),
                       state=self.state, live=live)
+        target_id = str(run.get("target_id") or "")
+
+        async def reload() -> Mapping[str, Any] | None:
+            return await self._load_report(self.hunt_id)
+
+        async def record(worklist: list[str]) -> Any:
+            return await self._record(target_id, worklist, "hunt_sweep") if target_id else 0
+
         try:
-            await sweep.run(run, report)
+            await sweep.run(run, report, load_report=reload, record=record)
         except asyncio.CancelledError:
             if self.state.get("sweep") != "stopped":
                 raise

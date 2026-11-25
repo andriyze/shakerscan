@@ -60,7 +60,9 @@ def test_plan_runs_mapping_signed_in_crawls_and_templates_only_with_authority():
     steps, skipped = plan_steps(_run())
     assert [step.name for step in steps] == [
         "crawl", "content:corporate", "content:api", "content:admin", "crawl:primary", "crawl:secondary",
-        "templates"]
+        "content:corporate:primary", "content:api:primary", "content:corporate:secondary",
+        "content:api:secondary", "templates"]
+    assert steps[6].input == {"wordlist": "corporate", "as_principal": "primary"}
     assert steps[4].input == {"as_principal": "primary"} and steps[1].input == {"wordlist": "corporate"}
     assert all(step.key.startswith("auto-discovery:") for step in steps) and not skipped
     steps, skipped = plan_steps(_run(approval=False))
@@ -154,7 +156,7 @@ def test_runner_maps_probes_products_and_a_small_api_description():
     assert "GET /api/version" not in worklist
     long_steps = [cap for cap, _values, _key in fake.calls if cap != "http.request"]
     assert long_steps == ["web.crawl", "web.content_discover", "web.content_discover", "web.content_discover",
-                          "web.crawl", "web.crawl", "templates.scan"]
+                          "web.crawl", "web.crawl", *["web.content_discover"] * 4, "templates.scan"]
     assert state["running"] is False and state["probes"] == "done" and state["crawl"] == "done"
     assert len(http_calls) <= auto_discovery.MAX_PROBES
     assert {key_digest(key) for cap, _v, key in fake.calls if cap == "http.request"} <= probe_key_digests()
