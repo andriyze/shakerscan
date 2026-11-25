@@ -427,6 +427,9 @@ def test_an_action_records_its_selected_credentials_and_refuses_a_revoked_grant(
     assert [slot for slot, _ in action_credential_references("authz.verify", authz, context)] == [
         "primary", "secondary"]
     assert action_credential_references("http.request", {"method": "GET"}, context) == []
+    # request.verify sends what http.request would, as the same identity, under its allowance.
+    assert [slot for slot, _ in action_credential_references(
+        "request.verify", {"check": "cors", "path": "/", "as_principal": "primary"}, context)] == ["primary"]
 
     uses = asyncio.run(admit_action_credentials(
         AttachmentConn({SHARED_CAROL: 1, OWN_ALICE: 1}), run=run, capability="http.request",

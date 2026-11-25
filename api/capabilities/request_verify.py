@@ -776,26 +776,24 @@ class RequestVerifier:
             return self.observation(not_proven_reason="no_bearer_jwt")
         if not isinstance(baseline.status_code, int) or not 200 <= baseline.status_code < 300:
             return self.observation(not_proven_reason="principal_refused", original_status=baseline.status_code)
-        if self.left() < 1:
-            return self.observation(inconclusive_reason="budget")
-        anonymous = await self.send(_with_header(self.request, "Authorization", None))
-        if anonymous.status_code == baseline.status_code:
-            # The route answers without the token, so accepting a forged one shows nothing.
-            return self.observation(not_proven_reason="route_answers_anonymously")
 
-        async def send(forged: str) -> int | None:
-            result = await self.send(_with_header(self.request, "Authorization", f"Bearer {forged}"))
-            return result.status_code
+        async def send(forged: str | None) -> tuple[int | None, str]:
+            # The principal's other headers stay; None sends the request without the bearer.
+            result = await self.send(_with_header(
+                self.request, "Authorization", None if forged is None else f"Bearer {forged}"))
+            return (None if result.error_code else result.status_code,
+                    keyed_body_digest(result.response_body))
 
         proof = await jwt_forgery.check_token_handling(
-            token, send=send, accepted_status=int(baseline.status_code), left=self.left,
+            token, send=send, accepted_status=int(baseline.status_code),
+            accepted_digest=keyed_body_digest(baseline.response_body), left=self.left,
         )
         if not proof:
             return self.observation()
         return self.observation(**{
             key: value for key, value in proof.items()
             if key not in {"kind", "proof_state", "finding_verdict"}
-        }, anonymous_status=anonymous.status_code)
+        })
 
 
 class RequestVerifyAdapter:
