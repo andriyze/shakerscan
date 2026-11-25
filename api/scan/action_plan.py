@@ -1691,7 +1691,9 @@ class ScanActionPlanCompiler:
                     and int(raw_slice.get("start") or 0) == 0
                 ):
                     # The first slice also reads the whole seed list; hold it explicitly.
-                    for name, amount in exposure_first_slice_hold(slice_count).items():
+                    for name, amount in exposure_first_slice_hold(
+                        slice_count, execution_plan.budget_profile,
+                    ).items():
                         budget[name] = max(int(budget.get(name, 0)), amount)
                 if (
                     blueprint.capability_name == "graphql.verify_batch"

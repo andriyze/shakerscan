@@ -87,7 +87,7 @@ try:
         EXPOSURE_PROBE_MIN_START_SECONDS,
         exposure_probe_timeout,
         graphql_seed_probes,
-        SENSITIVE_SEED_PATHS,
+        seed_paths as exposure_seed_paths,
         SOFT_404_CONTROL_COUNT,
         EXPOSURE_PROBE_PARSER_VERSION,
         is_never_requested,
@@ -187,7 +187,7 @@ except (ImportError, ModuleNotFoundError):
         EXPOSURE_PROBE_MIN_START_SECONDS,
         exposure_probe_timeout,
         graphql_seed_probes,
-        SENSITIVE_SEED_PATHS,
+        seed_paths as exposure_seed_paths,
         SOFT_404_CONTROL_COUNT,
         EXPOSURE_PROBE_PARSER_VERSION,
         is_never_requested,
@@ -3237,9 +3237,10 @@ class DatabaseNeutralScanActionDispatcher:
         # Request headers of the probes that need them (the fixed GraphQL reads).
         probe_headers: dict[str, tuple[tuple[str, str], ...]] = {}
         graphql_seeds = graphql_seed_probes(base_origin)
+        seed_list = exposure_seed_paths(action.capability_args.get("profile"))
         if start == 0:
             probes.extend(
-                (f"{base_origin}{path}", "seed_path") for path in SENSITIVE_SEED_PATHS
+                (f"{base_origin}{path}", "seed_path") for path in seed_list
             )
             for url, headers in graphql_seeds:
                 probes.append((url, "graphql_seed"))
@@ -3247,7 +3248,7 @@ class DatabaseNeutralScanActionDispatcher:
         # Content discovery requests the same curated paths, so a seed that answered
         # is also a discovered endpoint; probing it twice would spend a request on a
         # body this batch has already classified.
-        seed_urls = {f"{base_origin}{path}" for path in SENSITIVE_SEED_PATHS}
+        seed_urls = {f"{base_origin}{path}" for path in seed_list}
         seed_urls.update(url for url, _headers in graphql_seeds)
         window = endpoints.entries[start:min(len(endpoints.entries), start + count)]
         # A route seen with several bodies is an endpoint entry per body, all at one URL: the URL

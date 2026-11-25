@@ -1,7 +1,9 @@
 """Secret-bearing deployment files are probed seeds, and their usual content is proven."""
 import pytest
 
-from capabilities.exposure_probe import SENSITIVE_SEED_PATHS, classify_exposure
+from capabilities.exposure_probe import (
+    SENSITIVE_SEED_PATHS, classify_exposure, exposure_first_slice_hold, seed_paths,
+)
 
 SEEDS = ("/secrets.env", "/kubeconfig.yaml", "/.claude/mcp.json", "/config/config.inc.php.dist")
 
@@ -20,9 +22,17 @@ SAMPLES = {
 }
 
 
-def test_the_leaked_deployment_files_are_seeds():
-    for path in SEEDS:
-        assert path in SENSITIVE_SEED_PATHS
+def test_the_leaked_deployment_files_are_seeds_of_the_thorough_and_deep_profiles():
+    for profile in ("thorough", "deep", "thorough_batch_v1", "deep_batch_v1"):
+        assert set(SEEDS) <= set(seed_paths(profile))
+        # The first slice holds a request and a second for each of them.
+        assert exposure_first_slice_hold(3, profile)["http_requests"] == (
+            exposure_first_slice_hold(3)["http_requests"] + len(SEEDS)
+        )
+    # Fast and balanced plans, and what they send, are unchanged.
+    for profile in ("fast", "balanced", "balanced_batch_v1", None):
+        assert seed_paths(profile) == SENSITIVE_SEED_PATHS
+        assert not set(SEEDS) & set(seed_paths(profile))
 
 
 @pytest.mark.parametrize("path", sorted(SAMPLES))
