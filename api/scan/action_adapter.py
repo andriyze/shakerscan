@@ -52,6 +52,7 @@ try:
     from capabilities.browser import BrowserCapabilityInputError, XSSBrowserProofAdapter
     from capabilities.request_mutation import RequestMutationVerificationAdapter
     from capabilities.sqli_proof import SQLiProofAdapter, SQLiProofError
+    from capabilities import jwt_forgery
     from capabilities.nosqli_verify import NoSQLiVerifyAdapter
     from capabilities.injection_verify import (
         InjectionVerifyAdapter, MINIMUM_REQUESTS as INJECTION_MINIMUM_REQUESTS,
@@ -63,6 +64,7 @@ try:
         account_password_hashes,
         bfla_finding,
         boundary_established,
+        gated_route,
         password_hash_disclosure_finding,
     )
     from capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
@@ -153,6 +155,7 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.browser import BrowserCapabilityInputError, XSSBrowserProofAdapter
     from ..capabilities.request_mutation import RequestMutationVerificationAdapter
     from ..capabilities.sqli_proof import SQLiProofAdapter, SQLiProofError
+    from ..capabilities import jwt_forgery
     from ..capabilities.nosqli_verify import NoSQLiVerifyAdapter
     from ..capabilities.injection_verify import (
         InjectionVerifyAdapter, MINIMUM_REQUESTS as INJECTION_MINIMUM_REQUESTS,
@@ -164,6 +167,7 @@ except (ImportError, ModuleNotFoundError):
         account_password_hashes,
         bfla_finding,
         boundary_established,
+        gated_route,
         password_hash_disclosure_finding,
     )
     from ..capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
@@ -4696,6 +4700,58 @@ class DatabaseNeutralScanActionDispatcher:
             for probe in comparison.authenticated for digest in probe.hash_digests
         }
         observations: list[Mapping[str, Any]] = []
+        # How the application handles the principal's own bearer token, when that is a JSON Web
+        # Token: once per Scan (the first slice), on the first route of this batch that refused
+        # the anonymous request and answered the principal, with what the slice has left after
+        # its routes (capabilities.jwt_forgery). No forged token changes a claim.
+        token = jwt_forgery.bearer_jwt(primary_headers) if start == 0 else None
+        if token is not None:
+            token_attempt_id = hashlib.sha256(
+                f"{manifest_digest}:authz_surface:jwt".encode()
+            ).hexdigest()
+            prior_token = completed.get(token_attempt_id)
+            gated = next(
+                ((item, status) for item in compared.values()
+                 if (status := gated_route(item)) is not None), None,
+            )
+            if prior_token is not None:
+                observations.extend(prior_token.get("observations") or ())
+            elif (
+                gated is not None and not self.cancelled()
+                and http_ceiling - consumed["http_requests"] >= jwt_forgery.MINIMUM_REQUESTS
+            ):
+                gated_comparison, gated_status = gated
+                sent_before = consumed["http_requests"]
+
+                async def send_token(forged: str) -> int | None:
+                    nonlocal ordinal
+                    ordinal += 1
+                    result = await send(gated_comparison.url, tuple(
+                        (name, f"Bearer {forged}" if str(name).lower() == "authorization" else value)
+                        for name, value in primary_headers
+                    ), ordinal)
+                    return None if result.error_code else result.status_code
+
+                token_proof = await jwt_forgery.check_token_handling(
+                    token, send=send_token, accepted_status=int(gated_status),
+                    left=lambda: http_ceiling - consumed["http_requests"],
+                )
+                if token_proof is not None:
+                    token_proof = {
+                        **token_proof, "route_id": gated_comparison.route_id,
+                        "request_url": gated_comparison.url,
+                        "anonymous_status": gated_comparison.anonymous[0].status,
+                    }
+                    observations.append(token_proof)
+                if not self.cancelled():
+                    await checkpoint_attempt(action.action_id, {
+                        "attempt_id": token_attempt_id, "candidate_id": token_attempt_id[:32],
+                        "status": "success",
+                        "observations": (token_proof,) if token_proof is not None else (),
+                        "budget_consumed": {
+                            "http_requests": consumed["http_requests"] - sent_before,
+                        },
+                    })
         reported: set[str] = set()
         for attempt_id, comparison in entry_heads:
             proven = bfla_finding(comparison) if boundary else None

@@ -381,6 +381,23 @@ def _receipt(result: CapabilityResultReference) -> dict[str, Any]:
 
 
 
+# authz_surface.verify_batch, capabilities.jwt_forgery: (title, CWE, why it is verified) by technique.
+_JWT_FINDINGS: Mapping[str, tuple[str, str, str]] = {
+    "jwt_signature_not_verified_repeated": (
+        "JSON Web Token signature is not verified", "CWE-347",
+        "The route accepted the signed-in user's token with its signature altered, twice",
+    ),
+    "jwt_alg_none_accepted_repeated": (
+        "JSON Web Token without a signature is accepted (alg none)", "CWE-347",
+        "The route refused an altered signature but accepted the same claims with no signature "
+        "under an algorithm of none, twice",
+    ),
+    "jwt_weak_hmac_secret_reproduced": (
+        "JSON Web Token is signed with a guessable secret", "CWE-1391",
+        "A secret from a short list of well-known values reproduces the token's signature",
+    ),
+}
+
 # injection.verify_batch: (title, severity, CWE, why it is verified) by injection class.
 _INJECTION_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
     "template_injection": (
@@ -1630,6 +1647,54 @@ def _findings_for_action(
                 "verification_reason": (
                     "Repeated deterministic NoSQL operator differential satisfied"
                 ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "authz_surface_proof"
+            and result.capability_name == "authz_surface.verify_batch"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and item.get("proof_contract") == "authz_surface_jwt_forgery/v1"
+            and str(item.get("request_url") or "")
+            and int(item.get("repetitions") or 0) >= 2
+            and item.get("technique") in _JWT_FINDINGS
+        ):
+            title, cwe, reason = _JWT_FINDINGS[item["technique"]]
+            finding = _base_finding(
+                tool="shakerscan_authz_surface", title=title,
+                # Whoever can make a token the application accepts can be any user it has.
+                severity="critical", cwe=cwe, url=item.get("request_url"),
+                evidence={
+                    "route_id": item.get("route_id"),
+                    "request_url": item.get("request_url"),
+                    "technique": item.get("technique"),
+                    "proof_contract": item.get("proof_contract"),
+                    "algorithm": str(item.get("algorithm") or "")[:20],
+                    "anonymous_status": item.get("anonymous_status"),
+                    "authenticated_status": item.get("authenticated_status"),
+                    "forged_status": item.get("forged_status"),
+                    **({"none_spelling": str(item["none_spelling"])[:8]}
+                       if item.get("none_spelling") else {}),
+                    **({"secret_in_common_list": True,
+                        "secret_length": item.get("secret_length"),
+                        "forged_token_accepted": item.get("forged_token_accepted")}
+                       if item.get("secret_in_common_list") is True else {}),
+                    "repetitions": item.get("repetitions"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_token_acceptance",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": reason,
             })
             findings.append(finding)
         elif (

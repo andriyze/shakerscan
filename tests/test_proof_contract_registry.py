@@ -27,6 +27,7 @@ EMITTERS = (
     "capabilities/exposure_probe.py",
     "capabilities/graphql_probe.py",
     "capabilities/injection_verify.py",
+    "capabilities/jwt_forgery.py",
     "capabilities/nosqli_verify.py",
     "capabilities/request_mutation.py",
     "capabilities/sqli_proof.py",

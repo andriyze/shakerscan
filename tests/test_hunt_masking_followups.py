@@ -131,6 +131,7 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/capabilities/nosqli_verify.py", "execute"): "request",
     # The attempt key of an engine-built probe URL (a manifest route with the canary as the
     # only query value); the same URL is published beside it, so the digest reveals nothing.
+    ("api/capabilities/open_redirect.py", "bypass_candidates"): "canonical",
     ("api/capabilities/open_redirect.py", "redirect_candidates"): "canonical",
     ("api/capabilities/sqli_proof.py", "_sha256"): "request",
     # The browser XSS proof's payload: engine-built from the candidate id and public, compared
@@ -187,6 +188,7 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/runtime/sealed_inputs.py", "seal_private_input"): "integrity",
     # Every candidate-manifest batch's attempt id (manifest digest, family, candidate id and,
     # for a repeated candidate id, its position).
+    ("api/scan/action_adapter.py", "_authz_surface_batch"): "canonical",
     ("api/scan/action_adapter.py", "_batch_attempt_id"): "canonical",
     ("api/scan/action_adapter.py", "_batch_candidate_id"): "canonical",
     ("api/scan/action_adapter.py", "_exposure_probe_batch"): "canonical",
