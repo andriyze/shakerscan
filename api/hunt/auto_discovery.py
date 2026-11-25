@@ -582,8 +582,18 @@ def _spec_routes(specs: Sequence[tuple[str, Mapping[str, Any]]], *, origin: str)
     for record in records[:500]:
         url = str(record.get("url") or "")
         path = url[len(origin):] if url.startswith(origin) else ""
-        if path.startswith("/"):
-            out.append(f"{str(record.get('method') or 'GET').upper()} {path}")
+        if not path.startswith("/") or " " in path:
+            continue
+        method = str(record.get("method") or "GET").upper()
+        fields = [str(name) for name in record.get("body_field_names") or () if str(name)][:20]
+        if fields and method in {"POST", "PUT", "PATCH"}:
+            # The inventory's worklist form keeps the body's field names as its parameters.
+            kind = "form" if "form" in str(record.get("content_type") or "") else "json"
+            body = ("&".join(f"{name}=" for name in fields) if kind == "form"
+                    else json.dumps({name: "" for name in fields}, separators=(",", ":")))
+            out.append(f"{method} {path} {kind}:{body}")
+        else:
+            out.append(f"{method} {path}")
     return out
 
 

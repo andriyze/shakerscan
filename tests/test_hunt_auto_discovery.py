@@ -121,7 +121,9 @@ def _runner(fake):
 def test_runner_maps_probes_products_and_a_small_api_description():
     spec = json.dumps({"openapi": "3.0.0", "paths": {
         "/api/users": {"get": {"parameters": [{"name": "q", "in": "query"}]}},
-        "/internal/admin": {"post": {}}}})
+        "/internal/admin": {"post": {}},
+        "/api/login": {"post": {"requestBody": {"content": {"application/json": {"schema": {
+            "type": "object", "properties": {"username": {"type": "string"}, "password": {"type": "string"}}}}}}}}}})
     fake = _Fake({
         "/": _response(200, "<html><script src='/_next/static/x.js'></script></html>"),
         "/openapi.json": _response(200, spec, content_type="application/json"),
@@ -148,6 +150,7 @@ def test_runner_maps_probes_products_and_a_small_api_description():
     assert {"GET /openapi.json", "GET /graphql", "POST /graphql", "GET /jenkins/api/json",
             "GET /jenkins/script", "GET /manager/html"} <= set(worklist)
     assert "GET /api/users?q=1" in worklist and "POST /internal/admin" in worklist
+    assert 'POST /api/login json:{"username":"","password":""}' in worklist
     assert "GET /api/version" not in worklist
     long_steps = [cap for cap, _values, _key in fake.calls if cap != "http.request"]
     assert long_steps == ["web.crawl", "web.content_discover", "web.content_discover", "web.content_discover",
