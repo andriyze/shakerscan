@@ -205,3 +205,44 @@ def test_saved_actions_snapshotted_without_trust_labels_are_labelled_on_read():
     row["context_pack"] = json.dumps(context)
     actions = public_hunt_run(row)["context_pack"]["target_actions"]["actions"]
     assert [item["trust"] for item in actions] == ["agent_unconfirmed", "operator"]
+
+
+def _policy_row(policy, *, status="active", target_kind="web"):
+    row = _row("x")
+    return {**row, "status": status, "target_kind": target_kind, "policy_json": json.dumps(policy)}
+
+
+def test_the_approval_list_names_only_what_a_person_still_has_to_allow():
+    active = ["http.request", "sqli.verify", "xss.verify", "templates.scan"]
+    granted = {"active_testing": True, "approval_receipt_id": str(uuid.uuid4()), "allowed_capabilities": active}
+    approval = public_hunt_run(_policy_row(granted))["briefing"]["authority"]["approval"]
+    assert approval["capabilities_needing_approval"] == [] and approval["capabilities_needing_approval_count"] == 0
+    # Without the Hunt's approval receipt (or without active testing) the same verifiers still need a person.
+    for policy in ({**granted, "approval_receipt_id": None}, {**granted, "active_testing": False}):
+        listed = public_hunt_run(_policy_row(policy))["briefing"]["authority"]["approval"]
+        assert {"sqli.verify", "xss.verify", "templates.scan"} <= set(listed["capabilities_needing_approval"])
+        assert "http.request" not in listed["capabilities_needing_approval"]
+
+
+def test_a_web_hunt_names_its_first_calls_ready_to_send():
+    allowed = ["http.request", "web.crawl", "web.content_discover", "candidate.verify"]
+    result = public_hunt_run(_policy_row({"active_testing": True, "allowed_capabilities": allowed}))
+    calls = result["next_calls"]
+    assert [call["capability"] for call in calls] == ["http.request", "web.crawl", "web.content_discover",
+                                                       "web.content_discover"]
+    assert calls[0]["input"] == {"method": "GET", "path": "/", "follow_redirects": True}
+    assert all(call["why"] for call in calls)
+    assert result["next_action"].startswith("Map first, then verify")
+    # Only what the policy allows is offered.
+    narrow = public_hunt_run(_policy_row({"allowed_capabilities": ["http.request"]}))
+    assert [call["capability"] for call in narrow["next_calls"]] == ["http.request"]
+    # Not on a finished Hunt, and not on a host Hunt, which keeps the query route.
+    assert "next_calls" not in public_hunt_run(_policy_row({"allowed_capabilities": allowed}, status="completed"))
+    host = public_hunt_run(_policy_row({"allowed_capabilities": allowed}, target_kind="host"))
+    assert "next_calls" not in host and host["next_action"].endswith("/query")
+
+
+def test_the_mcp_server_instructions_carry_the_hunt_playbook():
+    playbook = shakerscan_mcp.HUNT_PLAYBOOK
+    assert "Map first" in playbook and "next_calls" in playbook and "sqli.verify" in playbook
+    assert playbook.count(". ") <= 16 and len(playbook) < 1_200, "a few lines, always loaded"

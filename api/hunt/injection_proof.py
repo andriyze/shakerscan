@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any
 import urllib.parse
 import uuid
@@ -142,6 +143,64 @@ def proof_request(candidate: Mapping[str, Any], *, origin: str) -> tuple[str, st
     ) if name == parameter), "1")
     query = urllib.parse.urlencode([*pairs, (parameter, original)])
     return f"{origin}{route}?{query}", route, parameter
+
+
+_FIELD_NAME = re.compile(r"^[A-Za-z0-9_\-\[\]]{1,64}$")
+_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+
+def verifier_call(candidate: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The ready-to-send sqli.verify / xss.verify call for an injection candidate this proof cannot
+    run (XSS, a request body), or None when the locus does not name a route and a parameter.
+
+    2026-11: agents read "no deterministic verifier" and dropped injection leads; a refusal now
+    carries the call that proves the claim. Only what the candidate's own locus names is used.
+    """
+    name = _name(candidate.get("family"))
+    capability = "xss.verify" if name in _BROWSER_FAMILIES else (
+        "sqli.verify" if name in _PROOFS_BY_FAMILY else None)
+    if capability is None:
+        return None
+    locus = _mapping(candidate.get("canonical_locus"))
+    context = _mapping(candidate.get("verification_context"))
+    method = str(locus.get("method") or context.get("method") or "GET").strip().upper()
+    parameter = str(locus.get("parameter") or context.get("parameter") or "").strip()
+    raw = next((str(locus.get(key)).strip() for key in ("route", "url", "path") if locus.get(key)),
+               str(context.get("route") or "").strip())
+    parsed = urllib.parse.urlsplit(raw)
+    route = parsed.path if parsed.scheme else raw.split("?", 1)[0].split("#", 1)[0]
+    query = parsed.query if parsed.scheme else (raw.split("?", 1)[1].split("#", 1)[0] if "?" in raw else "")
+    if (not route.startswith("/") or route.startswith("//") or any(ord(ch) < 33 for ch in route)
+            or not _FIELD_NAME.match(parameter)):
+        return None
+    call: dict[str, Any] = {"capability": capability}
+    if method in _BODY_METHODS:
+        fields = [str(item) for item in (locus.get("body_field_names") or context.get("body_field_names") or [])
+                  if _FIELD_NAME.match(str(item))][:32]
+        if parameter not in fields:
+            fields.append(parameter)
+        call["input"] = {"path": route, "method": method, "body_field_names": fields, "injection_field": parameter}
+        content_type = str(locus.get("content_type") or context.get("content_type") or "")
+        if content_type in {"application/json", "application/x-www-form-urlencoded"}:
+            call["input"]["content_type"] = content_type
+        call["note"] = ("A body test sends writes: it needs the Hunt's state-changing permission. List every "
+                        "field the endpoint expects in body_field_names.")
+    elif method == "GET":
+        pairs = [(key, value) for key, value in urllib.parse.parse_qsl(query, keep_blank_values=True)
+                 if key != parameter][:32]
+        original = next((value for key, value in urllib.parse.parse_qsl(query, keep_blank_values=True)
+                         if key == parameter), "1")
+        call["input"] = {"path": f"{route}?{urllib.parse.urlencode([*pairs, (parameter, original)])}"}
+    else:
+        return None
+    slot = str(locus.get("as_principal") or context.get("as_principal") or "").strip()
+    if slot and slot.lower() not in {"anonymous", "anon", "none"} and _FIELD_NAME.match(slot):
+        call["input"]["as_principal"] = slot
+    if capability == "sqli.verify" and name not in {"sqli", "sql_injection", "injection"}:
+        call["note"] = ((call.get("note", "") + " ").lstrip()
+                        + "sqli.verify proves SQL injection only; this proof covers the other classes "
+                          "for a GET query parameter.")
+    return call
 
 
 def finding_record(

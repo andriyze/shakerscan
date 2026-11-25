@@ -195,3 +195,15 @@ def test_a_field_that_cannot_be_cut_down_is_omitted_and_named():
     record = {**_record(), "final_debrief": {"summary": "s" * 10_000}}
     compact = mcp._compact_hunt(record)
     assert "final_debrief" not in compact and "final_debrief" in compact["mcp_view"]["omitted"]
+
+
+def test_a_verifiers_compact_contract_keeps_what_leaving_a_field_out_means():
+    from api.runtime.capability_registry import CAPABILITY_REGISTRY
+
+    sqli = mcp._compact_capability(CAPABILITY_REGISTRY.require("sqli.verify").planner_contract())
+    fields = sqli["input"]["fields"]
+    assert fields["method"].startswith("one of POST|PUT|PATCH: Leave it out to test the URL parameters")
+    assert "URL parameters are tested" in fields["path"]
+    # Other capabilities stay as short as before.
+    crawl = mcp._compact_capability(CAPABILITY_REGISTRY.require("web.crawl").planner_contract())
+    assert all(":" not in hint for hint in crawl["input"]["fields"].values()), crawl

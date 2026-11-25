@@ -96,8 +96,15 @@ def select_hunt_session_principal_reference(
         and str(item.get("principal_slot") or "") == selected["principal_slot"]
     ]
     if len(matches) != 1 or matches[0].get("auth_kind") not in INTERACTIVE_HTTP_CREDENTIAL_KINDS:
+        # 2026-11: agents read this as a dead end. A header credential needs no session: the
+        # server sends it on every call made as that principal.
+        slot = str(selected.get("principal_slot") or "")
         raise CredentialReferenceError(
-            "session establishment requires an interactive HTTP profile"
+            "session establishment requires an interactive HTTP profile (a sign-in to replay); "
+            + (f"the {slot} principal's credential is sent as it is on every call made as it, so no "
+               f"session is needed: call http.request (or a scanner or verifier) with "
+               f"as_principal \"{slot}\" instead" if len(matches) == 1 and slot else
+               "sign in through the target's sign-in form with http.request and its capture instead")
         )
     return selected
 

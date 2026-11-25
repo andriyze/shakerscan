@@ -174,8 +174,10 @@ def test_hunt_session_principal_rejects_basic_auth_before_worker_reservation():
         "auth_kind": "basic_auth",
         "allowed_capabilities": ["auth.session.establish"],
     }]}
-    with pytest.raises(CredentialReferenceError, match="interactive HTTP profile"):
+    with pytest.raises(CredentialReferenceError, match="interactive HTTP profile") as refused:
         select_hunt_session_principal_reference(context, "primary")
+    # The refusal names the call that works: the header credential needs no session.
+    assert 'as_principal "primary" instead' in str(refused.value)
     context["credential_refs"][0]["auth_kind"] = "form_login"
     context["credential_refs"][0]["allowed_capabilities"] = ["http.request"]
     with pytest.raises(CredentialReferenceError, match="exactly one usable"):

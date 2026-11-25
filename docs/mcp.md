@@ -163,7 +163,12 @@ row boundary and `next_cursor` resumes at the first row left out; any other answ
 fields that fit whole and `mcp_view.omitted` names the others with their sizes. A
 `shakerscan_hunt_capability` answer is compact by default: the observations appear once (under
 `action_result`; the raw `result` points there), strings over 16,000 characters are cut, and
-observations that still do not fit are left out, all named in `mcp_view.reduced`. `view: "full"`
+observations that still do not fit are left out, all named in `mcp_view.reduced`. An
+`http.request` answer keeps what the target said (status, content type, the headers and cookie
+names the engine selected, the page's forms and links, a body excerpt of at most 2,000 characters
+without inline stylesheets, captures, errors and the `receipt_id`) and leaves out the receipt, the
+address pinning, the budget holds and the timings (`mcp_view.reduced.bookkeeping`; the whole body
+with `artifact.inspect`). `view: "full"
 needs the caller's `idempotency_key` and reads back what the server recorded for that action
 (nothing runs again): the canonical `action_result` with every recorded observation and the
 stored, redacted result summary, not the raw worker output of the first answer, so a raw field
@@ -237,7 +242,12 @@ replay answered 409 because the Hunt finished meanwhile, say -- reports `outcome
 
 Every refusal a person could resolve carries a stable `reason_code` from the engine's closed list
 (`permission_reason_codes` in `GET /hunts/contract`); the adapter keeps it, with any `slot` and
-`profile_id`, in `error.data`. A capability outside the Hunt's manifest is sent to the engine,
+`profile_id`, in `error.data`. A refusal that names a ready-to-send call that proves the claim instead (an
+injection candidate `candidate.verify` cannot run answers with its `sqli.verify` or `xss.verify`
+call; a BOLA proof without owned object references answers with `authz.verify` in object mode)
+carries it as `next_call` (`capability`, `input`), and the recovery text says to send it. The
+server instructions end with a short Hunt playbook (map first, then verify), and a web Hunt's start
+answer lists its first calls in `next_calls`. A capability outside the Hunt's manifest is sent to the engine,
 which says what is missing (for example `capability_requires_active_testing`) instead of an
 opaque local refusal. When a person could allow the refused action, the engine parks it under its
 idempotency key and the adapter reports `outcome: "awaiting_permission"` with the
