@@ -161,6 +161,7 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/hunt/boundary_discovery.py", "build_boundary_discovery"): "canonical",
     ("api/hunt/budget_amendments.py", "apply_budget_amendment"): "token",
     ("api/hunt/capability_reservations.py", "hunt_capability_action_digest"): "canonical",
+    ("api/hunt/auto_discovery.py", "key_digest"): "token",
     ("api/hunt/coverage_ledger.py", "coverage_fingerprint"): "finding",
     ("api/hunt/deterministic_findings.py", "_verified_xss_fingerprint"): "finding",
     ("api/hunt/deterministic_findings.py", "_sqli_finding_records"): "finding",

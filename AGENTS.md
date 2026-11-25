@@ -341,14 +341,6 @@ existing evidence. Artifact/JavaScript inspection uses bounded capabilities, not
 Count attempted, admitted/executed, successful, rejected, and indeterminate actions separately. A
 missing/malformed result is not success. Report settled actual usage separately from ceilings.
 
-A web Hunt maps its target itself at start (crawl, content discovery, API-description and product
-probes, the passive template pack) through its own recorded actions. Its open coverage (query kind
-`coverage`, `GET /hunts/{id}/coverage`, and `open_coverage` on every capability answer) lists the
-known endpoints and the test classes nothing in the Hunt has run on them; work through it, and
-re-read it after a context compaction. Finishing with coverage open while wall time and budget
-remain is refused with what is open; finish anyway only with `force` and a stated `force_reason`,
-which the debrief records with the open coverage. Recording candidates is never held by it.
-
 Exhaustion still keeps the debrief, leads and reason. Start with profile budgets, never lower one
 below what discovery needs, act on `budget_warnings`, and keep Hunt views compact (no `view: full`).
 A person raises a Hunt's budget by approving its `budget.raise` permission request or on the Hunt

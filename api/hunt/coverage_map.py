@@ -30,14 +30,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
-import hashlib
 import json
 import re
 from typing import Any
 import urllib.parse
 
+from .auto_discovery import COVERAGE_TARGET_KINDS, discovery_state, key_digest, probe_key_digests
+
 SCHEMA = "hunt-open-coverage/v1"
-COVERAGE_TARGET_KINDS = frozenset({"web", "api"})
 # Bounds: the inventory read, the routes taken from this Hunt's actions, one listed page.
 MAX_INVENTORY_ENDPOINTS = 600
 MAX_ACTION_ROWS = 5_000
@@ -439,8 +439,11 @@ def build_coverage(
             steps[step] = value
     if "templates" in ran:
         steps["templates"] = ran["templates"]
+    # Running discovery holds a finish (what it maps is about to be listed); a step that never ran
+    # is named, with the call that runs it, but holds nothing on its own.
     pending = sorted(step for step, value in steps.items()
-                     if value in {"not_run", "running", "queued"} and step in DISCOVERY_STEPS)
+                     if value in {"running", "queued"} and step in DISCOVERY_STEPS)
+    not_run = sorted(step for step, value in steps.items() if value == "not_run" and step in DISCOVERY_STEPS)
     if state.get("running"):
         pending = sorted(set(pending) | {"auto_discovery"})
     by_class: dict[str, int] = {}
@@ -456,6 +459,8 @@ def build_coverage(
         "endpoints_open": len(items),
         "open_by_class": dict(sorted(by_class.items(), key=lambda pair: (-pair[1], pair[0]))),
         "discovery": {"steps": steps, "pending": pending,
+                      **({"not_run": not_run, "run_with": {step: DISCOVERY_STEPS[step] for step in not_run}}
+                         if not_run else {}),
                       **({"products": state["products"]} if state.get("products") else {}),
                       **({"notes": state["notes"]} if state.get("notes") else {})},
         "open": items,
@@ -497,6 +502,7 @@ def compact_open_coverage(report: Mapping[str, Any], hunt_id: str) -> dict[str, 
         "endpoints_open": int(report.get("endpoints_open") or 0),
         "endpoints_known": int(report.get("endpoints") or 0),
         "discovery_pending": list(discovery.get("pending") or []),
+        **({"discovery_not_run": list(discovery["not_run"])} if discovery.get("not_run") else {}),
         "next": [_item_line(item) for item in (report.get("open") or [])[:COMPACT_ITEMS]],
         "list": f"POST /hunts/{hunt_id}/query kind=coverage (or GET /hunts/{hunt_id}/coverage)",
     }
@@ -586,16 +592,10 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
 
 # --- loading ------------------------------------------------------------------------------------
 
-def key_digest(key: str) -> str:
-    return hashlib.sha256(str(key).encode("utf-8")).hexdigest()
-
-
 async def load_coverage(conn: Any, run: Mapping[str, Any]) -> dict[str, Any] | None:
     """The coverage map of one web Hunt, or None for another target kind."""
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or not run.get("target_id"):
         return None
-    from .auto_discovery import discovery_state, probe_key_digests
-
     hunt_uuid = run["id"]
     actions = await conn.fetch(
         """SELECT capability_name, status, input_summary->'input' AS input,

@@ -134,10 +134,11 @@ def test_engine_probes_are_discovery_not_testing_and_misses_add_no_route():
 def test_discovery_steps_pending_until_run_and_not_allowed_is_not_pending():
     report = build_coverage(actions=[], endpoints=[], allowed=["web.crawl", "http.request"])
     assert report["discovery"]["steps"] == {"crawl": "not_run", "content_discovery": "not_allowed"}
-    assert report["discovery"]["pending"] == ["crawl"]
+    assert report["discovery"]["pending"] == [] and report["discovery"]["not_run"] == ["crawl"]
+    assert report["discovery"]["run_with"] == {"crawl": "web.crawl"}
     report = build_coverage(actions=[_action("web.crawl", status="running")], endpoints=[],
                             allowed=["web.crawl", "web.content_discover"])
-    assert report["discovery"]["steps"]["crawl"] == "running"
+    assert report["discovery"]["steps"]["crawl"] == "running" and report["discovery"]["pending"] == ["crawl"]
     done = build_coverage(actions=[_action("web.crawl"), _action("web.content_discover", wordlist="api")],
                           endpoints=[], allowed=["web.crawl", "web.content_discover"],
                           discovery={"running": False, "products": ["jenkins"], "notes": ["x"]})
@@ -165,12 +166,15 @@ def test_page_compact_and_debrief_are_bounded():
 
 
 def test_finish_guard_refuses_open_coverage_with_time_left_and_names_it():
-    report = build_coverage(actions=[], endpoints=[_endpoint("/search", params="q")],
-                            allowed=["web.crawl"])
+    report = build_coverage(actions=[_action("web.crawl", status="running")],
+                            endpoints=[_endpoint("/search", params="q")], allowed=["web.crawl"])
     refusal = finish_guard(_run(), report, force=False, force_reason=None, now=NOW)
     assert refusal and "coverage is open" in refusal and "GET /search (q): sqli, xss" in refusal
     assert "discovery not finished: crawl" in refusal and "force=true" in refusal
     assert "kind=coverage" in refusal
+    # Discovery that never ran is named in the report but does not hold a finish on its own.
+    nothing_known = build_coverage(actions=[], endpoints=[], allowed=["web.crawl"])
+    assert finish_guard(_run(), nothing_known, force=False, force_reason=None, now=NOW) is None
 
 
 def test_finish_guard_lets_the_hunt_finish_when_it_should():
