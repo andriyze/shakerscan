@@ -88,10 +88,13 @@ def public_verification_families() -> dict[str, Any]:
                      "proven in a browser by xss.verify."),
         },
         "other_families": (
-            "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, "
-            "CORS...) may be recorded as a candidate with its evidence, but no deterministic "
-            "verifier proves it: do not call candidate.verify for it; report it as an unverified "
-            "candidate. Device Hunts verify through their own verifier_contract_id contracts."
+            "Any other family may be recorded as a candidate with its evidence, but candidate.verify "
+            "does not prove it: do not call candidate.verify for it. An injection in a request "
+            "body or behind a sign-in, XXE, LDAP, CRLF and host header injection, open redirect, "
+            "CORS, CSRF, rate limiting, file upload, GraphQL, JWT, security headers and directory "
+            "listing are proved with the request.verify capability on the exact request. AI/LLM "
+            "families (prompt injection, excessive agency, RAG isolation) stay unverified "
+            "candidates. Device Hunts verify through their own verifier_contract_id contracts."
         ),
     }
 
