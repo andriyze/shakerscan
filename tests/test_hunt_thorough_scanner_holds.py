@@ -198,9 +198,9 @@ def test_unprofiled_historical_hunts_keep_every_registry_hold(profile):
     assert agent_tools.canonical_hunt_scanner_budget("sqli.verify") == REGISTRY_SQLI
 
 
-def test_only_the_two_verifiers_change_on_thorough():
+def test_only_the_two_verifiers_and_the_two_crawls_change_on_thorough():
     for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_scanner"):
-        if spec.name in {"sqli.verify", "xss.verify"}:
+        if spec.name in {"sqli.verify", "xss.verify", "web.crawl", "web.browser_crawl"}:
             continue
         assert agent_tools.canonical_hunt_scanner_budget(
             spec.name, budget_profile="thorough",
@@ -698,3 +698,26 @@ def test_the_registry_wait_cancels_that_call_before_it_finishes(monkeypatch):
     assert result["status"] == "timeout" and result["error"] == "worker_result_timeout"
     assert 330 <= clock.now < 331
     assert len(redis.cancelled) == 1 and redis.cancelled[0].startswith("agent_tool_cancel:")
+
+
+def test_a_crawl_holds_its_whole_time_box_and_steps_down_when_less_is_left():
+    """A Hunt's crawl once held 150 requests on profiles that allow 460,000 or more."""
+    for name, requests in (("web.crawl", 3_001), ("web.browser_crawl", 6_001)):
+        holds = agent_tools.hunt_scanner_dispatch_budgets(name, budget_profile="fast")
+        assert holds[0]["http_requests"] == requests
+        registry = dict(CAPABILITY_REGISTRY.require(name).budget_cost)
+        assert holds[1] == registry
+        ample = {"http_requests": 460_800, "tool_wall_seconds": 3_600}
+        assert agent_tools.affordable_hunt_scanner_hold(
+            holds, limits=ample, used={}, capability_name=name) == holds[0]
+        # Less left than the profile hold: a shorter crawl, never a refusal.
+        assert agent_tools.affordable_hunt_scanner_hold(
+            holds, limits=ample, used={"http_requests": 460_000}, capability_name=name) == registry
+        # A device target is charged fragility per held request and keeps the registry hold.
+        assert agent_tools.canonical_hunt_scanner_budget(
+            name, budget_profile="fast", device_target=True) == registry
+    # A verifier is never stepped down: at its registry hold it times out with no verdict.
+    verifier = agent_tools.hunt_scanner_dispatch_budgets("sqli.verify", budget_profile="fast")
+    assert agent_tools.affordable_hunt_scanner_hold(
+        verifier, limits={"http_requests": 2_000, "tool_wall_seconds": 3_600},
+        used={"http_requests": 1_900}, capability_name="sqli.verify") == verifier[0]

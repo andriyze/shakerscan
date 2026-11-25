@@ -2324,6 +2324,7 @@ async def _execute_hunt_capability_lifecycle(
                                         ),
                                     ),
                                     limits=limits, used=used,
+                                    capability_name=name,
                                 ) if is_scanner else spec.budget_cost
                             ).items() if key in limits
                         }

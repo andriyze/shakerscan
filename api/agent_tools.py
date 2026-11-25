@@ -300,12 +300,27 @@ EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
 # wall without touching argv or rate, and keep rate x wall within 90% of the request hold
 # (sqlmap 1 x 1,200 = 1,200 <= 1,620; Dalfox 3.33 x 480 = 1,600 <= 1,620), so the pinned
 # connection ceiling never stops a paced call before its wall does.
+#
+# The crawls size themselves from their hold (rate and duration are derived from it, never past
+# the reviewed 5 requests/s for katana and 10/s of egress for the browser). The registry holds
+# (web.crawl 150 requests / 75 s, web.browser_crawl 600 / 150 s) gave a Hunt about 140 requests
+# over 70 s and a 59-second browser crawl, on profiles that allow 460,000 requests or more: a
+# real application's surface was never mapped. A Hunt's crawl holds the reviewed time box
+# instead (katana 600 s, the browser crawl 600 s) at the same rates, and settles what it used.
 HUNT_THOROUGH_SCANNER_HOLDS: dict[str, dict[str, int]] = {
     "sqli.verify": {"http_requests": 1_800, "tool_wall_seconds": 1_200},
     "xss.verify": {
         "http_requests": 1_800, "tool_wall_seconds": 480, "browser_actions": 2,
     },
+    "web.crawl": {"http_requests": 3_001, "tool_wall_seconds": 605},
+    "web.browser_crawl": {"http_requests": 6_001, "tool_wall_seconds": 610},
 }
+# Capabilities whose smaller registry hold is still a useful call: a crawl sized to it is a
+# shorter crawl, not an incomplete check. When the Hunt has less left than the profile hold (a
+# person lowered a limit, or the Hunt is near its end) these step down to the registry hold
+# rather than being refused. The verifiers do not: at their registry hold they time out with no
+# verdict, which is traffic spent on nothing.
+HUNT_STEP_DOWN_CAPABILITIES = frozenset({"web.crawl", "web.browser_crawl"})
 # The longer process ceiling a single (non-batch) verification may run under, on the same argv.
 # Only a reservation that covers all of it runs with it; any other reservation at or above the
 # floor runs at the floor, so a paced call only ever runs one of these two reviewed shapes.
@@ -960,8 +975,20 @@ def affordable_hunt_scanner_hold(
     *,
     limits: Mapping[str, int],
     used: Mapping[str, Any],
+    capability_name: str | None = None,
 ) -> dict[str, int]:
-    """The current useful hold; admission reports any shortage through the canonical ledger."""
+    """The current useful hold; admission reports any shortage through the canonical ledger.
+
+    A capability in ``HUNT_STEP_DOWN_CAPABILITIES`` gets the first hold, largest first, that
+    what is left of every limited dimension can fund; the current one when none can.
+    """
+    if capability_name in HUNT_STEP_DOWN_CAPABILITIES:
+        for candidate in candidates:
+            if all(
+                int(used.get(name) or 0) + int(amount) <= int(limits[name])
+                for name, amount in candidate.items() if int(limits.get(name) or 0) > 0
+            ):
+                return dict(candidate)
     # Older queued actions may still own the registry hold, which the worker accepts.
     # New actions must request the useful execution envelope. Admission raises the normal
     # budget request when it does not fit; silently reverting to the old timeouts spends
