@@ -130,7 +130,7 @@ _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "xss.request_verify", "sqli.request_verify", "browser.proof",
     "xss.request_verify_batch", "sqli.request_verify_batch", "sqli.prove_batch",
     "xss.browser_prove_batch", "exposure.verify_batch", "nosqli.verify_batch",
-    "authz_surface.verify_batch", "graphql.verify_batch",
+    "authz_surface.verify_batch", "graphql.verify_batch", "injection.verify_batch",
 })
 _TRAFFIC_BUDGETS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
@@ -247,6 +247,7 @@ _FAMILY_BY_CAPABILITY = {
     "templates.active_batch": "nuclei_active",
     "exposure.verify_batch": "sensitive_exposure",
     "nosqli.verify_batch": "nosqli",
+    "injection.verify_batch": "server_injection",
     "authz_surface.verify_batch": "authz_surface",
     "graphql.verify_batch": "graphql",
     "authz.verify": "bola",
@@ -262,6 +263,7 @@ _CANDIDATE_MANIFEST_KINDS_BY_FAMILY: Mapping[str, frozenset[str]] = {
     "xss": frozenset({"candidate", "request_candidate"}),
     "sqli": frozenset({"candidate", "request_candidate"}),
     "nosqli": frozenset({"candidate"}),
+    "server_injection": frozenset({"candidate", "request_candidate"}),
 }
 
 
@@ -378,6 +380,30 @@ def _receipt(result: CapabilityResultReference) -> dict[str, Any]:
     return result.receipt_ref.canonical_dict()
 
 
+
+# injection.verify_batch: (title, severity, CWE, why it is verified) by injection class.
+_INJECTION_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
+    "template_injection": (
+        "Verified server-side template injection", "critical", "CWE-1336",
+        "A template expression sent in the request was evaluated twice; the same numbers "
+        "without template syntax were not",
+    ),
+    "command_injection": (
+        "Verified command injection", "critical", "CWE-78",
+        "A shell command sent in the request ran twice; the same text without shell syntax "
+        "did not",
+    ),
+    "path_traversal": (
+        "Verified path traversal", "high", "CWE-22",
+        "A traversal returned a well-known file's signature twice; the same traversal to a "
+        "file that does not exist did not",
+    ),
+    "xxe": (
+        "Verified XML external entity injection", "high", "CWE-611",
+        "An external entity in an injected document type returned a well-known file's "
+        "signature twice; an entity for a file that does not exist did not",
+    ),
+}
 
 def _canonical_proof_contract_v2(
     *, capability_name: str, kind: str, receipt: Any,
@@ -1015,6 +1041,7 @@ def _findings_for_action(
         "xss.browser_prove_batch": {"candidate_attempt", "xss_browser_proof"},
         "exposure.verify_batch": {"candidate_attempt", "sensitive_exposure_proof"},
         "nosqli.verify_batch": {"candidate_attempt", "nosqli_proof"},
+        "injection.verify_batch": {"candidate_attempt", "injection_proof"},
         "authz_surface.verify_batch": {"candidate_attempt", "authz_surface_proof"},
         "graphql.verify_batch": {"candidate_attempt", "graphql_proof"},
         "authz.verify": {"authz_differential"},
@@ -1505,6 +1532,54 @@ def _findings_for_action(
                 "verification_reason": (
                     "Deterministic sensitive-exposure response signature satisfied"
                 ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "injection_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("proof_contract") or "").startswith("injection_")
+            and int(item.get("repetitions") or 0) >= 2
+            and item.get("injection_class") in _INJECTION_FINDINGS
+        ):
+            title, severity, cwe, reason = _INJECTION_FINDINGS[item["injection_class"]]
+            finding = _base_finding(
+                tool="shakerscan_injection_verify",
+                title=title, severity=severity, cwe=cwe,
+                # Same as the SQL proof: report the route it was proved on.
+                url=item.get("canonical_path"),
+                evidence={
+                    "candidate_id": item.get("candidate_id"),
+                    "request_ref_id": item.get("request_ref_id"),
+                    **({"origin": item["origin"]} if item.get("origin") else {}),
+                    "method": item.get("method"),
+                    "field_path": item.get("field_path"),
+                    "request_class": item.get("request_class"),
+                    "injection_class": item.get("injection_class"),
+                    "proof_contract": item.get("proof_contract"),
+                    "technique": item.get("technique"),
+                    "payload_shape": item.get("payload_shape"),
+                    **({"file_signature": item["file_signature"]}
+                       if item.get("file_signature") else {}),
+                    **({"timing_ms": dict(item["timing_ms"])}
+                       if isinstance(item.get("timing_ms"), Mapping) else {}),
+                    "repetitions": item.get("repetitions"),
+                    "response_pairs": list(item.get("response_pairs") or ()),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_injection_differential",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": reason,
             })
             findings.append(finding)
         elif (
@@ -4104,6 +4179,7 @@ def finalize_scan_report(
         "xss.browser_prove_batch": "xss_browser_proof",
         "exposure.verify_batch": "sensitive_exposure",
         "nosqli.verify_batch": "nosqli",
+        "injection.verify_batch": "server_injection",
         "authz_surface.verify_batch": "authz_surface",
         "graphql.verify_batch": "graphql",
     }

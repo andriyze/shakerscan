@@ -2044,7 +2044,7 @@ for the profile contract, invocation, limits and acceptance gates.
 |---|---|---|
 | Public REST operations | 494 | `api/**/*.py` FastAPI decorators |
 | Unique REST paths | 412 | `api/**/*.py` |
-| Check families | 20 | `api/check_registry.py` |
+| Check families | 21 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
@@ -2582,6 +2582,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `recon` | recon | passive | False | low | True | `legacy_discovery` | `discovery` | Crawl, API/HAR/OpenAPI discovery, and passive surface refresh. |
 | `recon_active` | recon | discovery | True | medium | False | `recon_active` | `discovery` | Authorized active recon from bundled authored lists: DNS name enumeration and virtual-host discovery under a declared apex (the target is the apex or its www name; needs subdomain discovery; virtual hosts not on a shared edge), and parameter discovery on observed routes. Wildcard, catch-all and random-parameter controls; leads only, never findings or proof. |
 | `sensitive_exposure` | passive | disclosure | False | medium | False | `exposure_probe_batch` | `active_endpoint_attempt_v1` | Read-only verified exposure checks: secrets in env, actuator, OpenAPI and config files, VCS metadata, backups, debug pages, metrics, and listings. |
+| `server_injection` | active | injection | True | high | False | `injection_verify_batch` | `active_endpoint_attempt_v1` | Deterministic proof of server-side template injection, path traversal, command injection and XML external entity injection over query, path and body candidates. |
 | `sqli` | active | injection | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | SQL injection verification with sqlmap and a differential proof; no data extraction. |
 | `ssrf` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Server-side request forgery checks. Planned and permission-gated. |
 | `xss` | active | client | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | Reflected XSS, and DOM XSS through URL-fragment parameters, proven in a browser. No stored-XSS check. |

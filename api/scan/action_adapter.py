@@ -53,6 +53,9 @@ try:
     from capabilities.request_mutation import RequestMutationVerificationAdapter
     from capabilities.sqli_proof import SQLiProofAdapter, SQLiProofError
     from capabilities.nosqli_verify import NoSQLiVerifyAdapter
+    from capabilities.injection_verify import (
+        InjectionVerifyAdapter, MINIMUM_REQUESTS as INJECTION_MINIMUM_REQUESTS,
+    )
     from capabilities.authz_surface import (
         AUTHZ_SURFACE_PARSER_VERSION,
         PrincipalProbe,
@@ -150,6 +153,9 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.request_mutation import RequestMutationVerificationAdapter
     from ..capabilities.sqli_proof import SQLiProofAdapter, SQLiProofError
     from ..capabilities.nosqli_verify import NoSQLiVerifyAdapter
+    from ..capabilities.injection_verify import (
+        InjectionVerifyAdapter, MINIMUM_REQUESTS as INJECTION_MINIMUM_REQUESTS,
+    )
     from ..capabilities.authz_surface import (
         AUTHZ_SURFACE_PARSER_VERSION,
         PrincipalProbe,
@@ -367,6 +373,7 @@ _PRIMARY_PRINCIPAL_CAPABILITIES = frozenset({
     "sqli.verify", "sqli.verify_batch", "sqli.request_verify",
     "sqli.request_verify_batch", "sqli.prove_batch", "exposure.verify_batch",
     "nosqli.verify_batch", "authz_surface.verify_batch", "authz.verify",
+    "injection.verify_batch",
     "web.spec_ingest",
 })
 
@@ -4249,6 +4256,198 @@ class DatabaseNeutralScanActionDispatcher:
             },
         )
 
+    async def _injection_verify_batch(
+        self, action: ScanAction, heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        """Template injection, path traversal, command injection and XXE over one slice."""
+        request_mode = isinstance(
+            action.capability_args.get("request_candidate_manifest_ref"), Mapping,
+        )
+        manifest = await self._work_manifest(
+            action,
+            "request_candidate_manifest_ref" if request_mode else "candidate_manifest_ref",
+            ScanWorkManifestKind.REQUEST_CANDIDATE if request_mode else ScanWorkManifestKind.CANDIDATE,
+        )
+        endpoints = None if request_mode else await self._work_manifest(
+            action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+        )
+        if manifest is None or (not request_mode and endpoints is None):
+            return self._skip(action, "manifest_unavailable")
+        raw_slice = action.capability_args.get("slice")
+        if not isinstance(raw_slice, Mapping):
+            raise ScanActionAdapterError("injection verify batch slice is invalid")
+        start, count = raw_slice.get("start"), raw_slice.get("count")
+        if (
+            isinstance(start, bool) or not isinstance(start, int) or start < 0
+            or isinstance(count, bool) or not isinstance(count, int)
+            or not 1 <= count <= 50
+        ):
+            raise ScanActionAdapterError("injection verify batch slice is invalid")
+        rows = tuple(enumerate(
+            manifest.entries[start:min(len(manifest.entries), start + count)], start=start,
+        ))
+        if not rows:
+            return self._skip(action, self._empty_slice_reason(manifest))
+        load_attempts = getattr(self.backend, "load_batch_attempts", None)
+        checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
+        if not callable(load_attempts) or not callable(checkpoint_attempt):
+            raise ScanActionAdapterError("injection verify backend lacks durable checkpoints")
+        completed = {
+            str(item.get("attempt_id") or ""): dict(item)
+            for item in await load_attempts(action.action_id)
+            if isinstance(item, Mapping)
+        }
+        manifest_digest = manifest.reference().manifest_digest
+        repeated_positions = _repeated_candidate_positions(manifest.entries)
+        sign_in_checks = await self._sign_in_checks(action, load_attempts)
+        started_at = datetime.now(timezone.utc).isoformat()
+        observations: list[Mapping[str, Any]] = []
+        errors: list[str] = []
+        consumed = {name: 0 for name in action.requested_budget}
+        attempted = resumed = 0
+        attempt_statuses: list[Mapping[str, Any]] = []
+        skipped: set[int] = set()
+        primary = resolve_scan_http_principal(
+            self.options, lane="primary", capability_name=action.capability_name,
+        )
+        may_write = bool(
+            self.policy.allow_state_changing_http and self.policy.approval_receipt_id
+        )
+
+        def inapplicable(manifest_index: int, candidate: Mapping[str, Any], reason: str) -> None:
+            # Recorded as inapplicable, never as unattempted: no budget could have tested it.
+            skipped.add(manifest_index)
+            observations.append({
+                "kind": "candidate_inapplicable", "family": "server_injection",
+                "candidate_id": str(candidate.get("candidate_id") or ""), "reason": reason,
+            })
+
+        for offset, (manifest_index, candidate) in enumerate(rows):
+            candidate_id = str(candidate.get("candidate_id") or "")
+            # A fragment never reaches the server.
+            if candidate.get("browser_fragment_path"):
+                inapplicable(manifest_index, candidate, "browser_fragment_candidate")
+                continue
+            attempt_id = _batch_attempt_id(
+                manifest_digest, "server_injection", candidate_id, manifest_index,
+                repeated_positions,
+            )
+            prior = completed.get(attempt_id)
+            if prior is not None:
+                resumed += 1
+                attempted += 1
+                attempt_statuses.append(prior)
+                observations.extend(prior.get("observations") or ())
+                for name, amount in dict(prior.get("budget_consumed") or {}).items():
+                    consumed[name] = consumed.get(name, 0) + int(amount)
+                continue
+            if self.cancelled():
+                break
+            proof_candidate = dict(candidate)
+            if request_mode:
+                request = self._private_requests.get(str(candidate.get("request_ref_id") or ""))
+                if request is None:
+                    continue
+                if request.method not in {"GET", "HEAD", "OPTIONS"} and not may_write:
+                    continue
+            else:
+                proof_candidate = _candidate_for_synthetic_proof(candidate)
+                # A body candidate mutates, so it needs the authority a private request needs.
+                if candidate.get("body_field_names") and not may_write:
+                    continue
+                request = proof_request_for_candidate(
+                    endpoints, manifest, manifest_index,
+                    request_id=f"candidate:{candidate_id}",
+                    ordinal=manifest_index,
+                    name="canonical injection candidate",
+                    headers=tuple(primary.headers().items()),
+                    authenticated=primary.authenticated,
+                )
+            # The credential profile's own sign-in endpoint receives a paced, counted probe set
+            # from the checks written for it; this verifier sends it nothing.
+            if sign_in_checks.endpoint(request.url, request.method) is not None:
+                inapplicable(manifest_index, candidate, "sign_in_endpoint_candidate")
+                continue
+            remaining_attempts = max(1, len(rows) - offset)
+            remaining = {
+                name: max(0, int(limit) - int(consumed.get(name, 0)))
+                for name, limit in action.requested_budget.items()
+            }
+            sub_budget = {
+                name: amount // remaining_attempts
+                for name, amount in remaining.items() if amount // remaining_attempts > 0
+            }
+            if sub_budget.get("http_requests", 0) < INJECTION_MINIMUM_REQUESTS:
+                break
+            specification = CAPABILITY_REGISTRY.require(action.capability_name)
+            adapter = InjectionVerifyAdapter(
+                specification=specification, target=self.target, request=request,
+                candidate=proof_candidate,
+                transport=self._scan_replay_transport(action, private=True),
+                requested_budget=sub_budget,
+            )
+            result = await CapabilityExecutor().execute(
+                CapabilityExecutionContext(
+                    specification=specification, target=self.target,
+                    requested_budget=sub_budget, adapter_managed_cancellation=True,
+                ),
+                adapter, heartbeat=heartbeat, cancelled=self.cancelled,
+            )
+            attempt_observations = tuple({
+                **dict(item), "attempt_id": attempt_id, "candidate_id": candidate_id,
+            } for item in result.observations)
+            proof_state = (
+                "verified" if any(
+                    item.get("proof_state") == "verified" for item in attempt_observations
+                ) else "not_proven"
+            )
+            bundled = ({
+                "kind": "candidate_attempt", "attempt_id": attempt_id,
+                "candidate_id": candidate_id, "family": "server_injection",
+                "status": result.status, "proof_state": proof_state,
+                "budget_consumed": dict(result.actual_budget),
+            }, *attempt_observations)
+            attempt = {
+                "attempt_id": attempt_id, "candidate_id": candidate_id,
+                "status": result.status, "timed_out": bool(result.timed_out),
+                "budget_consumed": dict(result.actual_budget),
+                "observations": bundled, "errors": tuple(result.errors),
+                "proof_state": proof_state,
+            }
+            if result.status != "cancelled":
+                await checkpoint_attempt(action.action_id, attempt)
+            attempt_statuses.append({
+                "status": str(result.status), "timed_out": bool(result.timed_out),
+            })
+            attempted += 1
+            observations.extend(bundled)
+            errors.extend(str(item) for item in result.errors)
+            for name, amount in result.actual_budget.items():
+                consumed[name] = min(
+                    int(action.requested_budget.get(name, 0)),
+                    consumed.get(name, 0) + int(amount),
+                )
+        unattempted = max(0, len(rows) - len(skipped) - attempted)
+        _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
+            attempt_statuses, unattempted,
+        )
+        return self._receipt(
+            action, status=_batch_status,
+            parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
+            started_at=started_at, observations=tuple(observations),
+            errors=tuple(errors[:20]), consumed=consumed,
+            partial=_batch_partial, timed_out=_batch_timed_out,
+            redacted_execution={
+                "action_id": action.action_id, "manifest_digest": manifest_digest,
+                "slice": {"start": start, "count": count},
+                "candidate_count": len(rows), "attempted_count": attempted,
+                "resumed_count": resumed, "unattempted_count": unattempted,
+                "inapplicable_count": len(skipped),
+                "checkpoint_mode": "after_each_candidate",
+                "secret_values_visible": False,
+            },
+        )
+
     async def _authz_surface_batch(
         self, action: ScanAction, heartbeat: ActionHeartbeat,
     ) -> CapabilityReceipt:
@@ -6603,6 +6802,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._exposure_probe_batch(action, heartbeat)
         if action.capability_name == "nosqli.verify_batch":
             return await self._nosqli_verify_batch(action, heartbeat)
+        if action.capability_name == "injection.verify_batch":
+            return await self._injection_verify_batch(action, heartbeat)
         if action.capability_name == "authz_surface.verify_batch":
             return await self._authz_surface_batch(action, heartbeat)
         if action.capability_name == "graphql.verify_batch":

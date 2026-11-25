@@ -85,6 +85,7 @@ _BATCH_CAPABILITIES = frozenset({
     "authz_surface.verify_batch",
     "graphql.verify_batch",
     "redirect.verify_batch",
+    "injection.verify_batch",
 })
 # (slice_size, reservation) per capability, derived per profile from two measured
 # tables rather than hand-tuned absolutes.
@@ -131,6 +132,10 @@ _BATCH_ATTEMPT_COSTS: Mapping[str, Mapping[str, int]] = {
     # Per manifest entry: most routes have no redirect-named parameter and cost nothing; one
     # that has costs one GET per parameter (open_redirect.MAX_PARAMETERS_PER_ROUTE at most).
     "redirect.verify_batch": {"http_requests": 1, "tool_wall_seconds": 1},
+    # The baseline, then per class a handful of probes, the repeat and the control: template
+    # syntaxes (6), traversals (5), command wrappers (7) and their blind screen (7). A hit ends a
+    # class early; 32 requests cover every class on a candidate that has none of them.
+    "injection.verify_batch": {"http_requests": 32, "state_changing_requests": 32, "tool_wall_seconds": 30},
 }
 _BATCH_WALL_SHARE: Mapping[str, float] = {
     "xss.verify_batch": 0.12,
@@ -146,6 +151,7 @@ _BATCH_WALL_SHARE: Mapping[str, float] = {
     "authz_surface.verify_batch": 0.05,
     "graphql.verify_batch": 0.02,
     "redirect.verify_batch": 0.02,
+    "injection.verify_batch": 0.06,
 }
 # A discovered candidate manifest can mix query and body entries while its public
 # reference reveals only a count. Every verifier slice therefore carries one
@@ -1221,6 +1227,7 @@ class ScanActionPlanCompiler:
         # Read-only (ADR 0001 passive): runs whenever selected, active authority or not.
         sensitive_exposure = enabled("sensitive_exposure")
         nosqli = active and enabled("nosqli")
+        server_injection = active and enabled("server_injection")
         authz_surface = active and enabled("authz_surface")
         graphql = active and enabled("graphql")
         # Only an explicit selection: recon_active is in no preset, so a policy that names no
@@ -1657,6 +1664,7 @@ class ScanActionPlanCompiler:
                     "authz_surface.verify_batch": 15,
                     "graphql.verify_batch": 15,
                     "redirect.verify_batch": 15,
+                    "injection.verify_batch": 20,
                 }[blueprint.capability_name]
                 budget = {
                     name: max(
@@ -1707,12 +1715,13 @@ class ScanActionPlanCompiler:
                         "xss.request_verify_batch", "sqli.request_verify_batch",
                         "sqli.prove_batch", "xss.browser_prove_batch",
                         "nosqli.verify_batch", "templates.active_batch",
+                        "injection.verify_batch",
                     }
                     and not policy.allow_state_changing_http
                 ):
                     budget.pop("state_changing_requests", None)
                 if (
-                    blueprint.capability_name == "nosqli.verify_batch"
+                    blueprint.capability_name in {"nosqli.verify_batch", "injection.verify_batch"}
                     and "candidate_manifest_ref" in blueprint.capability_args
                 ):
                     budget.pop("state_changing_requests", None)
@@ -2193,6 +2202,21 @@ class ScanActionPlanCompiler:
                 minimum_batches=1,
                 reserve_dependency_slots=int(authz_will_run),
             )
+        if scope in {"full", "endpoint"} and server_injection and not defer_manifest_actions:
+            add_manifest_batches(
+                "verify.server_injection",
+                "verify_candidates",
+                "injection.verify_batch",
+                {
+                    "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                    "endpoint_manifest_ref": endpoint_ref or None,
+                },
+                manifest_ref=candidate_ref,
+                dependencies=active_dependencies,
+                required="server_injection" in explicitly_requested,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
         if scope in {"full", "endpoint"} and graphql and not defer_manifest_actions:
             add_manifest_batches(
                 "verify.graphql",
@@ -2302,6 +2326,18 @@ class ScanActionPlanCompiler:
                     "verify.request_nosqli",
                     "verify_candidates",
                     "nosqli.verify_batch",
+                    {"request_candidate_manifest_ref": request_candidate_ref},
+                    manifest_ref=request_candidate_ref,
+                    dependencies=tuple(dict.fromkeys((
+                        *primary_dependency, *private_request_dependencies,
+                    ))),
+                    required=False,
+                )
+            if server_injection:
+                add_manifest_batches(
+                    "verify.request_server_injection",
+                    "verify_candidates",
+                    "injection.verify_batch",
                     {"request_candidate_manifest_ref": request_candidate_ref},
                     manifest_ref=request_candidate_ref,
                     dependencies=tuple(dict.fromkeys((

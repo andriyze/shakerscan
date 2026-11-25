@@ -15,6 +15,11 @@ from __future__ import annotations
 CANONICAL_PROOF_CONTRACTS: frozenset[str] = frozenset({
     "authz_surface_anonymous_access/v1",
     "authz_surface_password_hash_disclosure/v1",
+    "injection_command_differential/v1",
+    "injection_command_time_differential/v1",
+    "injection_path_traversal_differential/v1",
+    "injection_template_differential/v1",
+    "injection_xxe_differential/v1",
     "nosqli_operator_differential/v1",
     "sqli_authentication_bypass/v1",
     "sqli_boolean_differential/v1",

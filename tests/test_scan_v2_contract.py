@@ -241,6 +241,7 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
     assert [item["name"] for item in contract["families"]] == [
         "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
         "sensitive_exposure", "nosqli", "authz_surface", "graphql", "recon_active",
+        "server_injection",
     ]
     assert contract["passive_coverage"]["default_families"] == [
         "recon", "nuclei_passive", "sensitive_exposure",
@@ -328,6 +329,7 @@ def test_active_family_admission_is_derived_from_the_check_registry():
     assert checked_active == {
         "nuclei_active", "xss", "sqli", "bola", "nosqli", "authz_surface", "graphql",
         "recon_active",
+        "server_injection",
     }
     assert checked_passive == {"recon", "nuclei_passive", "sensitive_exposure"}
 

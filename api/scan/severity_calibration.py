@@ -166,6 +166,10 @@ _PRODUCER_REASONS: Mapping[str, str] = {
         "Operator injection changes the database query; an authentication bypass is critical, "
         "other query changes are high."
     ),
+    "shakerscan_injection_verify": (
+        "Input reached an interpreter on the server. Template evaluation and command execution "
+        "run the attacker's code (critical); reading a file the application did not offer is high."
+    ),
     "shakerscan_graphql_probe": (
         "A GraphQL hardening gap: it eases schema discovery or resource exhaustion but exposes no "
         "data by itself."

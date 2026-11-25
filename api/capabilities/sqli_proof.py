@@ -399,7 +399,10 @@ class SQLiProofAdapter:
                     proof_contract = "sqli_boolean_differential/v1"
                     technique = "boolean_pair_repeated"
                     proof_pairs = boolean_pairs
-                if proof_contract is None and original.isdigit() and budget - attempted >= 4:
+                # A delay payload the external verifier supplied for this candidate keeps the six
+                # requests its confirmation needs: the pairs below are tried with what is left.
+                held = 6 if self.candidate.get("time_payload") else 0
+                if proof_contract is None and original.isdigit() and budget - attempted >= 4 + held:
                     # A numeric context has no quote to close: the same TRUE/FALSE contract with
                     # the condition appended to the number.
                     numeric = await self._boolean_pairs(
@@ -412,7 +415,7 @@ class SQLiProofAdapter:
                         proof_pairs = numeric
                         payload_shape = "<original> AND 1=1  vs  <original> AND 1=2"
                 if (
-                    proof_contract is None and budget - attempted >= 6
+                    proof_contract is None and budget - attempted >= 6 + held
                     # A read only: OR TRUE widens a statement to every row, which is an answer
                     # on a SELECT and damage on an UPDATE or DELETE.
                     and self.request.method in {"GET", "HEAD", "OPTIONS"}

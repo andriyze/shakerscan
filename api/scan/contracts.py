@@ -56,6 +56,7 @@ def budget_sufficiency(profile: Any) -> bool:
 SCAN_V2_FAMILY_NAMES = (
     "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
     "sensitive_exposure", "nosqli", "authz_surface", "graphql", "recon_active",
+    "server_injection",
 )
 # Families that examine the application itself: they discover its surface or test what was
 # discovered. sensitive_exposure alone only reads a fixed list of well-known locations (its
@@ -178,13 +179,13 @@ def _ceiling_below_template_floor(
 # wall-killing every attempt. Continuation rounds add breadth beyond these floors.
 SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, Mapping[str, int]] = {
     "fast": {"xss": 1, "sqli": 1, "sensitive_exposure": 5, "nosqli": 5, "authz_surface": 5,
-             "graphql": 5},
+             "graphql": 5, "server_injection": 5},
     "balanced": {"xss": 4, "sqli": 4, "sensitive_exposure": 10, "nosqli": 10, "authz_surface": 10,
-                 "graphql": 10},
+                 "graphql": 10, "server_injection": 10},
     "thorough": {"xss": 12, "sqli": 16, "sensitive_exposure": 20, "nosqli": 25, "authz_surface": 20,
-                 "graphql": 20},
+                 "graphql": 20, "server_injection": 25},
     "deep": {"xss": 24, "sqli": 32, "sensitive_exposure": 50, "nosqli": 50, "authz_surface": 50,
-             "graphql": 50},
+             "graphql": 50, "server_injection": 50},
 }
 _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "recon": (
@@ -200,6 +201,7 @@ _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "nosqli": ("nosqli.verify_batch",),
     "authz_surface": ("authz_surface.verify_batch",),
     "graphql": ("graphql.verify_batch",),
+    "server_injection": ("injection.verify_batch",),
     # Parameter discovery first: it is the one recon_active action every web Scan can plan.
     "recon_active": ("web.param_discover", "vhost.discover", "dns.enumerate"),
 }
