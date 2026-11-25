@@ -31,6 +31,7 @@ try:
         hunt_body_input, signed_in_request, xss_browser_parameter,
     )
     from runtime.credential_refs import normalize_hunt_principal_slot
+    from runtime.product_templates import product_request
 except ModuleNotFoundError:
     from ..runtime.capability_registry import CAPABILITY_REGISTRY
     from ..runtime.hunt_scanner_contract import (
@@ -38,6 +39,7 @@ except ModuleNotFoundError:
         hunt_body_input, signed_in_request, xss_browser_parameter,
     )
     from ..runtime.credential_refs import normalize_hunt_principal_slot
+    from ..runtime.product_templates import product_request
 
 
 def _browser_xss_route(name: str, values: Mapping[str, Any]) -> bool:
@@ -74,11 +76,32 @@ def scanner_principal_slot(values: Mapping[str, Any]) -> str:
     return normalize_hunt_principal_slot(values.get("as_principal"))
 
 
+def _product_writes(name: str, values: Mapping[str, Any]) -> bool:
+    """A product's state-changing template checks (runtime/product_templates.py)."""
+    if name != "templates.scan":
+        return False
+    try:
+        request = product_request(values)
+    except ValueError:
+        return False  # the input schema refuses it
+    return bool(request and request[1] == "state_changing")
+
+
 def body_authority_refusal(name: str, values: Mapping[str, Any], policy: Mapping[str, Any]) -> HuntRefusal | None:
-    """A grantable refusal for a body test the Hunt's policy does not allow."""
-    if name not in BODY_INPUT_VERIFIERS or not hunt_body_input(values):
-        return None
+    """A grantable refusal for a body test, or a product's state-changing template checks, the
+    Hunt's policy does not allow."""
     if policy.get("active_testing") and policy.get("allow_state_changing_http"):
+        return None
+    if _product_writes(name, values):
+        return HuntRefusal(
+            "state_changing_http_not_allowed",
+            "templates.scan with product_checks state_changing runs non-GET and exploit-class "
+            "templates and needs this Hunt's active_testing and allow_state_changing_http "
+            "permissions. A person can allow them for this Hunt (a permission request is raised). "
+            "Its requests count as verifier writes.",
+            subject={"capability": name, "flag": "state-changing"},
+        )
+    if name not in BODY_INPUT_VERIFIERS or not hunt_body_input(values):
         return None
     method = str(values.get("method") or "POST").upper()
     return HuntRefusal(
@@ -154,11 +177,11 @@ async def resolve_scanner_identity(
     """
     from .dispatch_authority import HuntDispatchRejected
 
-    if hunt_body_input(values) and not (
+    if (hunt_body_input(values) or _product_writes(capability_name, values)) and not (
         policy.get("active_testing") and policy.get("allow_state_changing_http")
     ):
         raise HuntDispatchRejected(
-            f"Hunt action authority rejected at dispatch: {capability_name} on a request body "
+            f"Hunt action authority rejected at dispatch: {capability_name} sending writes "
             "no longer has the Hunt's state-changing permission"
         )
     if not signed_in_request(values):

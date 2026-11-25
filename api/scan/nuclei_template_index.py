@@ -139,6 +139,11 @@ class _TemplateRecord:
     # Tries logins (``_tries_login``). A login attempt can lock the account it tries, so it
     # needs the state-changing permission even when every request is a GET.
     credential_level: bool = False
+    # The most requests one run of the template can send against one target
+    # (``_request_upper_bound``), or None when no static bound exists: a ``flow``, ``code`` or
+    # ``javascript`` step, a ``self-contained`` template (it requests its own URLs, not the
+    # target), or a request block that names an unreadable payload file.
+    max_requests: int | None = None
 
     @property
     def state_changing(self) -> bool:
@@ -328,6 +333,56 @@ def _requests_never_requested_path(
     return False
 
 
+# nuclei's default race count, for a ``race: true`` block that does not name one.
+_DEFAULT_RACE_COUNT = 10
+
+
+def _request_upper_bound(
+    document: Mapping[str, Any], bundle: str, template_dir: str, files: dict[str, tuple[str, ...]],
+) -> int | None:
+    """The most requests one run of the template sends to one target, or None if unbounded.
+
+    Per request block: its paths and raw requests, each sent once per payload combination
+    (``pitchfork`` and ``batteringram`` walk the lists together, so the longest list; every other
+    attack, the default included, is counted as ``clusterbomb``, the product of the list
+    lengths), times the race count of a race block. The run sends no redirects and no retries
+    (``-disable-redirects``, ``-retries 0``), so nothing is added for them. Stopping at the first
+    match only sends fewer."""
+    if document.get("self-contained") or any(key in document for key in ("flow", "code", "javascript")):
+        return None
+    requests = document.get("http") or document.get("requests") or []
+    if not isinstance(requests, list):
+        return None
+    total = 0
+    for request in requests:
+        if not isinstance(request, Mapping):
+            continue
+        paths = request.get("path") if isinstance(request.get("path"), list) else []
+        raws = request.get("raw") if isinstance(request.get("raw"), list) else []
+        sends = max(1, len(paths) + len(raws))
+        payloads = request.get("payloads") if isinstance(request.get("payloads"), Mapping) else {}
+        sizes = []
+        for values in payloads.values():
+            resolved = _payload_values(values, bundle, template_dir, files)
+            if not isinstance(values, (list, tuple)) and resolved == (str(values),):
+                return None  # a payload file the bundle does not hold
+            sizes.append(max(1, len(resolved)))
+        combinations = 1
+        if sizes and str(request.get("attack") or "").lower() in {"pitchfork", "batteringram"}:
+            combinations = max(sizes)
+        else:
+            for size in sizes:
+                combinations *= size
+        race = 1
+        if request.get("race"):
+            try:
+                race = max(1, int(request.get("race_count") or _DEFAULT_RACE_COUNT))
+            except (TypeError, ValueError):
+                return None
+        total += sends * combinations * race
+    return total or None
+
+
 def _filled(target: str, fill: Mapping[str, str]) -> str:
     return _PLACEHOLDER_RE.sub(lambda match: fill.get(match.group(1), ""), target)
 
@@ -509,6 +564,7 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                     document, templates_dir, dirpath, payload_files),
                 credential_level=(
                     CREDENTIAL_LEVEL_TAG in tags or _tries_login(document)),
+                max_requests=_request_upper_bound(document, templates_dir, dirpath, payload_files),
             )
             prior = records.get(template_id)
             if prior is not None:
@@ -525,6 +581,8 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                     exploit_class=prior.exploit_class or record.exploit_class,
                     never_requested=prior.never_requested or record.never_requested,
                     credential_level=prior.credential_level or record.credential_level,
+                    max_requests=(None if prior.max_requests is None or record.max_requests is None
+                                  else prior.max_requests + record.max_requests),
                 )
             records[template_id] = record
     return NucleiMethodIndex(

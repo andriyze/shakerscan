@@ -28,6 +28,7 @@ from typing import Any, Mapping, Optional, Sequence
 from runtime.auth_refusal import BASELINE_RECORD_KIND, is_login_location
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.hunt_scanner_contract import SCANNER_HEADER_MARKERS, hunt_body_input
+from runtime.product_templates import product_hold, product_request, resolve_product_window
 from runtime.request_shape import (
     json_field_leaf_name, nested_json_body, public_request_body_shape,
 )
@@ -382,8 +383,14 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
     if not template_ids:
         args += ["-severity", severity]
     args += ["-rate-limit", "10", "-bulk-size", "10", "-concurrency", "10"]
+    profile = str(opts.get("template_profile") or "").strip().lower()
+    if template_ids and profile == "product":
+        # A recognised product's server-resolved window (runtime/product_templates.py). Only the
+        # typed match metadata is kept: the archive records each exchange.
+        _validate_active_nuclei_allowlist(template_ids)
+        return [*args, "-id", template_ids, "-omit-raw", "-omit-template"]
     if template_ids:
-        if str(opts.get("template_profile") or "").strip().lower() == "active":
+        if profile == "active":
             # The server-resolved active allowlist (scan/nuclei_template_index.py)
             # is an explicit, method-filtered id list derived from the pinned
             # bundle: it excludes intrusive templates and, unless state-changing
@@ -877,6 +884,7 @@ def canonical_hunt_scanner_budget(
     device_target: bool = False,
     body_test: bool = False,
     oob_allowed: bool = False,
+    product_checks: str | None = None,
 ) -> dict[str, int]:
     """Admission ceiling for the exact server-owned Hunt scanner selection.
 
@@ -893,9 +901,15 @@ def canonical_hunt_scanner_budget(
     A ``body_test`` (a verifier sending POST/PUT/PATCH bodies) also holds its every request as a
     verifier write (``verifier_write_requests``): the Hunt's own ceiling for verifier writes,
     shown beside the state-changing ceiling that bounds the planner's writes.
+
+    A ``templates.scan`` of a recognised product's templates (``product_checks``) holds one
+    product window (``runtime/product_templates.py``); its ``state_changing`` checks hold every
+    request as a verifier write too, as a body test does.
     """
     budget = dict(CAPABILITY_REGISTRY.require(capability_name).budget_cost)
     if capability_name == "templates.scan":
+        if product_checks:
+            return product_hold(product_checks)
         budget["http_requests"] = canonical_passive_nuclei_request_upper_bound()
         if oob_allowed:
             # The Hunt's out-of-band authority is used only by a call that reserves it
@@ -937,7 +951,17 @@ def hunt_scanner_budget_context(
         "device_target": bool(run.get("device_target_id")),
         "body_test": hunt_body_input(capability_input),
         "oob_allowed": bool(policy.get("active_testing") and policy.get("allow_oob_interactions")),
+        **({"product_checks": _product_checks(capability_input)}
+           if _product_checks(capability_input) else {}),
     }
+
+
+def _product_checks(capability_input: Mapping[str, Any]) -> str | None:
+    try:
+        request = product_request(capability_input)
+    except ValueError:
+        return None  # the input schema refuses it before any hold is derived
+    return request[1] if request else None
 
 
 # The profile holds earlier releases reserved, for calls they queued that a worker of this release
@@ -963,6 +987,7 @@ def hunt_scanner_dispatch_budgets(
     device_target: bool = False,
     body_test: bool = False,
     oob_allowed: bool = False,
+    product_checks: str | None = None,
 ) -> tuple[dict[str, int], ...]:
     """The holds a Hunt scanner call may run at, the current one first.
 
@@ -974,7 +999,10 @@ def hunt_scanner_dispatch_budgets(
     current = canonical_hunt_scanner_budget(
         capability_name, budget_profile=budget_profile, deep_domxss=deep_domxss,
         device_target=device_target, body_test=body_test, oob_allowed=oob_allowed,
+        product_checks=product_checks,
     )
+    if product_checks:
+        return (current,)
     legacy = canonical_hunt_scanner_budget(capability_name, body_test=body_test)
     holds = [current, legacy]
     if current != legacy and not body_test:
@@ -1037,6 +1065,8 @@ def hunt_scanner_timeout_ms(
 def canonical_hunt_scanner_options(
     capability_name: str,
     planner_input: Mapping[str, Any],
+    policy: Mapping[str, Any] | None = None,
+    requested_budget: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Derive worker scanner options from the bounded planner projection.
 
@@ -1050,6 +1080,8 @@ def canonical_hunt_scanner_options(
     options = CAPABILITY_REGISTRY.validate_hunt_input(name, planner_input)
     if name != "templates.scan":
         return options
+    if options.get("product"):
+        return _product_template_options(options, policy or {}, requested_budget or {})
     return {
         **options,
         "severity": options.get("severity") or "critical,high,medium,low,info",
@@ -1059,6 +1091,46 @@ def canonical_hunt_scanner_options(
         "template_request_cost_upper_bound": (
             canonical_passive_nuclei_request_upper_bound()
         ),
+    }
+
+
+def _product_template_options(
+    options: Mapping[str, Any], policy: Mapping[str, Any], requested_budget: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The worker's selection for a recognised product's templates (runtime/product_templates.py).
+
+    Resolved from the pinned bundle on the worker; refused (nothing sent) when the window is
+    empty, needs a permission the Hunt lacks, or could send more than the call reserved."""
+    try:
+        product, checks, window = product_request(options)
+    except ValueError as exc:
+        raise AgentToolError(str(exc)) from exc
+    from scan.nuclei_template_index import nuclei_templates_directory
+
+    state_changing = checks == "state_changing"
+    selection = resolve_product_window(
+        nuclei_templates_directory(), product, checks, window,
+        allow_state_changing_http=bool(policy.get("active_testing") and policy.get("allow_state_changing_http")),
+    )
+    if selection.skip_reason:
+        raise AgentToolError(
+            f"product templates {product} {checks} window {window}: {selection.skip_reason}"
+            + (f" (the selection has {selection.windows} windows)" if selection.windows else ""))
+    held = int(requested_budget.get("http_requests") or 0)
+    if state_changing:
+        held = min(held, int(requested_budget.get("verifier_write_requests") or 0))
+    if selection.request_upper_bound > held:
+        raise AgentToolError(
+            f"product templates {product} window {window} may send {selection.request_upper_bound} "
+            f"requests; the call holds {held}")
+    return {
+        **{key: options[key] for key in ("path", "as_principal", "session_ref", "request_bindings")
+           if key in options},
+        "product": product, "product_checks": checks, "product_window": window,
+        "template_ids": ",".join(selection.template_ids),
+        "template_profile": "product",
+        "product_request_upper_bound": selection.request_upper_bound,
+        "nuclei_active_state_changing": state_changing,
     }
 
 
@@ -1096,7 +1168,7 @@ def canonical_hunt_scanner_execution(
     requested_budget: Mapping[str, Any],
 ) -> tuple[dict[str, Any], str | None, str | None]:
     """Return the server-derived scanner options and independently gated OOB config."""
-    options = canonical_hunt_scanner_options(capability_name, planner_input)
+    options = canonical_hunt_scanner_options(capability_name, planner_input, policy, requested_budget)
     server, token = resolve_hunt_interactsh_config(
         allow_active=bool(policy.get("active_testing")),
         allow_oob=bool(policy.get("allow_oob_interactions")),
@@ -1656,7 +1728,31 @@ def build_enforced_scanner_plan(
         passive_cost = internal_options.get(
             "template_request_cost_upper_bound"
         )
-        if passive_cost is not None:
+        product_cost = internal_options.get("product_request_upper_bound")
+        if str(internal_options.get("template_profile") or "") == "product":
+            # The window's static request bound (runtime/product_templates.py) is the ceiling:
+            # no retries, no redirects, no OOB, every template's requests counted once per
+            # payload combination.
+            if (
+                isinstance(product_cost, bool) or not isinstance(product_cost, int)
+                or not 1 <= product_cost <= http
+            ):
+                raise AgentToolError("nuclei product template request ceiling exceeds the reservation")
+            rate = paced_rate(_NUCLEI_RATE_CEILING)
+            _replace_argv_value(argv, "-rate-limit", rate)
+            _replace_argv_value(argv, "-bulk-size", min(10, rate))
+            _replace_argv_value(argv, "-concurrency", min(10, rate))
+            timeout_seconds, timeout_ms = wall, wall * 1_000
+            hard = {"http_requests": product_cost, "tool_wall_seconds": wall}
+            mode, method = "exact", "reviewed_template_allowlist"
+            proof_inputs = {
+                "profile": "product_templates",
+                "template_count": len([item for item in str(internal_options.get("template_ids") or "").split(",") if item]),
+                "template_request_upper_bound": product_cost,
+                "state_changing": bool(internal_options.get("nuclei_active_state_changing")),
+                "retries": 0, "redirects": 0, "public_oob": False,
+            }
+        elif passive_cost is not None:
             if (
                 isinstance(passive_cost, bool)
                 or not isinstance(passive_cost, int)

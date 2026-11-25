@@ -1361,6 +1361,9 @@ export const HUNT_START_CONTRACT = {
         "fields": [
           "session_ref",
           "request_bindings",
+          "product",
+          "product_checks",
+          "product_window",
           "path",
           "severity",
           "tags",
