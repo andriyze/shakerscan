@@ -209,12 +209,14 @@ def probe_paths() -> tuple[str, ...]:
     return tuple(paths)
 
 
+_STEP_NAMES = ("crawl", *(f"content:{name}" for name in CONTENT_WORDLISTS), "crawl:primary",
+               "crawl:secondary", "templates", "probe:control")
 _PROBE_DIGESTS = frozenset(key_digest(_probe_key(path)) for path in probe_paths()) | {
-    key_digest(step_key("probe:control"))}
+    key_digest(step_key(name)) for name in _STEP_NAMES}
 
 
 def probe_key_digests() -> frozenset[str]:
-    """sha256 of the probe idempotency keys: their answers are discovery, not the Hunt's testing."""
+    """sha256 of the engine's own discovery keys: their answers are discovery, not testing."""
     return _PROBE_DIGESTS
 
 

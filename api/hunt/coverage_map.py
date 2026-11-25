@@ -48,6 +48,9 @@ FINISH_ITEMS = 8
 # Finishing is not held when less than this much of the Hunt's wall remains.
 FINISH_MIN_WALL_SECONDS = 120
 MIN_FORCE_REASON_CHARS = 10
+# A forced finish with many pairs open needs this many of the Hunt's own actions since coverage was
+# first refused (finite: it never holds a Hunt forever).
+FORCE_MIN_ACTIONS = 40
 
 # Test classes: the check, and what this engine offers to run it.
 CLASS_GUIDE: Mapping[str, str] = {
@@ -549,15 +552,16 @@ def http_budget_left(run: Mapping[str, Any]) -> bool:
 
 
 def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, force: bool,
-                 force_reason: str | None, now: datetime | None = None) -> str | None:
-    """Why this finish is refused, or None. Never refuses a forced finish with a reason, a Hunt
-    whose wall or HTTP budget is spent, a budget-exhausted Hunt, or one with nothing open."""
+                 force_reason: str | None, now: datetime | None = None,
+                 actions_since_refusal: int | None = None) -> str | None:
+    """Why this finish is refused, or None.
+
+    Never refuses a Hunt whose wall or HTTP budget is spent, a budget-exhausted Hunt, or one with
+    nothing open. A forced finish needs a reason and, while many pairs are open, real work on them
+    first: ``FORCE_MIN_ACTIONS`` of the Hunt's own actions since coverage was first refused
+    (``actions_since_refusal``). Measured agents forced the very first refusal with a
+    rationalization; this bound is finite, so a finish is never held forever."""
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or report is None:
-        return None
-    if force:
-        if len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:
-            return ("force=true needs force_reason: say in a sentence why the open coverage is left "
-                    "untested; it is recorded in the debrief")
         return None
     if str(run.get("status") or "") == "budget_exhausted":
         return None
@@ -571,26 +575,51 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
     if not pairs and not pending:
         return None
     hunt_id = str(run.get("id") or "")
+    if force:
+        if len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:
+            return ("force=true needs force_reason: say in a sentence why the open coverage is left "
+                    "untested; it is recorded in the debrief")
+        done = int(actions_since_refusal or 0)
+        if pending or (pairs > FORCE_MIN_ACTIONS and done < FORCE_MIN_ACTIONS):
+            return (f"force is accepted after real work on the open coverage: {pairs} pairs are open"
+                    + (f" and discovery is still running ({', '.join(pending)})" if pending else "")
+                    + f"; this Hunt has run {done} of the {FORCE_MIN_ACTIONS} actions needed since "
+                    f"coverage was first refused. Every listed endpoint answered on this target "
+                    f"differently from a path that cannot exist, so it is part of this target's "
+                    f"surface. Next: POST /hunts/{hunt_id}/query kind=coverage and run the checks.")
+        return None
     lines = [_item_line(item) for item in (report.get("open") or [])[:FINISH_ITEMS]]
     left = (f"{int(remaining // 60)} min of wall" if remaining is not None else "wall time")
     parts = [
         f"coverage is open: {pairs} endpoint/test-class pairs untested on "
         f"{int(report.get('endpoints_open') or 0)} of {int(report.get('endpoints') or 0)} known endpoints"
         + (f"; discovery not finished: {', '.join(pending)}" if pending else "")
-        + f", with {left} and HTTP budget left.",
+        + f", with {left} and HTTP budget left. Every listed endpoint answered on this target "
+        "differently from a path that cannot exist (crawl, content discovery, product probes), so it "
+        "is part of this target's surface, whatever product it belongs to.",
     ]
     if lines:
         parts.append("Untested first: " + "; ".join(lines) + ".")
     parts.append(
         f"Continue: POST /hunts/{hunt_id}/query kind=coverage lists every open pair with the check "
         "to run (class_guide); a pair closes when you run that check, record a candidate on the "
-        "route, or record a coverage angle (status negative/blocked) for it. Or finish with "
-        "force=true and force_reason (why the rest stays untested); the reason and the open "
-        "coverage go into the debrief.")
+        "route, or record a coverage angle (status negative/blocked) for it. force=true with "
+        f"force_reason is accepted after {FORCE_MIN_ACTIONS} more actions of real work (or once "
+        "few pairs remain); the reason and the open coverage go into the debrief.")
     return " ".join(parts)
 
 
 # --- loading ------------------------------------------------------------------------------------
+
+async def actions_since(conn: Any, run: Mapping[str, Any], since: datetime) -> int:
+    """The Hunt's own actions (not the engine's discovery) started after ``since``."""
+    return int(await conn.fetchval(
+        """SELECT count(*) FROM hunt_actions
+           WHERE hunt_run_id=$1 AND started_at > $2
+             AND NOT (COALESCE(input_summary->>'idempotency_key_sha256', '') = ANY($3::text[]))""",
+        run["id"], since, sorted(probe_key_digests()),
+    ) or 0)
+
 
 async def load_coverage(conn: Any, run: Mapping[str, Any]) -> dict[str, Any] | None:
     """The coverage map of one web Hunt, or None for another target kind."""
@@ -635,7 +664,8 @@ async def load_coverage(conn: Any, run: Mapping[str, Any]) -> dict[str, Any] | N
 
 
 __all__ = [
-    "CLASSES", "CLASS_GUIDE", "COVERAGE_TARGET_KINDS", "SCHEMA", "build_coverage", "classify",
+    "CLASSES", "CLASS_GUIDE", "COVERAGE_TARGET_KINDS", "FORCE_MIN_ACTIONS", "SCHEMA", "actions_since",
+    "build_coverage", "classify",
     "compact_open_coverage", "coverage_page", "debrief_coverage", "family_classes", "finish_guard",
     "key_digest", "load_coverage", "normalize_path", "wall_remaining_seconds",
 ]

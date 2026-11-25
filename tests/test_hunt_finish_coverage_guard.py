@@ -42,6 +42,8 @@ class _Connection:
         self.created_at = datetime.now(timezone.utc) - timedelta(minutes=created_minutes_ago)
         self.final_debrief = None
         self.completed_at = None
+        self.actions_since = 0
+        self.counted = []
 
     def row(self):
         return {"id": HUNT, "target_id": uuid.uuid4(), "device_target_id": None,
@@ -67,6 +69,11 @@ class _Connection:
 
     async def execute(self, query, *args):
         return "UPDATE 0"
+
+    async def fetchval(self, query, *args):
+        assert "FROM hunt_actions" in query and "started_at > $2" in query
+        self.counted.append(args[1])
+        return self.actions_since
 
     async def fetch(self, query, *args):
         return []
@@ -150,3 +157,28 @@ def test_finish_request_accepts_force_fields():
     assert request.force is True and request.force_reason == "because"
     with pytest.raises(Exception):
         run_router.HuntFinishRequest(summary="s", force_reason="x" * 2001)
+
+
+MANY = build_coverage(actions=[], endpoints=[{"method": "GET", "path": f"/api/v1/item{index}/{index}",
+                                              "param_shape": "q"} for index in range(20)])
+
+
+def test_a_forced_finish_counts_the_work_done_since_the_first_refusal():
+    from api.hunt import run_service
+    run_service._FIRST_COVERAGE_REFUSAL.clear()
+    connection = _Connection()
+    reason = "the rest is wordlist noise unrelated to the objective"
+    with pytest.raises(run_router.HTTPException) as first:
+        asyncio.run(_service(connection, MANY).finish(str(HUNT), summary="Done", next_actions=[],
+                                                      force=True, force_reason=reason))
+    assert "0 of the 40 actions" in first.value.detail and connection.counted == []
+    connection.actions_since = 12
+    with pytest.raises(run_router.HTTPException) as second:
+        asyncio.run(_service(connection, MANY).finish(str(HUNT), summary="Done", next_actions=[],
+                                                      force=True, force_reason=reason))
+    assert "12 of the 40 actions" in second.value.detail and len(connection.counted) == 1
+    connection.actions_since = 40
+    result = asyncio.run(_service(connection, MANY).finish(str(HUNT), summary="Done", next_actions=[],
+                                                           force=True, force_reason=reason))
+    assert result["status"] == "completed" and json.loads(connection.final_debrief)["coverage"]["forced"]
+    run_service._FIRST_COVERAGE_REFUSAL.clear()
