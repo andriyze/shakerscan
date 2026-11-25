@@ -3,8 +3,9 @@
 The Hunt calls ``request.verify``; admission checks its input and authority and reserves its hold;
 the worker resolves the request, runs the check and settles what it sent; a verified proof becomes
 a finding. Labelled doubles, and only these: Redis (an in-memory dictionary; the queue hands the
-job straight to the worker) and the pinned transport (a fake application answering in process; no
-traffic leaves the test).
+job straight to the worker), the per-call active approval (the target's standing authorization
+answers it), the receipt redaction of the input, and the pinned transport (a fake application
+answering in process; no traffic leaves the test).
 """
 from __future__ import annotations
 
@@ -66,7 +67,7 @@ async def _hunt(pool, *, state_changing: bool = True):
             target, json.dumps(policy), json.dumps(budget), json.dumps({key: 0 for key in LEDGER}),
             json.dumps(context), uuid.UUID(str(standing["approval_receipt_id"])),
         )
-    return dict(row)
+    return {**dict(row), "scope_receipt_id": str(standing["scope_receipt_id"])}
 
 
 class FakeApplication:
@@ -111,7 +112,15 @@ def stack(monkeypatch):
     def enqueue(_redis, _queue, payload):
         workers.append(asyncio.get_running_loop().create_task(worker.process_canonical_http_capability_job(payload)))
 
+    scope = {}
+
+    async def approval(*_args, **_kwargs):  # labelled double: the per-call active approval
+        return {"scope_receipt_id": scope.get("id")}
+
     FakeApplication.sent = []
+    monkeypatch.setitem(router._deps, "_validate_approval_receipt_for_action", lambda: approval)
+    monkeypatch.setattr(router, "_hunt_redacted_capability_input", lambda _name, values: dict(values))
+    monkeypatch.setattr(worker, "RESULTS_DIR", Path("/tmp"))
     monkeypatch.setattr(request_verification, "PinnedAiohttpReplayTransport", FakeApplication)
     monkeypatch.setattr(router, "_pool", lambda: pool)
     monkeypatch.setattr(router, "get_redis", lambda: redis)
@@ -125,6 +134,7 @@ def stack(monkeypatch):
 
     environment = Stack()
     environment.pool, environment.loop, environment.router, environment.workers = pool, loop, router, workers
+    environment.scope = scope
     yield environment
     loop.run_until_complete(drop())
     loop.close()
@@ -158,6 +168,7 @@ async def _state(pool, hunt, key):
 def test_a_proven_open_redirect_becomes_a_finding_and_settles_what_it_sent(stack):
     async def scenario():
         hunt = await _hunt(stack.pool)
+        stack.scope["id"] = hunt["scope_receipt_id"]
         result = await _call(stack, hunt, "rv-redirect-01", {
             "check": "open_redirect", "method": "GET", "path": "/go", "query": {"next": "/home"},
             "parameter": "next"})
@@ -179,6 +190,7 @@ def test_a_proven_open_redirect_becomes_a_finding_and_settles_what_it_sent(stack
 def test_a_writing_check_is_held_and_settled_as_verifier_writes(stack):
     async def scenario():
         hunt = await _hunt(stack.pool)
+        stack.scope["id"] = hunt["scope_receipt_id"]
         result = await _call(stack, hunt, "rv-host-01", {
             "check": "host_header_injection", "method": "POST", "path": "/reset",
             "form_body": {"email": "a@example.test"}})
@@ -196,6 +208,7 @@ def test_a_writing_check_is_held_and_settled_as_verifier_writes(stack):
 def test_a_write_without_the_state_changing_permission_is_refused_before_anything_is_sent(stack):
     async def scenario():
         hunt = await _hunt(stack.pool, state_changing=False)
+        stack.scope["id"] = hunt["scope_receipt_id"]
         refused = await _call(stack, hunt, "rv-refused-01", {
             "check": "host_header_injection", "method": "POST", "path": "/reset",
             "form_body": {"email": "a@example.test"}})
