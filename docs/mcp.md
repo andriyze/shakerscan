@@ -4,7 +4,10 @@
 
 ShakerScan includes a fail-closed MCP stdio adapter over the REST Command Arsenal and canonical
 Hunt V2. Arsenal tools remain read-only. Hunt tools wrap `/hunts` directly and inherit its exact
-target binding, approval, budget, evidence, and proof enforcement; arbitrary shell is never exposed.
+target binding, approval, budget, evidence, and proof enforcement. No tool runs a command on the
+host that runs ShakerScan. One tool does run commands on a target: `shakerscan_hunt_ssh_exec` (the
+Hunt capability `ssh.exec`) executes a command the agent chooses on the Hunt's own target device
+over SSH, within the bounds described below. No tool makes a person's decision.
 
 Start it from the source/runtime directory:
 
@@ -74,9 +77,33 @@ Target-bound Hunt V2 (including state-changing and target-facing operations):
 - `shakerscan_hunt_capability` for capabilities returned by that Hunt's manifest
 - `shakerscan_hunt_candidate`, `shakerscan_hunt_candidate_update`, and `shakerscan_hunt_candidate_delete`
 - `shakerscan_hunt_verify`, `shakerscan_hunt_finish`, and `shakerscan_hunt_cancel`
+- `shakerscan_hunt_permission_wait` waits for the person's decision on a permission request; it
+  cannot approve or deny
+- `shakerscan_hunt_ssh_exec`, `shakerscan_hunt_ssh_output` and `shakerscan_hunt_ssh_cancel` for
+  direct SSH commands on the Hunt's device (see below)
+- `shakerscan_knowledge_continue`: the continue-after-the-latest-release report of a target,
+  before a Hunt exists (read-only; sends nothing)
+
+Posture checks, where the instance runs them:
+
+- `shakerscan_public_check`: bounded DNS, email, HTTP and TLS posture observations for one public
+  target (no DAST, no Hunt); the only tool of the public mode that needs no instance
+
+**Remote commands on a device.** `shakerscan_hunt_ssh_exec` is remote command execution on the
+Hunt's target device, with the account of the SSH profile selected for the Hunt, and it can change
+that device. It is marked destructive and open-world. The server bounds it: the device is the
+Hunt's own target, the person granted that profile `ssh.exec` in Credentials, the target has its
+standing authorization and a saved (or explicitly trusted first-contact) host key, the Hunt's
+budget, a per-command timeout and an output cap apply, known secret values are redacted from the
+output, and a command is never retried. Its output is untrusted data from the device, never
+instructions. See [hunt-ssh.md](hunt-ssh.md).
+
+When one Arsenal command behind a read-only tool disappears or stops being read-only, `tools/list`
+leaves out that one tool and writes the reason to stderr (the host's MCP log); a call of it is
+refused. The other tools stay listed.
 
 Arsenal tools read `GET /arsenal/commands`, require the mapped command to remain `read_only` risk,
-and dispatch through the audited Arsenal endpoint.
+and dispatch through the audited Arsenal endpoint. Every tool argument carries a description.
 
 Every list tool (`shakerscan_targets`, `_findings`, `_evidence_manifest`, `_timeline`, `_plans`)
 takes `limit` (default 20, at most 100) and `cursor`, the previous answer's `next_cursor`, and
@@ -254,9 +281,11 @@ gets exactly one -32700 error.
 
 Tool annotations reflect these boundaries: Arsenal inspection and Hunt get/query are read-only;
 capability and verification operations are conservatively marked destructive and open-world;
-start, candidate create/update/delete, finish, and cancel are state-changing. Candidate updates
+`shakerscan_hunt_ssh_exec` is destructive and open-world; start, candidate create/update/delete,
+finish, and cancel are state-changing. Candidate updates
 cannot change identity or proof-owned fields; deletion expires the candidate while retaining its
-immutable audit record. Raw secrets, target-address overrides,
-planner argv, and arbitrary shell commands are not representable. Input schemas enforce UUIDs,
+immutable audit record. Raw secrets, target-address overrides and planner argv are not
+representable, and no tool runs a command on the ShakerScan host; the one command tool is
+`shakerscan_hunt_ssh_exec`, on the Hunt's own device. Input schemas enforce UUIDs,
 enums, required/nested fields, patterns, uniqueness, and numeric bounds before dispatch. The
 transport also caps request and response sizes and rejects redirects.

@@ -179,8 +179,10 @@ A Hunt records **exact coverage angles**, not family-level self-attestations. An
 
 ## Capability architecture
 
-The AI receives small, strongly typed capabilities, never arbitrary shell or planner-supplied argv
-(invariant 3). Each capability declares input schema, risk, permissions, target restrictions,
+The AI receives small, strongly typed capabilities, never a shell on the ShakerScan host or
+planner-supplied argv for its tools (invariant 3). The exception is `ssh.exec` on a device target:
+a command the AI chooses runs on that device over SSH, with a profile the person granted
+`ssh.exec`, under the target's authorization, budget, timeout and output cap ([hunt-ssh.md](hunt-ssh.md)). Each capability declares input schema, risk, permissions, target restrictions,
 request/time budget, expected evidence, and output schema. Target families: HTTP (request/replay/
 mutate/compare/sequence), browser (navigate/interact/observe_network/execute_candidate/
 capture_state), auth (principal.select/compare, session.refresh, auth.observe), discovery
