@@ -503,7 +503,8 @@ def test_shakerscan_api_touches_in_a_terminal_and_exits_3_in_an_agents_shell(gat
     assert api_cli.main(["--api-url", ORIGIN, "POST", AMENDMENT, json.dumps(RAISE)]) == 3
     err = capsys.readouterr().err
     assert "person decision required:" in err and "shakerscan hunt --url https://gateway.example.com budget raise" in err
-    assert len(gateway.sent) == 1 and len(signer.asked) == 1
+    # An agent's budget raise is refused before anything is sent (person_decision_routes.py).
+    assert len(gateway.sent) == 0 and len(signer.asked) == 1
 
 
 def test_shakerscan_scan_asks_for_the_targets_authorization_then_queues(gateway, monkeypatch, capsys):

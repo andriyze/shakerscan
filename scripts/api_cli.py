@@ -9,6 +9,14 @@ gateway refusal names what is missing) and exits 1.
 
 Base URL: --api-url, else SHAKERSCAN_API_BASE, else SHAKERSCAN_API_URL, else http://127.0.0.1:8080.
 Token:    SHAKERSCAN_API_TOKEN_FILE (a file, preferred) or SHAKERSCAN_API_TOKEN; never printed.
+
+A person's decision (person_decision_routes.py: allowing a Hunt permission request, authorizing a
+target, dismissing a finding, recording an approval, revealing a secret, approving an access-control
+contract, ...) is never sent from inside an agent that `shakerscan agent` launched
+(SHAKERSCAN_AGENT_NAME): the helper prints the command the person runs in their own terminal and
+exits 3 with nothing sent. On an open-source engine without authentication that is a guard rail
+for an agent following its kit, not a security boundary (any process on the host can call the API
+directly); ShakerScan Enterprise enforces person decisions on the server.
 """
 
 from __future__ import annotations
@@ -244,6 +252,31 @@ def _person_decision():
     return person_decision
 
 
+def _person_decision_routes():
+    try:
+        import person_decision_routes
+    except ModuleNotFoundError:
+        from scripts import person_decision_routes
+    return person_decision_routes
+
+
+def agent_session(environ: dict[str, str] | None = None) -> bool:
+    """Inside an agent that ``shakerscan agent`` launched: the signal every command that asks the
+    person reads (hunt_approve.person_at_terminal)."""
+    environ = os.environ if environ is None else environ
+    return bool((environ.get("SHAKERSCAN_AGENT_NAME") or "").strip())
+
+
+def agent_refusal(request: urllib.request.Request, path: str, api_url: str,
+                  environ: dict[str, str] | None = None) -> str | None:
+    """The line an agent gets instead of sending a person's decision, or None to send the
+    request. The body read is the one that would be sent (parsed and serialized once, so a
+    repeated key cannot hide the decision)."""
+    if not agent_session(environ):
+        return None
+    return _person_decision_routes().refusal(request.get_method(), path, request.data, api_url=api_url)
+
+
 def with_person_decision(request: urllib.request.Request, api_url: str, token: str | None, *,
                          timeout: float, sender=None) -> tuple[int, str]:
     """Send ``request``; when an Enterprise gateway refuses it for a person's security-key touch,
@@ -290,6 +323,10 @@ def main(argv: list[str] | None = None) -> int:
         api_url = base_url(args.api_url)
         request = build_request(args.method, args.path, args.body, api_url=api_url, token=bearer_token(),
                                 idempotency_key=args.idempotency_key)
+        refused = agent_refusal(request, args.path, api_url)
+        if refused is not None:
+            print(f"shakerscan api: {refused}", file=sys.stderr)
+            return _person_decision().EXIT_REFUSED
         if args.stream:
             from api_stream import stream_response
             try:

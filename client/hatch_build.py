@@ -37,6 +37,7 @@ VENDORED = {
     "api_stream.py": "_api_stream.py",
     "hunt_approve.py": "_hunt_approve.py",
     "person_decision.py": "_person_decision.py",
+    "person_decision_routes.py": "_person_decision_routes.py",
     "redirect_hint.py": "_redirect_hint.py",
 }
 # The agent kit the launcher runs agents inside (`shakerscan agent …`): materialized into a
