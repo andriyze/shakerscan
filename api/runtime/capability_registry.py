@@ -12,6 +12,7 @@ import re
 from types import MappingProxyType
 from .hunt_http_contract import validate_http_request_input
 from .hunt_http_exchange_contract import HTTP_EXCHANGE_PROPERTIES
+from .product_templates import MAX_PRODUCT_WINDOW, PRODUCT_CHECKS, PRODUCT_KEYS
 from .hunt_scanner_contract import (
     HUNT_INJECTION_BODY_PROPERTIES, HUNT_SCANNER_SESSION_PROPERTIES, HuntScannerInputError,
     validate_hunt_scanner_input,
@@ -496,6 +497,24 @@ _SQLI_INJECTION_BODY_PROPERTIES: Mapping[str, Any] = {
 }
 
 
+# A recognised product's own template checks (runtime/product_templates.py).
+_PRODUCT_TEMPLATE_PROPERTIES: Mapping[str, Any] = MappingProxyType({
+    "product": {
+        "type": "string", "enum": list(PRODUCT_KEYS),
+        "description": "Run this recognised product's templates from the pinned bundle instead of "
+                       "the passive pack (no intrusive, out-of-band or login-attempt templates).",
+    },
+    "product_checks": {
+        "type": "string", "enum": list(PRODUCT_CHECKS),
+        "description": "read_only (default): GET/HEAD templates without attack input. "
+                       "state_changing: non-GET and exploit-class templates; needs state-changing "
+                       "permission and holds every request as state-changing.",
+    },
+    "product_window": {
+        "type": "integer", "minimum": 0, "maximum": MAX_PRODUCT_WINDOW,
+        "description": "Which window of a large product selection to run (0 first).",
+    },
+})
 _SAME_ORIGIN_PATH_PROPERTY: Mapping[str, Any] = {
     "type": "string",
     "minLength": 1,
@@ -641,6 +660,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "template_request_cost_upper_bound": {
                     "type": "integer", "minimum": 1,
                 },
+                **_PRODUCT_TEMPLATE_PROPERTIES,
             }),
             "nuclei-jsonl/v1", ("template_match", "request_response"),
             "nuclei", "nuclei", 300_000, ("-version",), ("/opt/tools/nuclei",),
@@ -648,6 +668,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_scanner",
             planner_input_schema=_http_principal_schema({
                 **HUNT_SCANNER_SESSION_PROPERTIES,
+                **_PRODUCT_TEMPLATE_PROPERTIES,
                 "path": _SAME_ORIGIN_PATH_PROPERTY,
                 "severity": {
                     "type": "string",

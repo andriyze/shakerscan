@@ -665,12 +665,14 @@ class DiscoveryRunner:
             if present(answer, control) or (answer and answer["status"] in {400, 405} and graphql_answer(answer)):
                 found.append(f"GET {path}")
                 found.append(f"POST {path}")
+        product_paths: dict[str, list[str]] = {}
         for product in PRODUCTS:
             hit = False
             for path in product.identity:
                 answer = await probe(path)
                 if present(answer, control) and matches_marker(product, answer or {}):
                     found.append(f"GET {path}")
+                    product_paths.setdefault(product.key, []).append(path)
                     hit = True
             if hit and product.key not in products:
                 products.append(product.key)
@@ -684,6 +686,8 @@ class DiscoveryRunner:
             for path, _answer in specs:
                 _note(self.state, f"API description at {path}: read it (artifact.inspect) and test the routes it declares")
         self.state["products"] = products
+        # Where each product answered: the sweep runs its templates there as well as at the root.
+        self.state["product_paths"] = product_paths
         worklist = list(dict.fromkeys([*found, *routes]))
         if worklist and target_id:
             try:
