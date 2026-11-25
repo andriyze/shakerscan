@@ -13,6 +13,10 @@ from types import MappingProxyType
 from .hunt_http_contract import validate_http_request_input
 from .hunt_http_exchange_contract import HTTP_EXCHANGE_PROPERTIES
 from .product_templates import MAX_PRODUCT_WINDOW, PRODUCT_CHECKS, PRODUCT_KEYS
+from .request_verify_contract import (
+    DESCRIPTION as REQUEST_VERIFY_DESCRIPTION, HOLD as REQUEST_VERIFY_HOLD,
+    input_properties as request_verify_input_properties,
+)
 from .hunt_scanner_contract import (
     HUNT_INJECTION_BODY_PROPERTIES, HUNT_SCANNER_SESSION_PROPERTIES, HuntScannerInputError,
     validate_hunt_scanner_input,
@@ -1556,6 +1560,26 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             }, required=("path",)),
             "artifact-observation/v1", ("artifact_observation", "tool_receipt"),
             default_timeout_ms=30_000,
+            hunt_executor="worker_http",
+            credential_transport="exact_origin", credential_interruption="cooperative",
+        ),
+        CapabilitySpec(
+            "request.verify", REQUEST_VERIFY_DESCRIPTION,
+            "http", "active", _HTTP_TARGETS, "request.verify", "1", "active_testing",
+            dict(REQUEST_VERIFY_HOLD),
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "credentials_resolved_server_side": True,
+                "deterministic_proof_contract": True,
+            },
+            _schema(request_verify_input_properties(
+                _ARTIFACT_ORIGIN_PROPERTY, _HTTP_PRINCIPAL_BINDING_PROPERTIES["as_principal"],
+                _ARTIFACT_REQUEST_BINDINGS,
+            ), required=("check", "path")),
+            "request-proof/v1",
+            ("request_proof", "injection_proof", "nosqli_proof", "tool_receipt"),
+            default_timeout_ms=120_000,
             hunt_executor="worker_http",
             credential_transport="exact_origin", credential_interruption="cooperative",
         ),

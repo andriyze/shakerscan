@@ -105,10 +105,12 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     "verification_service_unresolved": ReasonSpec(422),
     "verification_method_unsupported": ReasonSpec(422),
     # Call inputs the agent corrects (recorded so the attempt is visible, at no cost): an artifact
-    # read on a target that names no HTTP service of its own, and a sqli.verify that names no
-    # input for sqlmap to test.
+    # read on a target that names no HTTP service of its own, a sqli.verify that names no input
+    # for sqlmap to test, and a request.verify whose request does not fit its check.
     "artifact_origin_required": ReasonSpec(422),
     "sqli_injection_point_missing": ReasonSpec(422),
+    # A request.verify call whose input does not fit its check (hunt/request_verify_admission.py).
+    "request_verify_input_invalid": ReasonSpec(422),
     # Another verifier still held the finding after the bounded wait (D40): retry, nothing ran.
     "verification_in_progress": ReasonSpec(409),
     # The Hunt already has the most long worker actions in flight (hunt/agent_job_concurrency.py):

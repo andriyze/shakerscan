@@ -57,8 +57,9 @@ def collection_target(run: Mapping[str, Any], context: Mapping[str, Any],
     return replace(target, allowed_origins=tuple(normalized))
 
 
-# Capabilities that read one target artifact; their ``origin`` is checked like http.request's.
-ARTIFACT_READ_CAPABILITIES = frozenset({"artifact.inspect", "javascript.analyze"})
+# Capabilities that read one target artifact or verify one exact request; their ``origin`` is
+# checked like http.request's.
+ARTIFACT_READ_CAPABILITIES = frozenset({"artifact.inspect", "javascript.analyze", "request.verify"})
 
 
 def artifact_origin_required(name: str) -> str:
