@@ -78,8 +78,17 @@ def public_verification_families() -> dict[str, Any]:
             if family in VERIFIABLE_FAMILIES
         },
         "state_changing_families": sorted(STATE_CHANGING_VERIFY_FAMILIES),
+        # The server's own injection proofs (hunt/injection_proof.py): record the candidate with
+        # its route and the parameter name in the locus, then call candidate.verify.
+        "injection_families": {
+            "families": ["command_injection", "injection", "nosqli", "path_traversal", "sqli",
+                         "ssrf", "ssti"],
+            "locus": {"route": "/path of a GET request", "parameter": "the query parameter name"},
+            "note": ("A specific family runs that proof; 'injection' runs every one. XSS is "
+                     "proven in a browser by xss.verify."),
+        },
         "other_families": (
-            "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, injection, "
+            "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, "
             "CORS...) may be recorded as a candidate with its evidence, but no deterministic "
             "verifier proves it: do not call candidate.verify for it; report it as an unverified "
             "candidate. Device Hunts verify through their own verifier_contract_id contracts."
@@ -161,10 +170,28 @@ def verification_service_origin(candidate: Mapping[str, Any], target_url: str) -
     return origins.pop()
 
 
-def web_candidate_preflight(candidate: Mapping[str, Any]) -> tuple[str, str, str]:
-    """Return ``(family, route, method_hint)`` or raise ``CandidateVerificationRefused``."""
+def web_candidate_preflight(
+    candidate: Mapping[str, Any], *, injection_proofs: bool = False,
+) -> tuple[str, str, str]:
+    """Return ``(family, route, method_hint)`` or raise ``CandidateVerificationRefused``.
+
+    ``injection_proofs``: the caller (a Hunt's candidate.verify) also runs the server's own
+    injection proofs (hunt/injection_proof.py), so a candidate of one of those families is
+    admitted when its locus names a GET route and a parameter.
+    """
     if str(candidate.get("status") or "") == "verified":
         raise CandidateVerificationRefused(409, "Candidate is already verified")
+    if injection_proofs:
+        from . import injection_proof
+        if injection_proof.is_injection_family(candidate.get("family")):
+            try:
+                injection_proof.proofs_for(candidate.get("family"))
+                _url, route, _parameter = injection_proof.proof_request(
+                    candidate, origin="http://preflight.invalid",
+                )
+            except injection_proof.InjectionProofRefused as exc:
+                raise CandidateVerificationRefused(422, f"{exc.reason}: {exc.message}") from None
+            return injection_proof.FAMILY, route, "GET"
     locus = _mapping(candidate.get("canonical_locus"))
     context = _mapping(candidate.get("verification_context"))
     family = family_proof.canonical_family(candidate.get("family"))

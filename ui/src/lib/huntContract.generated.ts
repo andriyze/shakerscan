@@ -234,7 +234,23 @@ export const HUNT_START_CONTRACT = {
         "weak_credentials": "default_credentials",
         "weak_password": "default_credentials"
       },
-      "other_families": "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, injection, CORS...) may be recorded as a candidate with its evidence, but no deterministic verifier proves it: do not call candidate.verify for it; report it as an unverified candidate. Device Hunts verify through their own verifier_contract_id contracts.",
+      "injection_families": {
+        "families": [
+          "command_injection",
+          "injection",
+          "nosqli",
+          "path_traversal",
+          "sqli",
+          "ssrf",
+          "ssti"
+        ],
+        "locus": {
+          "parameter": "the query parameter name",
+          "route": "/path of a GET request"
+        },
+        "note": "A specific family runs that proof; 'injection' runs every one. XSS is proven in a browser by xss.verify."
+      },
+      "other_families": "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, CORS...) may be recorded as a candidate with its evidence, but no deterministic verifier proves it: do not call candidate.verify for it; report it as an unverified candidate. Device Hunts verify through their own verifier_contract_id contracts.",
       "state_changing_families": [
         "field_constraint",
         "mass_assignment",

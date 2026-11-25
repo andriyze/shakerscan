@@ -45,6 +45,7 @@ from .boundary_context import BoundaryContextError, inspect_candidate_boundary_c
 from .candidate_evidence import (
     CandidateEvidenceError, evidence_principals, record_evidence_principals, resolve_candidate_evidence,
 )
+from . import injection_proof
 from .candidate_verification_preflight import (
     STATE_CHANGING_VERIFY_FAMILIES,
     CandidateVerificationRefused,
@@ -1993,7 +1994,9 @@ async def _execute_hunt_capability_lifecycle(
                             # verification is counted or any budget reserved: they send no traffic, so
                             # they must cost nothing.
                             try:
-                                web_candidate_preflight(dict(candidate_record))
+                                # A Hunt also verifies injection candidates, by the server's own
+                                # proofs (hunt/injection_proof.py).
+                                web_candidate_preflight(dict(candidate_record), injection_proofs=True)
                                 # A network target names a host; the candidate names the service.
                                 verification_service_origin(dict(candidate_record), current_locator)
                             except CandidateVerificationRefused as exc:
@@ -2366,7 +2369,9 @@ async def _execute_hunt_capability_lifecycle(
                                 family = family_proof.canonical_family(
                                     candidate_record["family"]
                                 )
-                                charges.update(web_candidate_budget(family))
+                                charges.update(web_candidate_budget(
+                                    str(candidate_record["family"] or family)
+                                ))
                                 if family in _AGENT_MUTATING_VERIFY_FAMILIES:
                                     if not policy.get("allow_state_changing_http"):
                                         raise HTTPException(
@@ -4796,6 +4801,21 @@ async def _execute_hunt_candidate_verification(
             approval_receipt_id=policy["approval_receipt_id"], state=state,
             candidate_id=str(candidate_uuid), reason="Hunt V2 deterministic verification",
         )
+    elif injection_proof.is_injection_family(family):
+        # An injection candidate: the Scan's own differential proofs over the route and parameter
+        # the candidate names (hunt/injection_proof.py). A refusal before anything is sent costs
+        # nothing.
+        watch = HuntCancellationWatch(_pool, run["id"])
+        try:
+            result = await injection_proof.verify_candidate(
+                _pool(), run=run, context=context, policy=policy,
+                candidate_uuid=candidate_uuid, action_id=action_id,
+                cancelled=watch.cancelled, heartbeat=watch.refresh,
+            )
+        except injection_proof.InjectionProofRefused as exc:
+            raise VerificationRefused(status_code=422, detail={
+                "error": exc.reason, "reason_code": exc.reason, "message": exc.message,
+            }) from None
     elif _is_default_credential_family(family):
         # A default-credential candidate: the server sends the accepted pair again and a
         # random-password control on the same login, under the attempt bounds
