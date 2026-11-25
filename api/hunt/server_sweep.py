@@ -510,7 +510,11 @@ def product_candidate(product: str, checks: str, match: Mapping[str, Any],
         parsed = urllib.parse.urlsplit(str(match.get("matched_at") or ""))
     except ValueError:
         return None
-    path = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+    # A template that joins "{{BaseURL}}/" to a base ending in "/" requests "//x"; the route is "/x".
+    # Query values arrive redacted (scanner output is untrusted), so a redacted query is dropped
+    # rather than replayed as "<redacted>".
+    query = "" if "redacted" in (parsed.query or "").lower() else parsed.query
+    path = "/" + (parsed.path or "/").lstrip("/") + (f"?{query}" if query else "")
     tags = frozenset(str(tag).lower() for tag in match.get("tags") or ())
     severity = str(match.get("severity") or "info").lower()
     if not template_id or not action or not path.startswith("/"):
