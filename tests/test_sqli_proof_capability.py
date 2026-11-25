@@ -520,7 +520,9 @@ class MissingValueTransport:
         return _answer(request, b'{"users":[]}')
 
 
-def test_a_value_that_matches_nothing_is_proven_by_an_or_pair():
+def test_a_value_that_matches_nothing_is_never_sent_an_or_pair():
+    """OR TRUE widens a statement to every row: damage behind a GET that writes. Not sent, even
+    where it would have shown the injection."""
     transport = MissingValueTransport(vulnerable=True)
     result = _run(
         _request(url="https://app.example.test/users?name=nobody"),
@@ -528,23 +530,9 @@ def test_a_value_that_matches_nothing_is_proven_by_an_or_pair():
          "request_class": "safe_read"},
         transport, extended=True,
     )
-    proof = result.observations[0]
-    assert proof["proof_state"] == "verified"
-    assert proof["proof_contract"] == "sqli_boolean_differential/v1"
-    assert proof["payload_shape"] == "<no match>' OR '1'='1  vs  <no match>' OR '1'='2"
-    assert len(proof["response_pairs"]) == 2
-
-
-def test_an_or_pair_that_changes_nothing_is_not_proof():
-    transport = MissingValueTransport(vulnerable=False)
-    result = _run(
-        _request(url="https://app.example.test/users?name=nobody"),
-        {"candidate_id": "d" * 64, "method": "GET", "parameter_name": "name",
-         "request_class": "safe_read"},
-        transport, extended=True,
-    )
     assert result.observations[0]["proof_state"] == "not_proven"
-    assert len(transport.values) <= 20
+    assert transport.values
+    assert not any(" OR " in value.upper() for value in transport.values)
 
 
 class OrOnWriteTransport:
@@ -556,7 +544,7 @@ class OrOnWriteTransport:
         return _answer(request, b'{"updated":0}')
 
 
-def test_an_or_pair_is_never_sent_in_a_request_that_writes():
+def test_no_or_payload_is_sent_in_a_request_that_writes():
     transport = OrOnWriteTransport()
     _run(
         _request(
@@ -631,8 +619,8 @@ def test_a_time_screen_that_sees_no_delay_sends_no_confirmation():
         heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
     ))
     assert result.observations[0]["proof_state"] == "not_proven"
-    # Error pair 4, AND pair 4, the miss and OR pair 6, one screening request per engine 3.
-    assert len(transport.values) == 17
+    # Error pair 4, AND pair 4, one screening request per engine 3.
+    assert len(transport.values) == 11
 
 
 def test_the_extended_stages_are_off_unless_asked_for():
