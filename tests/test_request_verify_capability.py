@@ -112,6 +112,30 @@ def test_open_redirect_scheme_relative_bypass_is_tried_when_absolute_urls_are_re
     assert _verified(result)[0]["technique"] == "location_scheme_relative_repeated"
 
 
+def test_open_redirect_that_keeps_the_last_outside_host_is_caught_by_the_own_path_control():
+    remembered = {}
+
+    def sticky(request):
+        value = _query(request, "next")
+        if value.startswith("http"):
+            remembered["host"] = value
+        return _answer(request, status=302, headers={"Location": remembered.get("host", value)})
+    result, _ = _run("open_redirect", {"path": "/go", "query": {"next": "/"}}, sticky, field="next")
+    assert not _verified(result)
+
+
+def test_open_redirect_to_the_first_outside_host_only_is_caught_by_the_second_host():
+    seen = {}
+
+    def first_only(request):
+        value = _query(request, "next")
+        if value.startswith(("http", "//")):  # every outside destination goes to the first one seen
+            value = seen.setdefault("host", value)
+        return _answer(request, status=302, headers={"Location": value})
+    result, _ = _run("open_redirect", {"path": "/go", "query": {"next": "/"}}, first_only, field="next")
+    assert not _verified(result)
+
+
 # -- CRLF ------------------------------------------------------------------------------------
 
 def _splitter(request):
@@ -159,6 +183,17 @@ def test_host_header_is_not_proved_by_an_endpoint_that_echoes_every_header():
     def echo(request):
         return _answer(request, json.dumps(dict(request.headers)), content_type="application/json")
     result, _ = _run("host_header_injection", {"path": "/debug"}, echo)
+    assert not _verified(result)
+
+
+def test_host_header_is_not_proved_by_a_page_with_a_debug_footer_of_every_header():
+    """The page is the same page, so only the unrelated-header control tells it apart."""
+    body = "<h1>Shop</h1>" + "<p>Welcome to the shop, browse our products and offers today</p>" * 20
+
+    def footer(request):
+        listed = "".join(f"<li>{name}: {value}</li>" for name, value in request.headers)
+        return _answer(request, body + f"<footer><ul>{listed}</ul></footer>")
+    result, _ = _run("host_header_injection", {"path": "/"}, footer)
     assert not _verified(result)
 
 
@@ -210,6 +245,19 @@ def test_cors_null_origin_and_wildcard_with_credentials():
     assert _verified(result)[0]["proof_class"] == "cors_null_origin"
     result, _ = _run("cors", {"path": "/api/me"}, _cors(wildcard=True))
     assert _verified(result)[0]["proof_class"] == "cors_wildcard_credentials"
+
+
+def test_cors_granting_only_the_first_origin_it_saw_is_not_reflection():
+    first = {}
+
+    def sticky(request):
+        origin = _header(request, "Origin")
+        if origin and origin != "null":
+            first.setdefault("origin", origin)
+        return _answer(request, b"{}", headers={"Access-Control-Allow-Origin": first.get("origin", ""),
+                                                "Access-Control-Allow-Credentials": "true"})
+    result, _ = _run("cors", {"path": "/api/me"}, sticky)
+    assert not _verified(result)
 
 
 def test_cors_fixed_allow_list_is_not_a_finding():
@@ -451,3 +499,14 @@ def test_a_refused_baseline_is_inconclusive_and_sends_nothing_more():
                              lambda request: _answer(request, b"", status=401, headers={"WWW-Authenticate": "Bearer"}))
     assert len(transport.requests) == 1
     assert result.observations[0]["finding_verdict"] == "inconclusive"
+
+
+def test_no_check_can_send_more_than_its_request_budget(monkeypatch):
+    async def greedy(self, baseline):
+        for _ in range(20):
+            await self.send(self.request)
+        return [self.observation()]
+    monkeypatch.setattr(RequestVerifier, "run", greedy)
+    result, transport = _run("cors", {"path": "/"}, lambda request: _answer(request, b"{}"), budget=5)
+    assert len(transport.requests) == 5 and result.actual_budget["http_requests"] == 5
+    assert result.status == "partial" and "budget_exhausted" in result.errors
