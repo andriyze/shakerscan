@@ -1551,7 +1551,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({
                 "origin": _ARTIFACT_ORIGIN_PROPERTY,
                 "path": {"type": "string", "minLength": 1, "maxLength": 4_000},
-                "max_bytes": {"type": "integer", "minimum": 1, "maximum": 262_144},
+                "max_bytes": {"type": "integer", "minimum": 1, "maximum": 4_194_304},
             }, required=("path",)),
             "javascript-static-analysis/v1",
             ("javascript_analysis", "artifact_observation", "tool_receipt"),

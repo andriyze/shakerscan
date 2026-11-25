@@ -52,8 +52,14 @@ except ModuleNotFoundError:
 
 
 MAX_INSPECT_BYTES = 16_384
-MAX_JAVASCRIPT_BYTES = 262_144
-MAX_PUBLIC_TEXT = 4_096
+# A production bundle is commonly megabytes. Analysis read its first 256 KiB only, with no way
+# to reach the rest, so routes and request shapes past that were never seen.
+MAX_JAVASCRIPT_BYTES = 4_194_304
+# The whole window a planner asked for is shown (it was cut to 4,096 characters of up to 16,384
+# bytes read).
+MAX_PUBLIC_TEXT = MAX_INSPECT_BYTES
+# The window a call reads when it names no size.
+DEFAULT_INSPECT_BYTES = 4_096
 try:
     from scanner_tools.frontend_http import extract_frontend_http_requests
     from scanner_tools.surface_hints import corporate_surface_hints
@@ -755,7 +761,7 @@ async def inspect_target_artifact(
     target_url = _read_base(target_url, args)
     path = str(args.get("path") or "")
     offset = max(0, int(args.get("offset") or 0))
-    length = max(1, min(MAX_INSPECT_BYTES, int(args.get("max_bytes") or MAX_PUBLIC_TEXT)))
+    length = max(1, min(MAX_INSPECT_BYTES, int(args.get("max_bytes") or DEFAULT_INSPECT_BYTES)))
     # One range from up to CONTEXT_BYTES before the window: the context masks, the window shows.
     collector = active_withheld_values()
     if collector is not None:
