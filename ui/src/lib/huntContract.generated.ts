@@ -248,9 +248,13 @@ export const HUNT_START_CONTRACT = {
           "parameter": "the query parameter name",
           "route": "/path of a GET request"
         },
-        "note": "A specific family runs that proof; 'injection' runs every one. XSS is proven in a browser by xss.verify."
+        "note": "A specific family runs that proof; 'injection' runs every one. XSS (family xss) and a request-body parameter are proven by xss.verify and sqli.verify: candidate.verify answers with that call, ready to send (next_call)."
       },
-      "other_families": "Any other family may be recorded as a candidate with its evidence, but candidate.verify does not prove it: do not call candidate.verify for it. An injection in a request body or behind a sign-in, XXE, LDAP, CRLF and host header injection, open redirect, CORS, CSRF, rate limiting, file upload, GraphQL, JWT, security headers and directory listing are proved with the request.verify capability on the exact request. AI/LLM families (prompt injection, excessive agency, RAG isolation) stay unverified candidates. Device Hunts verify through their own verifier_contract_id contracts.",
+      "injection_verifiers": {
+        "sqli.verify": "SQL injection in a URL parameter (path with its query) or a body field (method, body_field_names, injection_field)",
+        "xss.verify": "cross-site scripting in a URL parameter or a body field, the same inputs"
+      },
+      "other_families": "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, CORS...) has no deterministic verifier: record it as a candidate with its evidence and report it unverified. SQL injection, XSS and the other injection families above do have verifiers. Device Hunts verify through their own verifier_contract_id contracts.",
       "state_changing_families": [
         "field_constraint",
         "mass_assignment",
@@ -408,7 +412,6 @@ export const HUNT_START_CONTRACT = {
     "preauthorization_proposed",
     "preauthorization_reapproval",
     "principal_anonymous_only",
-    "request_verify_input_invalid",
     "saved_login_destination",
     "saved_login_invalid",
     "saved_login_logins_exhausted",
@@ -1362,9 +1365,6 @@ export const HUNT_START_CONTRACT = {
         "fields": [
           "session_ref",
           "request_bindings",
-          "product",
-          "product_checks",
-          "product_window",
           "path",
           "severity",
           "tags",
@@ -1777,50 +1777,6 @@ export const HUNT_START_CONTRACT = {
         "alternate_adapters": [],
         "binary": null,
         "name": "artifact.inspect"
-      }
-    },
-    {
-      "call": {
-        "method": "POST",
-        "url_template": "/hunts/{hunt_id}/capabilities/request.verify"
-      },
-      "description": "Prove one vulnerability class on one exact request with a deterministic differential: a repeat with fresh random values and a negative control that must stay silent. A verified result becomes a finding; anything else stays an observation. Name the request as for http.request (method, path, query, json_body/form_body/xml_body, headers, identity) plus check and, for an input check, parameter. Checks: command_injection, path_traversal (GET), template_injection, xxe (xml_body), ssrf (GET, in-band loopback), nosql_injection, ldap_injection, crlf_injection, open_redirect take parameter; host_header_injection, cors, security_headers, directory_listing, graphql (the endpoint), jwt (as a principal with a bearer token), csrf (a signed-in write; token_field), rate_limit (a sign-in POST; parameter = password field) and file_upload (parameter = file field; retrieve_path with {filename}) test the request. Needs active testing; a write method or an upload needs state-changing permission (held as verifier writes).",
-      "input": {
-        "fields": [
-          "check",
-          "method",
-          "origin",
-          "path",
-          "query",
-          "headers",
-          "json_body",
-          "form_body",
-          "xml_body",
-          "parameter",
-          "retrieve_path",
-          "token_field",
-          "as_principal",
-          "session_ref",
-          "request_bindings"
-        ],
-        "required": [
-          "check",
-          "path"
-        ]
-      },
-      "name": "request.verify",
-      "required_approval": "active_testing",
-      "target_kinds": [
-        "api",
-        "device",
-        "network",
-        "web"
-      ],
-      "tool": {
-        "adapter": "request.verify",
-        "alternate_adapters": [],
-        "binary": null,
-        "name": "request.verify"
       }
     },
     {
