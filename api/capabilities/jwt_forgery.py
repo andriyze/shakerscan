@@ -10,10 +10,11 @@ the finding and nothing further is sent:
    carries no signature, in the four spellings libraries have accepted.
 3. **Is the signing secret guessable?** For an HMAC token the signature is recomputed offline with
    a short list of well-known secrets. A match is arithmetic, not an inference: whoever knows the
-   secret can sign any claims. One token signed with it, carrying one added claim the application
-   does not read, is then sent to show the application accepts it.
+   secret can sign any claims. One token signed with it is then sent to show the application
+   accepts it: the same claims, written with one byte of JSON whitespace added so the token is
+   not the principal's own.
 
-The claims are never changed: no forged token names another user or role. A token is never kept or
+The claims are never changed or added to: no forged token names another user or role. A token is never kept or
 reported, nor is a guessed secret: an observation holds statuses, the algorithm and which question
 was answered.
 """
@@ -25,13 +26,12 @@ import binascii
 import hashlib
 import hmac
 import json
-import secrets
 from typing import Any, Awaitable, Callable, Mapping
 
 JWT_FORGERY_CONTRACT = "authz_surface_jwt_forgery/v1"  # the proof_contract of every observation
-# The altered-signature pair (2), the first ``none`` spelling that is accepted and its repeat (at
-# most 5), the token signed with a guessed secret and its repeat (2).
-MAXIMUM_REQUESTS = 9
+# The altered signature and its repeat (2), each ``none`` spelling and the repeat of one accepted
+# once (at most 8), the token signed with a guessed secret and its repeat (2).
+MAXIMUM_REQUESTS = 12
 MINIMUM_REQUESTS = 2
 _NONE_SPELLINGS = ("none", "None", "NONE", "nOnE")
 _HMAC = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}
@@ -125,12 +125,14 @@ def guessed_secret(token: str) -> str | None:
     return None
 
 
-def signed_with(token: str, secret: str, marker: str) -> str:
-    """``token``'s claims plus one unread claim, signed with ``secret`` under its own algorithm."""
+def signed_with(token: str, secret: str) -> str:
+    """``token``'s own claims, signed with ``secret`` under its own algorithm.
+
+    The claims document gains one trailing space, which JSON ignores: the same claims, but not
+    the principal's own token, whose signature the target has already seen.
+    """
     head, claims, _signature = token.split(".")
-    payload = dict(json.loads(_decode(claims)))
-    payload["skx"] = marker
-    body = _encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    body = _encode(_decode(claims) + b" ")
     signing_input = f"{head}.{body}".encode("ascii")
     signature = hmac.new(secret.encode("utf-8"), signing_input, _HMAC[algorithm(token)]).digest()
     return f"{head}.{body}.{_encode(signature)}"
@@ -185,8 +187,7 @@ async def check_token_handling(
     # the slice has the two requests left; without them the finding says it was not shown.
     shown = None
     if left() >= MINIMUM_REQUESTS:
-        marker = secrets.token_hex(6)
-        shown, status = await accepted_twice(signed_with(token, secret, marker))
+        shown, status = await accepted_twice(signed_with(token, secret))
     return observation(
         "jwt_weak_hmac_secret_reproduced", status if shown else None,
         secret_in_common_list=True, secret_length=len(secret), forged_token_accepted=shown,

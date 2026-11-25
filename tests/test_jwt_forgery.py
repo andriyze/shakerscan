@@ -66,9 +66,10 @@ def test_forged_tokens_never_change_a_claim():
         unsigned = jwt_forgery.unsigned(token, spelling)
         header, same_claims, empty = _parts(unsigned)
         assert header["alg"] == spelling and same_claims == claims and empty == ""
-    resigned = jwt_forgery.signed_with(token, "secret", "marker1")
-    _header, more, _signature = _parts(resigned)
-    assert {key: value for key, value in more.items() if key != "skx"} == claims
+    resigned = jwt_forgery.signed_with(token, "secret")
+    _header, same, _signature = _parts(resigned)
+    # The same claims, none added: only the token differs from the principal's own.
+    assert same == claims and resigned != token
     assert _valid(resigned, "secret")
 
 
@@ -117,7 +118,7 @@ def test_a_guessable_secret_is_proven_by_the_signature_and_shown_by_acceptance()
     # The secret and the token are never part of an observation.
     assert "secret\"" not in json.dumps(proof) and token not in json.dumps(proof)
     assert proof["secret_values_visible"] is False
-    assert "skx" in _parts(sent[-1])[1]
+    assert _parts(sent[-1])[1] == _parts(token)[1] and sent[-1] != token
 
 
 def test_a_route_that_checks_its_tokens_yields_nothing():
