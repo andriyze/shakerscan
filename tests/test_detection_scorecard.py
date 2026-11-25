@@ -58,6 +58,13 @@ def test_a_comparison_fails_when_proven_recall_falls_and_names_what_was_lost(tmp
     assert scorecard.main([before, "--baseline", after]) == 0
 
 
+def test_an_entry_lost_behind_an_unchanged_count_is_a_regression(tmp_path, capsys):
+    before = _run(tmp_path, "before.json", [_card("juice_shop", ["sqli-search"], ["xss-dom"])])
+    after = _run(tmp_path, "after.json", [_card("juice_shop", ["xss-dom"], ["sqli-search"])])
+    assert scorecard.main([after, "--baseline", before]) == 1
+    assert "REGRESSION juice_shop: no longer proven: sqli-search" in capsys.readouterr().out
+
+
 def test_a_missing_or_failed_target_is_a_regression_not_a_pass(tmp_path, capsys):
     before = _run(tmp_path, "before.json", [_card("crapi", ["bola"], []), _card("honey", ["env"], [])])
     after = _run(tmp_path, "after.json", [{"target": "crapi", "error": "scan timed out", "passed": False}])
