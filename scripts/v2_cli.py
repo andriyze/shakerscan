@@ -915,7 +915,8 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
     if args.hunt_command == "finish":
         return client.post(
             f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/finish",
-            {"summary": args.summary, "next_actions": args.next_action},
+            {"summary": args.summary, "next_actions": args.next_action,
+             **({"force": True, "force_reason": args.force_reason} if args.force_reason else {})},
         )
     if args.hunt_command == "permissions":
         return _run_permissions(args, client)
@@ -1394,6 +1395,10 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_finish.add_argument("hunt_id")
     hunt_finish.add_argument("--summary", required=True)
     hunt_finish.add_argument("--next-action", action="append", default=[])
+    hunt_finish.add_argument(
+        "--force-reason",
+        help="Finish a web Hunt although coverage is open and time remains; why the rest stays untested",
+    )
 
     hunt_cancel = hunt_commands.add_parser("cancel", help="Cancel an active Hunt")
     hunt_cancel.add_argument("hunt_id")

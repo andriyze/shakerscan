@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import importlib
+import logging
 import json
 import re
 from typing import Any, Mapping
@@ -28,6 +29,14 @@ from .hypothesis_release import release_hunt_claims
 from .permission_grants import settle_for_ended_hunt
 from .permission_store import pending_summary
 from .finding_verifications import HUNT_FINDINGS_QUERY
+from .coverage_map import (
+    COVERAGE_TARGET_KINDS,
+    compact_open_coverage,
+    coverage_page,
+    debrief_coverage,
+    finish_guard,
+    load_coverage,
+)
 from .coverage_ledger import (
     COVERAGE_WRITABLE_RUN_STATUSES,
     build_hunt_checkpoint,
@@ -44,6 +53,8 @@ from .skills import (
     skill_library,
     skill_context_section,
 )
+
+logger = logging.getLogger(__name__)
 
 try:
     from runtime.hunt_http_exchange_contract import public_capture_references
@@ -857,7 +868,7 @@ async def signal_hunt_jobs(
 class HuntRunService:
     """Own read/list/finish/cancel/resume persistence for canonical Hunts."""
 
-    def __init__(self, pool_provider, redis_provider=None, *, finish_retainer=None):
+    def __init__(self, pool_provider, redis_provider=None, *, finish_retainer=None, coverage_reader=None):
         self._pool_provider = pool_provider
         # Optional so existing construction and tests are unchanged; without it a cancellation
         # still stops the Hunt and its scans, it simply cannot reach worker-placed capability jobs.
@@ -865,6 +876,29 @@ class HuntRunService:
         # The API composition supplies target persistence; the run service must not import
         # target routers back through their asset/migration dependency on this service.
         self._finish_retainer = finish_retainer
+        # Reads a web Hunt's open coverage (``coverage_map.load_coverage``); injectable for tests.
+        self._coverage_reader = coverage_reader or load_coverage
+
+    async def _finish_coverage(self, connection: Any, row: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The coverage map at finish; a read that fails never holds the finish (it is logged)."""
+        if str(row.get("target_kind") or "") not in COVERAGE_TARGET_KINDS:
+            return None
+        try:
+            return await self._coverage_reader(connection, row)
+        except Exception as exc:  # noqa: BLE001 - coverage is guidance; a finish is never stuck on it
+            logger.warning("hunt finish: coverage unavailable: %s", type(exc).__name__)
+            return None
+
+    async def coverage(self, hunt_id: str, *, limit: int = 50, offset: int = 0,
+                       class_filter: str | None = None) -> dict[str, Any]:
+        """The open coverage of one web Hunt: discovery, endpoints and untested test classes."""
+        async with self._pool().acquire() as connection:
+            row = await hunt_run_or_404(connection, hunt_id)
+            report = await self._coverage_reader(connection, dict(row))
+        if report is None:
+            raise HTTPException(status_code=409, detail="coverage is reported for web and API Hunts")
+        return {"hunt_id": str(row["id"]), "hunt_status": row["status"],
+                **coverage_page(report, limit=limit, offset=offset, class_filter=class_filter)}
 
     def _pool(self):
         pool = self._pool_provider()
@@ -997,7 +1031,17 @@ class HuntRunService:
         async with self._pool().acquire() as connection:
             async with connection.transaction(isolation="repeatable_read", readonly=True):
                 row = await hunt_run_or_404(connection, hunt_id)
-                return await build_hunt_checkpoint(connection, run=dict(row))
+                checkpoint = await build_hunt_checkpoint(connection, run=dict(row))
+                if str(row.get("target_kind") or "") in COVERAGE_TARGET_KINDS and isinstance(checkpoint, dict):
+                    # What is still untested survives a context compaction with the rest of the handoff.
+                    try:
+                        report = await self._coverage_reader(connection, dict(row))
+                    except Exception as exc:  # noqa: BLE001 - the handoff never fails on guidance
+                        logger.warning("hunt checkpoint: coverage unavailable: %s", type(exc).__name__)
+                        report = None
+                    if report is not None:
+                        checkpoint["open_coverage"] = compact_open_coverage(report, str(row["id"]))
+                return checkpoint
 
     async def skill_suggestions(
         self, hunt_id: str, *, signals: list[str] | None = None,
@@ -1555,8 +1599,16 @@ class HuntRunService:
         }
 
     async def finish(
-        self, hunt_id: str, *, summary: str, next_actions: list[str]
+        self, hunt_id: str, *, summary: str, next_actions: list[str],
+        force: bool = False, force_reason: str | None = None,
     ) -> dict[str, Any]:
+        """Finish an active Hunt with its debrief.
+
+        A web Hunt with open coverage (``coverage_map``: discovery not finished, or known
+        endpoints with test classes nothing ran) and wall and HTTP budget left is refused (409)
+        with what is open, unless ``force`` and a ``force_reason`` are given; the debrief records
+        the coverage at finish either way, and the reason when forced. Recording candidates and
+        findings is never affected."""
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 run_uuid = _uuid_or_400(hunt_id, "hunt id")
@@ -1616,6 +1668,13 @@ class HuntRunService:
                                 + ". Wait for them with query kind=activity and filter.wait_seconds "
                                   "until in_flight_actions is 0, then finish again"),
                     )
+                coverage = await self._finish_coverage(connection, dict(row))
+                refusal = finish_guard(dict(row), coverage, force=force, force_reason=force_reason)
+                if refusal:
+                    raise HTTPException(status_code=409, detail=refusal)
+                if coverage is not None:
+                    debrief["coverage"] = debrief_coverage(
+                        coverage, forced=bool(force), reason=force_reason)
                 if self._finish_retainer is not None:
                     debrief["saved_action"] = await self._finish_retainer(connection, dict(row))
                 row = await connection.fetchrow(
