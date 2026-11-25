@@ -884,7 +884,9 @@ class HuntRunService:
         if str(row.get("target_kind") or "") not in COVERAGE_TARGET_KINDS:
             return None
         try:
-            return await self._coverage_reader(connection, row)
+            # In a savepoint: a failed read must not abort the finish's own transaction.
+            async with connection.transaction():
+                return await self._coverage_reader(connection, row)
         except Exception as exc:  # noqa: BLE001 - coverage is guidance; a finish is never stuck on it
             logger.warning("hunt finish: coverage unavailable: %s", type(exc).__name__)
             return None
@@ -1035,7 +1037,8 @@ class HuntRunService:
                 if str(row.get("target_kind") or "") in COVERAGE_TARGET_KINDS and isinstance(checkpoint, dict):
                     # What is still untested survives a context compaction with the rest of the handoff.
                     try:
-                        report = await self._coverage_reader(connection, dict(row))
+                        async with connection.transaction():  # a savepoint: a failed read is contained
+                            report = await self._coverage_reader(connection, dict(row))
                     except Exception as exc:  # noqa: BLE001 - the handoff never fails on guidance
                         logger.warning("hunt checkpoint: coverage unavailable: %s", type(exc).__name__)
                         report = None
