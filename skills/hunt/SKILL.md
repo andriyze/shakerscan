@@ -92,6 +92,14 @@ queries. `view: full` returns a 70-150 KB record in 32 KB pages and wastes conte
 can prove. Record any other family (prompt injection, excessive agency, RAG isolation...) as an
 unverified candidate with its evidence, and do not spend a verification call on it.
 
+**Proving a request-level class.** Command injection, path traversal, template injection, XXE,
+SSRF, NoSQL and LDAP injection, open redirect, CRLF and host header injection, CORS, CSRF, sign-in
+rate limiting, file upload, GraphQL, JWT, security headers and directory listing are proved with
+`request.verify` on the exact request: the `http.request` shape plus `check` and, for an input,
+the `parameter` to test. Call it as soon as a response suggests one of them; a verified result is a
+finding, anything else stays an observation. A write method or an upload needs the state-changing
+permission.
+
 For authenticated or multi-principal work, pass saved profile IDs only. For imported traffic, pass
 saved request-collection IDs only. Secret values stay in ShakerScan. For network/device work, request
 the network authority and resource profile the operator authorized; nonstandard ports, HTTP,

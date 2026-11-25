@@ -138,6 +138,7 @@ from hunt.capability_reservations import (
 )
 from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from hunt.deterministic_findings import materialize_verified_hunt_findings
+from hunt.request_verification import admission_refusal as request_verify_dispatch_refusal
 from hunt.worker_accounting import worker_hunt_budget_accounting
 from runtime.budget_reservations import DurableBudgetReservation
 from runtime.auth_session_store import (
@@ -21544,6 +21545,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     writes_http = dispatch_http_request_authority(
                         capability_input, hunt_policy, requested_budget=requested_budget,
                     )
+                if capability_name == "request.verify" and (refused := request_verify_dispatch_refusal(capability_input, hunt_policy)):
+                    raise HuntDispatchRejected(f"Hunt action authority rejected at dispatch: {refused}")
                 if expected_budget != requested_budget:
                     raise ReservationConflict(
                         "control-plane and worker HTTP budgets differ"
@@ -21938,6 +21941,14 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 "credential_headers_injected": bool(artifact_headers),
                 "secret_values_visible": False,
             }
+        elif capability_name == "request.verify":
+            from hunt.request_verification import RequestVerificationExecutionAdapter, prepare_operation
+            operation, redacted_execution, principal_slot = await prepare_operation(
+                pool=db_pool, run=run, hunt_id=hunt_id, action_id=action_id, context=context, target=target,
+                policy=policy, hunt_policy=hunt_policy, target_url=target_url, values=capability_input,
+                stack=credential_stack, session_store=session_store, recorder=_record_call,
+                requested_budget=persisted.record.requested)
+            adapter_type = RequestVerificationExecutionAdapter
         else:
             supplied_session_ref = capability_input.get("session_ref")
             requested_principal = str(
