@@ -57,7 +57,9 @@ It covers two complementary pillars:
   authorization, with credentials), exposed secrets and files, misconfigured TLS/headers/CORS,
   insecure session cookies, and known product issues through Nuclei templates from a pinned,
   checksum-verified bundle — then grades what it finds and correlates findings into attack chains.
-  A Scan has no generic check for SSRF, command injection, path traversal, SSTI, XXE or JWT; see the
+  Server-side template injection, path traversal, command injection, XXE and in-band loopback SSRF
+  are an opt-in family (`server_injection`), and JSON Web Token handling is checked with a bearer
+  credential profile; a Scan has no out-of-band SSRF check. See the
   [OWASP coverage matrix](owasp-coverage-matrix.md).
 - **AI red teaming** — attacks AI features the same way: chatbots, RAG endpoints, agents, and MCP
   tools are probed for prompt injection, sensitive-data disclosure, unsafe tool use, approval bypass,
