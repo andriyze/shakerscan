@@ -93,9 +93,10 @@ time difference) with the probe and never with the control. Classes are payload 
 | Server-side template injection | the product of two random numbers appears, the literal does not |
 | Path traversal | a known file signature against a control path |
 | Command injection | a random marker echoed, and a repeated time difference |
-| XXE | an internal entity expands in the response (no out-of-band) |
+| XXE | an external entity returns a known file signature, after an internal entity was seen to expand |
+| Request forgery (in-band) | the application's own front page comes back for its loopback address, not for a missing page there |
 | Open redirect | allowlist-bypass payloads in the existing verifier |
-| JWT | a forged token (`alg: none`, weak key, `kid`) is accepted where the control is refused |
+| JWT | the principal's token with an altered signature, or with `alg: none`, is accepted; or a well-known secret reproduces its signature |
 | SQL injection | OR-boolean and numeric contexts; PostgreSQL, SQLite and SQL Server time payloads |
 
 The fuzzing templates that ship in the scanner image may propose candidates for these classes
@@ -128,13 +129,43 @@ it needs a deployment and policy decision before any design.
 
 ## Progress
 
+State of each item on this branch. "Main" means the engine already had it when this plan was
+opened; "open" means not started.
+
 | Phase | Item | State |
 |---|---|---|
-| 1 | OpenAPI empty server URL | open |
-| 1 | Secret-bearing exposure seeds | open |
-| 1 | Sign-in body SQL injection proof without a verifier signal | open |
-| 1 | SQL injection slice floor and body allowance | open |
-| 1 | Response media type gate for XSS | open |
-| 1 | Unfundable continuation action is skipped | open |
+| 0 | Scorecard and before/after comparison (`scripts/detection_scorecard.py`) | done |
+| 0 | Scorecard run for every detection change, published with release notes | open (process) |
+| 0 | More benchmark targets with answer keys | open (needs maintainer approval, see the ledger) |
+| 1 | OpenAPI empty server URL | done |
+| 1 | Secret-bearing exposure seeds | done, on `thorough` and `deep` only: fast and balanced plans are pinned |
+| 1 | Sign-in body SQL injection proof without a verifier signal | done |
+| 1 | XSS verifier not run on responses a browser does not render | done for JSON responses, in the existing one-request reflection check |
+| 1 | SQL injection slice floor and body allowance | open: any change to slice sizing moves pinned plans and starved active templates when tried |
+| 1 | Unfundable continuation action is skipped | open, not reproduced on 2.14.1 |
 | 1 | Findings published as proof settles | open |
-| 0, 2–5 | all items | open |
+| 2 | Request bodies the crawl saw the application send; crawled forms | main |
+| 2 | Bearer profiles in the browser crawler's storage | open |
+| 2 | Real path values from specification examples | dropped: values never enter a manifest by design; the OR pair below covers a value that matches nothing |
+| 3 | Differential proof core (`api/capabilities/injection_verify.py`) | done |
+| 3 | Template injection, path traversal, command injection, XXE | done, as the opt-in `server_injection` family |
+| 3 | SQL injection: numeric and OR pairs, PostgreSQL and SQL Server delays | done; they run where a slice's reservation has room and never on a sign-in endpoint |
+| 3 | Open-redirect allow-list bypass destinations | done |
+| 3 | JSON Web Token: altered signature, `alg: none`, guessable secret | done, in `authz_surface` |
+| 3 | Fuzzing templates as candidate generators | open (decision 1) |
+| 3 | The same proofs behind a Hunt's `candidate.verify` | open |
+| 4 | Password hashes in an authenticated JSON response | main (`authz_surface`) |
+| 4 | Role-to-role comparison, mass assignment, default-credential proof, stored XSS | open |
+| 5 | In-band request forgery to the application's own loopback address | done, a class of `server_injection` |
+| 5 | Out-of-band callback listener | open (decision 2) |
+
+### What the done items still need
+
+- A benchmark scorecard before and after, on the same targets and profile. Nothing on this
+  branch has been run against a live target; every item is proven by unit tests over a fake
+  transport.
+- `server_injection` is in no preset. Adding it to `standard_active` is a default change and
+  waits for that scorecard.
+- Findings of `server_injection` have no retest replay yet: a retest reports that the finding
+  type has none.
+- The command-injection probes are for a POSIX shell; there is none for `cmd.exe`.
