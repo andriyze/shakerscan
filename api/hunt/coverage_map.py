@@ -615,13 +615,19 @@ async def load_coverage(conn: Any, run: Mapping[str, Any]) -> dict[str, Any] | N
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or not run.get("target_id"):
         return None
     hunt_uuid = run["id"]
+    # The answer's status is in the Hunt's HTTP archive (one row per request an action sent), not
+    # in the action's settled summary.
     actions = await conn.fetch(
-        """SELECT capability_name, status, input_summary->'input' AS input,
-                  input_summary->>'idempotency_key_sha256' AS idempotency_key_sha256,
-                  result_summary->'observations'->0->'response'->>'status' AS http_status,
-                  result_summary->'observations'->0->'response'->>'content_type' AS content_type
-           FROM hunt_actions WHERE hunt_run_id=$1
-           ORDER BY started_at LIMIT $2""",
+        """SELECT a.capability_name, a.status, a.input_summary->'input' AS input,
+                  a.input_summary->>'idempotency_key_sha256' AS idempotency_key_sha256,
+                  t.status_code::text AS http_status, NULL::text AS content_type
+           FROM hunt_actions a
+           LEFT JOIN (SELECT DISTINCT ON (hunt_action_id) hunt_action_id, status_code
+                      FROM http_transactions
+                      WHERE hunt_run_id=$1 AND hunt_action_id IS NOT NULL
+                      ORDER BY hunt_action_id, sequence DESC) t ON t.hunt_action_id = a.id
+           WHERE a.hunt_run_id=$1
+           ORDER BY a.started_at LIMIT $2""",
         hunt_uuid, MAX_ACTION_ROWS,
     )
     endpoints = await conn.fetch(
