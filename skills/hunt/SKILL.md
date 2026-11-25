@@ -351,8 +351,9 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   separation; use server evidence.
 - For devices, inspect confirmed services, capabilities, policy, and bound request collections.
   Silence or `open|filtered` is inconclusive. Preserve pacing, fragility limits, circuit breakers,
-  exact-device origin pinning, and separate user confirmation through
-  `POST /hunts/{hunt_id}/shell-plans/{plan_id}/confirm` for immutable SSH plans.
+  exact-device origin pinning, and the person's separate confirmation of an immutable SSH plan on
+  the Hunt page (`POST /hunts/{hunt_id}/shell-plans/{plan_id}/confirm` is the person's, never
+  yours).
 - For a submission-only request, report the queued Scan/verifier ID and stop. For an explicitly
   requested end-to-end Hunt, follow the child action with bounded status checks, collect its result,
   and continue the investigation; do not ask for another command at each queue boundary. Respect

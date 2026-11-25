@@ -350,7 +350,10 @@ curl -s -X POST "$API_BASE/model-intake/submissions/$SUBMISSION_ID/freeze-eviden
   -d '{"deployment_bundle":{"...":"exact bundle"}}'
 ```
 
-Each human reviewer then uses their own configured credential:
+Approvals and promotion are people's decisions. An agent prepares each request with the exact
+evidence ids and hands it to the reviewer or release manager, who runs it with their own
+credential; the agent never sends it (`shakerscan api` refuses both inside an agent) and reads the
+submission afterwards. Each human reviewer runs, with their own configured credential:
 
 ```bash
 curl -s -X POST "$API_BASE/model-intake/submissions/$SUBMISSION_ID/approvals" \
@@ -373,7 +376,8 @@ curl -s -X POST "$API_BASE/model-intake/submissions/$SUBMISSION_ID/policy-decisi
   -d '{"evidence_manifest_id":"uuid"}'
 ```
 
-Only a stored `allow` decision binding the latest unchanged evidence may invoke the isolated signer:
+Only a stored `allow` decision binding the latest unchanged evidence may invoke the isolated signer.
+The release manager runs the promotion, with their own credential:
 
 ```bash
 curl -s -X POST "$API_BASE/model-intake/submissions/$SUBMISSION_ID/promote" \

@@ -33,7 +33,10 @@ printed by `./scanner.sh status`.
 
 3. Before enabling `active_testing`, confirm the user owns or is explicitly authorized to test the
    exact target. State-changing HTTP, network discovery, and encrypted credential profiles also
-   require the matching target-bound approval receipt. Never put raw credentials in the request:
+   require the matching target-bound approval receipt. That authorization is the person's: they
+   run `shakerscan targets authorize <target>` in their own terminal (the scan then resolves it
+   itself); never record an authorization or approval receipt yourself. Never put raw credentials
+   in the request:
 
    ```bash
    shakerscan api POST /scans '{

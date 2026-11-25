@@ -5,15 +5,17 @@ Use the `research-agent` skill.
 `/research` is retained as a compatibility command, but the user-facing workflow is **Hunt**.
 The legacy `/research/*` runtime and the `/agent/hunt/*` engine are removed; a Hunt request starts a `/hunts` run.
 
-Resolve the authorized target, create a target-bound expiring credential approval, then start:
+Resolve the target and check its standing authorization (`GET /targets/{id}/authorization`). When
+the Hunt needs active testing and the target has none, ask the person to run `shakerscan targets
+authorize <target>` in their own terminal and wait for them; never record an authorization or an
+approval receipt yourself. The start resolves the standing authorization itself:
 
 ```http
 POST /hunts
 {
   "target_id": "...",
   "objective": "...",
-  "budget_profile": "balanced",
-  "approval_receipt_id": "..."
+  "budget_profile": "balanced"
 }
 ```
 

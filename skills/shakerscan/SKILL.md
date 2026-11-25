@@ -40,7 +40,7 @@ target binding, approvals, budgets, evidence, and finding proof.
 | Continuous endpoint coverage | `/targets/{id}/asm/*` |
 | Connected-device inventory, policy, credentials, and posture | `/devices*`, `/device-policies*` |
 | Findings, cleanup, triage, or retest | `/findings*`, `/retests*` |
-| Archive or permanently delete a target | `/delete-target`: `POST /targets/{id}/archive` (reversible), or preview → dangerous approval → `POST /data-deletion/execute`, only on the user's explicit request |
+| Archive or permanently delete a target | `/delete-target`: `POST /targets/{id}/archive` (reversible), or a preview the person then approves and executes in their own terminal, only on the user's explicit request |
 | Finding exceptions and deployment policies | `/finding-exceptions*`, `/policy-profiles*` |
 | AI chat, RAG, agent, MCP, or widget testing | `/ai/targets*` |
 | Model artifact intake | `/model-intake/*` |
@@ -71,6 +71,10 @@ origin. Model Intake artifacts remain exact-subject targets.
   separately confirmed SSH plans intact.
 - Treat credentials, auth headers, cookies, API keys, and approval receipts as secrets. Do not echo
   them in reports.
+- Never make a person's decision (a permission request, a target's authorization, an approval
+  receipt, a finding's dismissal or accepted risk, a secret's reveal, a contract's approval, a
+  setting): hand the person the command `shakerscan api` names when it refuses one, and read the
+  outcome after they ran it.
 - Production AI Gate scans require their production confirmation.
 - Auth checks require a primary auth context. BOLA/IDOR requires a provably distinct second
   principal plus the applicable deep-intent and approval gates.
