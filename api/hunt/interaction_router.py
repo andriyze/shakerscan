@@ -478,7 +478,7 @@ async def _hunt_coverage_query(hunt_id: str, request: HuntQueryRequest) -> dict[
 
 
 # Open coverage rides on every capability answer of a web Hunt; one read per Hunt per this many
-# seconds at most (the answer says how old it is through ``as_of_actions``).
+# seconds at most, so a burst of calls does not re-read it each time.
 _COVERAGE_HINT_SECONDS = 10.0
 _coverage_hints: dict[str, tuple[float, dict[str, Any]]] = {}
 
