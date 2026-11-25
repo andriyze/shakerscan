@@ -1187,6 +1187,39 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=False,
         ),
         CapabilitySpec(
+            "injection.verify_batch",
+            "Prove server-side template injection, path traversal, command injection and XML "
+            "external entity injection with repeated differentials against a silent control, "
+            "over query, path and worker-private body candidates.",
+            "internal", "active", _HTTP_TARGETS, "injection.verify_batch", "1",
+            "active_testing",
+            {
+                "http_requests": 400,
+                "state_changing_requests": 400,
+                "tool_wall_seconds": 300,
+            },
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "deterministic_proof_contract": True,
+                "single_worker_batch": True,
+                "durable_attempt_checkpoints": True,
+            },
+            _schema({
+                "candidate_manifest_ref": {"type": "object"},
+                "endpoint_manifest_ref": {"type": "object"},
+                "request_candidate_manifest_ref": {"type": "object"},
+                "slice": {"type": "object"},
+                "profile": {"type": "string"},
+                "proof_policy": {"type": "string"},
+            }, required=("slice", "profile", "proof_policy")),
+            "injection-verify-batch/v1",
+            ("candidate_attempt", "injection_proof"),
+            arsenal_status="wired",
+            retest_contract="rerun-exact-injection-differential",
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "redirect.verify_batch",
             "Check discovered redirect parameters for open redirects: one GET per parameter set "
             "to a non-resolving out-of-scope canary URL, redirects not followed, the Location "
