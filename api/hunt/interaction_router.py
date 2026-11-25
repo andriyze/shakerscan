@@ -2078,12 +2078,15 @@ async def _execute_hunt_capability_lifecycle(
                                 # A network target names a host; the candidate names the service.
                                 verification_service_origin(dict(candidate_record), current_locator)
                             except CandidateVerificationRefused as exc:
-                                code = preflight_reason_code(exc.detail)
+                                code = exc.reason_code or preflight_reason_code(exc.detail)
                                 if code is None:
                                     raise HTTPException(
                                         status_code=exc.status_code, detail=exc.detail,
                                     ) from exc
-                                raise HuntRefusal(code, exc.detail, status_code=exc.status_code) from exc
+                                raise HuntRefusal(
+                                    code, exc.detail, status_code=exc.status_code,
+                                    extra={"next_call": exc.next_call} if exc.next_call else None,
+                                ) from exc
                     allowed = {item["name"] for item in _hunt_public(run, include_context=False)["capabilities"]}
                     if name not in allowed:
                         # D31: say what is missing (and raise a request when a person can allow it).
@@ -2964,7 +2967,8 @@ async def _execute_hunt_capability_lifecycle(
             if verification_refused_before_traffic and isinstance(refusal_detail, Mapping):
                 # D34: the code stays machine-readable in the action, not a repr string.
                 result = {**result, **{
-                    key: refusal_detail[key] for key in ("reason_code", "message", "slot", "profile_id", "violation")
+                    key: refusal_detail[key]
+                    for key in ("reason_code", "message", "slot", "profile_id", "violation", "next_call", "missing_for")
                     if key in refusal_detail
                 }, "error": str(refusal_detail.get("reason_code") or refusal_detail.get("error") or "")[:120]}
             if candidate_adapter.blocked_exception is not None:

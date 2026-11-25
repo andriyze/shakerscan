@@ -18,8 +18,8 @@ from .request_verify_contract import (
     input_properties as request_verify_input_properties,
 )
 from .hunt_scanner_contract import (
-    HUNT_INJECTION_BODY_PROPERTIES, HUNT_SCANNER_SESSION_PROPERTIES, HuntScannerInputError,
-    validate_hunt_scanner_input,
+    HUNT_INJECTION_BODY_PROPERTIES, HUNT_SCANNER_SESSION_PROPERTIES, HUNT_VERIFIER_PATH_DESCRIPTION,
+    HuntScannerInputError, validate_hunt_scanner_input,
 )
 from typing import Any, Iterable, Literal, Mapping
 
@@ -879,7 +879,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_scanner",
             planner_input_schema=_http_principal_schema({
                 **HUNT_SCANNER_SESSION_PROPERTIES,
-                "path": _SAME_ORIGIN_PATH_PROPERTY,
+                "path": {**_SAME_ORIGIN_PATH_PROPERTY, "description": HUNT_VERIFIER_PATH_DESCRIPTION},
                 **HUNT_INJECTION_BODY_PROPERTIES,
                 "severity": {
                     "type": "string", "enum": ["low", "medium", "high"],
@@ -965,7 +965,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_scanner",
             planner_input_schema=_http_principal_schema({
                 **HUNT_SCANNER_SESSION_PROPERTIES,
-                "path": _SAME_ORIGIN_PATH_PROPERTY,
+                "path": {**_SAME_ORIGIN_PATH_PROPERTY, "description": HUNT_VERIFIER_PATH_DESCRIPTION},
                 **HUNT_INJECTION_BODY_PROPERTIES,
             }),
         ),

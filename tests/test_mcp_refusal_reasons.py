@@ -206,3 +206,26 @@ def test_a_hunt_over_its_long_actions_answers_retry_later_with_what_is_in_flight
     assert "2 long actions in flight" in error.message and "key-refusal-1" in error.message
     assert error.data["retry_after_seconds"] == 60
     assert client.opener.seen.count(("POST", CAPABILITY_PATH)) == 1
+
+
+def test_a_refusal_that_names_the_proving_call_hands_it_to_the_agent():
+    detail = {"error": "verification_method_unsupported", "reason_code": "verification_method_unsupported",
+              "message": "injection_proof_get_only: ...",
+              "next_call": {"capability": "sqli.verify", "input": {"path": "/login", "method": "POST",
+                                                                   "body_field_names": ["u"], "injection_field": "u"}}}
+    assert mcp._next_call_fields(detail) == {"next_call": detail["next_call"]}
+    assert mcp._next_call_fields({"next_call": {"capability": "x"}}) == {}
+    assert mcp._next_call_fields({"next_call": {"capability": "x", "input": {"p": "y" * 4_000}}}) == {}
+
+
+def test_a_refused_call_carries_its_next_call_to_the_agent():
+    detail = {"error": "verification_family_unsupported", "reason_code": "verification_family_unsupported",
+              "message": "injection_proof_browser_family: ... Send next_call (xss.verify) to prove it.",
+              "next_call": {"capability": "xss.verify", "input": {"path": "/search?q=1"}}}
+    client = _client({("GET", f"/hunts/{HUNT}"): HUNT_RECORD, ("POST", CAPABILITY_PATH): (422, {"detail": detail})})
+    with pytest.raises(mcp.MCPError) as refused:
+        _call_capability(client)
+    data = refused.value.data
+    assert data["outcome"] == "refused" and data["reason_code"] == "verification_family_unsupported"
+    assert data["next_call"] == {"capability": "xss.verify", "input": {"path": "/search?q=1"}}
+    assert "Send next_call" in data["recovery"]

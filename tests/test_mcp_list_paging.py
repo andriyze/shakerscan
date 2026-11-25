@@ -372,3 +372,83 @@ def test_a_row_the_summary_cannot_read_keeps_its_place():
     assert page["targets"][1] == "not-a-row" and page["returned"] == 2
     rest = _answer(engine.call_tool("shakerscan_targets", {"limit": 2, "cursor": page["next_cursor"]}))
     assert rest["targets"][0]["id"] == "t-2", "the cursor resumes after the rows shown, none skipped"
+
+
+class HttpRequestEngine(ManifestHuntClient):
+    """An http.request answer shaped as the engine's worker answers it (unit fixture)."""
+
+    def __init__(self, body):
+        super().__init__()
+        self.body = body
+
+    def observation(self):
+        return {
+            "kind": "http_observation", "redirect_chain": [],
+            "request": {"method": "GET", "path": "/hub/login", "as_principal": "anonymous", "query_keys": [],
+                        "follow_redirects": False, "direct_origin": False, "origin": "http://app.test",
+                        "pinned_address": "192.0.2.10", "tls_verification": "not_applicable",
+                        "address_policy": {"admitted_address_count": 1, "family_preference": "ipv4_first"}},
+            "response": {"status": 200, "content_type": "text/html", "content_length": len(self.body),
+                         "body_sample": self.body, "body_sha256": "scrypt-keyed:00", "elapsed_ms": 40,
+                         "http_version": "HTTP/1.1", "body_digest_scope": "complete", "location": None,
+                         "set_cookie_metadata": [{"name": "session", "http_only": True}], "json_keys": [],
+                         "html": {"forms": [{"action": "/hub/login", "method": "POST", "sign_in": True}],
+                                  "links": [f"/l/{index}" for index in range(60)], "links_total": 60}},
+        }
+
+    def request_json(self, method, path, payload=None):
+        if path.endswith("/capabilities/http.request"):
+            observation = self.observation()
+            return {
+                "hunt_id": self.HUNT_ID, "capability": "http.request", "action_id": "act-1", "status": "completed",
+                "idempotent_replay": False,
+                "lifecycle": {"outcome": "completed", "phases": [{"phase": "validated", "elapsed_ms": 0}] * 7},
+                "action_result": {"status": "success", "errors": [], "observations": [observation],
+                                  "action_id": "act-1", "hunt_id": self.HUNT_ID, "capability": "http.request",
+                                  "redacted_execution": {"method": "GET", "path": "/hub/login"},
+                                  "schema_version": "hunt-action-result/v2", "placement": "worker_http"},
+                "result": {"ok": True, "error": None, "captures": [{"name": "session", "source_action_id": "act-1"}],
+                           "receipt_id": "r-1", "job_id": "j-1", "budget_reservation_id": "b-1",
+                           "started_at": "t0", "finished_at": "t1", "execution": {"method": "GET"},
+                           "typed_output": {"records": [observation]},
+                           "receipt": {"receipt_id": "r-1", "observations": [observation], "receipt_hash": "h" * 64}},
+            }
+        return super().request_json(method, path, payload)
+
+
+def test_an_http_request_answer_keeps_what_the_target_said_and_drops_the_bookkeeping():
+    body = "<html><head><style>" + "x{color:red}" * 400 + "</style></head><body>" + "Sign in " * 600 + "</body></html>"
+    answer = _answer(_call(HttpRequestEngine(body)))
+    observation = answer["action_result"]["observations"][0]
+    response = observation["response"]
+    # What the agent acts on stays.
+    assert response["status"] == 200 and response["content_type"] == "text/html"
+    assert response["set_cookie_metadata"] == [{"name": "session", "http_only": True}]
+    assert response["html"]["forms"][0]["sign_in"] is True and response["html"]["links_total"] == 60
+    assert answer["result"]["captures"] == [{"name": "session", "source_action_id": "act-1"}]
+    assert answer["result"]["receipt_id"] == "r-1" and answer["lifecycle"]["outcome"] == "completed"
+    assert observation["request"] == {"method": "GET", "path": "/hub/login", "as_principal": "anonymous",
+                                      "follow_redirects": False}
+    # A body excerpt of at most 2,000 characters, without the stylesheet.
+    assert len(response["body_sample"]) <= mcp.HTTP_BODY_EXCERPT_CHARS + 1
+    assert "color:red" not in response["body_sample"] and "Sign in" in response["body_sample"]
+    assert len(response["html"]["links"]) == mcp.HTTP_LINKS_KEPT
+    # No receipt or second copy of the observations, and every reduction is named.
+    for key in ("receipt", "typed_output", "job_id", "execution", "started_at"):
+        assert key not in answer["result"], key
+    for key in ("redacted_execution", "schema_version", "placement"):
+        assert key not in answer["action_result"], key
+    assert "phases" not in answer["lifecycle"] and "elapsed_ms" not in response
+    reduced = answer["mcp_view"]["reduced"]
+    assert "result.receipt" in reduced["bookkeeping"] and "artifact.inspect" in reduced["bookkeeping"]
+    assert "same idempotency_key" in answer["mcp_view"]["full_view"]
+    assert len(json.dumps(answer)) < 6_000, len(json.dumps(answer))
+
+
+def test_a_direct_origin_request_keeps_its_origin():
+    engine = HttpRequestEngine("<p>hi</p>")
+    observation = engine.observation()
+    observation["request"]["direct_origin"] = True
+    engine.observation = lambda: observation
+    answer = _answer(_call(engine))
+    assert answer["action_result"]["observations"][0]["request"]["origin"] == "http://app.test"
