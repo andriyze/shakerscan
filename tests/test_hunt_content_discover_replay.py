@@ -157,6 +157,16 @@ def test_uncalibrated_content_discovery_records_nothing():
     assert endpoint_knowledge.content_discovery_worklist(HITS, origin="https://app.test/") == []
 
 
+def test_controls_answered_outside_the_match_codes_leave_every_hit_distinct():
+    # The worker sent its absent-path controls, and ffuf reported none of them: they answered a
+    # status outside the match codes (a plain 404), so every reported hit differs from them.
+    records = [*HITS, {"kind": "content_discovery", "url": "https://other.test/admin", "status": 200,
+                       "length": 5}]
+    assert endpoint_knowledge.content_discovery_worklist(
+        records, origin="https://app.test/", controls_sent=True) == ["GET /.git/config", "GET /admin"]
+    assert endpoint_knowledge._controls_sent({}) is True
+
+
 def test_content_discovery_is_recorded_in_the_endpoint_inventory(monkeypatch):
     calls = []
 
