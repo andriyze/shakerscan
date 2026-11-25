@@ -391,8 +391,9 @@ def test_scanner_capability_rejects_a_principal_it_cannot_apply():
 
 
 @pytest.mark.parametrize("candidate,detail", [
-    # sqli canonicalizes to injection, which the family-proof bridge cannot re-execute.
-    ({"family": "sqli", "canonical_locus": {"method": "GET", "route": "/search"}},
+    # A family no deterministic verifier proves (a Hunt's injection families have their own
+    # proofs, hunt/injection_proof.py).
+    ({"family": "cors_misconfiguration", "canonical_locus": {"method": "GET", "route": "/search"}},
      "verification bridge supports"),
     ({"family": "data_exposure", "canonical_locus": {"method": "GET"}},
      "verification_route_unresolved"),

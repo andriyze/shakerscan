@@ -8,6 +8,18 @@ def web_candidate_budget(family: str) -> dict[str, int]:
     # proof run and restoration for mutations. Preserve its conservative HTTP
     # envelope, but never invent browser traffic for an HTTP-only verifier.
     amounts = {"http_requests": 24, "browser_actions": 0}
+    try:
+        from hunt import injection_proof
+    except ModuleNotFoundError:  # package import layout
+        from . import injection_proof
+    if injection_proof.is_injection_family(family):
+        # The server's own injection proofs: every class, each with its repeat and control.
+        return {"http_requests": injection_proof.PROOF_REQUESTS, "browser_actions": 0}
+    try:
+        import family_proof
+    except ModuleNotFoundError:  # package import layout
+        from .. import family_proof
+    family = family_proof.canonical_family(family)
     if family in {"mass_assignment", "field_constraint", "workflow"}:
         amounts["state_changing_requests"] = 12
     return amounts
