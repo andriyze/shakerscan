@@ -199,7 +199,14 @@ def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
         "shakerscan_tool_status",
     }
     assert {tool.name for tool in mcp.HUNT_TOOLS} <= names
-    assert all(item["annotations"]["readOnlyHint"] is True for item in descriptors if item["name"] not in {tool.name for tool in mcp.HUNT_TOOLS})
+    # The Hunt tools and the grouped tools that start or change work (tests/test_mcp_agent_tools.py) say so;
+    # every other tool is read-only.
+    writers = {tool.name for tool in mcp.HUNT_TOOLS} | {
+        item["name"] for item in mcp._agent_tools().descriptors() if not item["annotations"]["readOnlyHint"]}
+    assert writers - {tool.name for tool in mcp.HUNT_TOOLS} == {
+        "shakerscan_scans", "shakerscan_finding", "shakerscan_hunts", "shakerscan_target", "shakerscan_schedules",
+        "shakerscan_asm"}
+    assert all(item["annotations"]["readOnlyHint"] is True for item in descriptors if item["name"] not in writers)
     assert all(tool.command not in {"scan.submit", "asm.improve", "finding.retest"} for tool in mcp.TOOLS)
 
     annotations = {item["name"]: item["annotations"] for item in descriptors}

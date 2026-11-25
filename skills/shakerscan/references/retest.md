@@ -3,6 +3,9 @@
 A retest re-runs the deterministic prover for one finding and records the verdict in its history.
 It sends requests to the target, so it is active testing.
 
+With MCP: `shakerscan_finding` action `retest` (it checks the standing authorization first and, without it,
+answers the person's command and sends nothing), then action `retests`. The REST steps follow.
+
 1. **Read the finding**: `shakerscan api GET /findings/<finding_id>`: note `target_id`, `status`,
    `proof_state` and the finding type. Device findings are retested by a bounded device scan, AI
    Gate findings by re-running the AI target; the route refuses both and says so.

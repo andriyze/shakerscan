@@ -34,7 +34,10 @@ every REST route by area (`shakerscan catalog rest --area scans`), the Hunt capa
 approval each needs, the permission kinds, the decisions only a person makes and how to request
 each, the Arsenal risk tiers, and whether this install authenticates.
 
-- Use an MCP tool where one exists; anything else is `shakerscan api METHOD PATH [JSON]`.
+- Use an MCP tool where one exists (`shakerscan_scans`, `shakerscan_finding`, `shakerscan_hunts`,
+  `shakerscan_target`, `shakerscan_schedules`, `shakerscan_exports`, `shakerscan_asm`,
+  `shakerscan_credentials`, `shakerscan_access_control`, `shakerscan_devices`, the Hunt tools and the
+  read-only lists); anything else is `shakerscan api METHOD PATH [JSON]`.
 - Hunts are terminal-first: the `hunt` skill, `shakerscan_hunt_*` or `shakerscan hunt`.
 - A person's decision (authorizing a target, dismissing a finding, raising a budget, approving a
   permission request or a contract): request it, give the person the exact command, read the

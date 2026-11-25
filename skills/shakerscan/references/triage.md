@@ -3,6 +3,9 @@
 Triage records what a finding is. Some verdicts are yours to record; dismissing a finding is the
 person's decision.
 
+With MCP: `shakerscan_finding` actions `get`, `evidence` and `triage` (a `false_positive` or
+`accepted_risk` verdict answers the person's command and changes nothing). The REST steps follow.
+
 | Verdict | Who | How |
 |---|---|---|
 | `needs_review`, `true_positive`, `duplicate`, `retest_needed` | you | `shakerscan api PATCH /findings/<finding_id> '{"analyst_verdict":"true_positive","notes":"why"}'` |
