@@ -184,3 +184,33 @@ def test_finding_severity_and_titles_follow_the_proof():
     }])[0]
     assert injection["title"] == "Verified command injection" and injection["cwe"] == "CWE-78"
     assert injection["severity"] == "critical"
+
+
+def test_a_server_side_sweep_runs_a_check_from_endpoint_parameter_and_class_alone():
+    """No planner input: an endpoint, its parameter and the class, under the run's policy."""
+    from api.hunt.request_verification import RequestVerificationRefused, run_check
+    from api.runtime.request_replay_executor import ReplayTransportResult
+    import urllib.parse as parse
+
+    class Redirector:
+        sent = 0
+
+        async def send(self, request, **_kwargs):
+            Redirector.sent += 1
+            value = parse.parse_qs(parse.urlsplit(request.url).query).get("next", ["/"])[0]
+            return ReplayTransportResult(status_code=302, connected_address="192.0.2.10", final_url=request.url,
+                                         response_headers={"Location": value}, response_body=b"")
+
+    result = asyncio.run(run_check("open_redirect", url=ORIGIN + "/go?next=/home", parameter="next",
+                                   target=_target(), transport=Redirector(), policy=ACTIVE, seed="sweep-1"))
+    assert [item["proof_class"] for item in result.observations if item["proof_state"] == "verified"] == [
+        "open_redirect"]
+    records = finding_records("h", "a", ORIGIN, "r", {"check": "open_redirect"}, list(result.observations))
+    assert records and records[0]["cwe"] == "CWE-601"
+    # The same limits as a planner's call: refused before anything is sent.
+    before = Redirector.sent
+    with pytest.raises(RequestVerificationRefused):
+        asyncio.run(run_check("path_traversal", url=ORIGIN + "/save", method="POST", parameter="name",
+                              form_body={"name": "a"}, target=_target(), transport=Redirector(),
+                              policy=WRITES, seed="sweep-2"))
+    assert Redirector.sent == before

@@ -307,6 +307,52 @@ def redacted_input(values: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+async def run_check(
+    check: str, *, url: str, target: Any, transport: Any, policy: Mapping[str, Any], seed: str,
+    method: str = "GET", parameter: str | None = None, json_body: Mapping[str, Any] | None = None,
+    form_body: Mapping[str, Any] | None = None, xml_body: str | None = None,
+    identity_headers: Mapping[str, str] | None = None, retrieve_path: str | None = None,
+    token_field: str | None = None, requested_budget: Mapping[str, int] | None = None,
+    heartbeat: Any = None, cancelled: Any = None,
+) -> Any:
+    """Run one check on one endpoint, outside a planner: a server-side sweep calls this with an
+    endpoint, its parameter and the class to prove, under the Hunt or Scan ``policy`` it runs for.
+
+    The same admission rules and safety limits as a planner's call apply (the refusal is raised as
+    ``RequestVerificationRefused`` before anything is sent); ``transport`` sends and archives.
+    Returns the adapter's result; ``finding_records`` turns its verified observations into findings.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    values: dict[str, Any] = {
+        "check": check, "method": method.upper(),
+        "path": urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, "")),
+        **({"parameter": parameter} if parameter else {}),
+        **({"json_body": dict(json_body)} if json_body is not None else {}),
+        **({"form_body": dict(form_body)} if form_body is not None else {}),
+        **({"xml_body": xml_body} if xml_body is not None else {}),
+        **({"retrieve_path": retrieve_path} if retrieve_path else {}),
+        **({"token_field": token_field} if token_field else {}),
+    }
+    refused = admission_refusal(values, policy)
+    if refused:
+        raise RequestVerificationRefused(refused)
+    allow_identity = policy.get("allow_identity_headers") is True
+    request = build_request(values, base_url=f"{parsed.scheme}://{parsed.netloc}/",
+                            headers=dict(identity_headers or {}), action_id=seed,
+                            allow_identity_headers=allow_identity)
+    adapter = verifier_adapter(
+        values, target=target, request=request, recorder=None, principal_slot="anonymous",
+        requested_budget=dict(requested_budget or REQUEST_VERIFY_HOLD), seed=seed,
+        allow_identity_headers=allow_identity, transport=transport,
+    )
+
+    async def beat() -> None:
+        if heartbeat is not None:
+            await heartbeat()
+
+    return await adapter.execute(heartbeat=beat, cancelled=cancelled or (lambda: False))
+
+
 async def prepare_operation(
     *, pool: Any, run: Mapping[str, Any], hunt_id: Any, action_id: Any, context: Any, target: Any,
     policy: Any, hunt_policy: Mapping[str, Any], target_url: str, values: Mapping[str, Any],
@@ -485,5 +531,5 @@ def finding_records(
 __all__ = [
     "CAPABILITY", "CHECKS", "REQUEST_FINDINGS", "REQUEST_VERIFY_HOLD",
     "RequestVerificationExecutionAdapter", "RequestVerificationRefused", "admission_refusal",
-    "build_request", "finding_records", "prepare_operation", "redacted_input", "verifier_adapter", "writes",
+    "build_request", "finding_records", "prepare_operation", "run_check", "redacted_input", "verifier_adapter", "writes",
 ]
