@@ -255,3 +255,14 @@ user on the same login, under the same limits and stop; it is verified only when
 authenticates and the control is refused (an accepted control refutes it), and a verified candidate
 becomes a finding (CWE-1392) with no password in it. It is on by
 default; set `SHAKERSCAN_HUNT_DEFAULT_CREDENTIALS=false` on the API to switch it off.
+
+**Injection candidates.** A planner that sees a parameter evaluate a template, read a file, run a
+command, fetch a URL or change a database query records a candidate of family `ssti`,
+`path_traversal`, `command_injection`, `ssrf`, `sqli` or `nosqli` (or plain `injection`, which
+runs every proof) with the request's `route` and the `parameter` name in its locus, and calls
+`candidate.verify`. The server then sends the Scan's own proofs itself: a probe that must change
+the answer twice with different random values, and a control that carries the same characters
+without the syntax and must stay silent. Only that repeated differential verifies the candidate;
+the planner's evidence only locates the request. A verified candidate becomes a finding with no
+response body in it. The proof mutates one query parameter of a GET, as the anonymous client; a
+request body goes to `sqli.verify` or `xss.verify`, and XSS is proven in a browser by `xss.verify`.

@@ -220,7 +220,9 @@ commands that started; a command that never started is neither charged nor remem
 address it reached. A mutating
 `candidate.verify` reserves 12 state-changing and 24 requests and is charged what its workflow
 sent (both runs and the create probe); a verification that reports no count (a device
-verification, an error, a browser step) keeps its whole hold.
+verification, an error, a browser step) keeps its whole hold. A `candidate.verify` of an
+injection family (`ssti`, `path_traversal`, `command_injection`, `ssrf`, `sqli`, `nosqli`,
+`injection`) reserves 96 requests and is charged what its proofs sent.
 
 Device fragility is not a port count. It bounds how hard a device is pushed, so on a device Hunt
 every connection costs a fragility point and a device request, whether or not the port was
