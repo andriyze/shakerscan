@@ -32,7 +32,9 @@ async def test_coverage_is_read_from_the_hunts_records_and_holds_an_early_finish
         ddl = (Path(__file__).resolve().parents[1] / "db/init.sql").read_text()
         await conn.execute("CREATE TABLE targets(id UUID PRIMARY KEY); CREATE TABLE device_targets(id UUID PRIMARY KEY);"
                            "CREATE TABLE scan_campaigns(id UUID PRIMARY KEY);"
-                           "CREATE TABLE budget_reservations(owner_kind TEXT, owner_id TEXT, status TEXT)")
+                           "CREATE TABLE budget_reservations(owner_kind TEXT, owner_id TEXT, status TEXT);"
+                           "CREATE TABLE http_transactions(hunt_run_id UUID, hunt_action_id UUID,"
+                           " sequence INTEGER, status_code INTEGER)")
         for table in ("hunt_runs", "hunt_actions", "target_endpoints", "hunt_coverage_angle_events"):
             await conn.execute(re.search(rf"CREATE TABLE {table} \(.*?\n\);", ddl, re.S)[0])
         for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
@@ -58,9 +60,13 @@ async def test_coverage_is_read_from_the_hunts_records_and_holds_an_early_finish
                 "VALUES($1,'GET',$2,$3,$4,$5,$6)", target, path, params, uuid4().hex, source,
                 "gone" if path == "/gone" else "untested")
 
+        answers = []
+
         def action(capability, status, values, http_status=None):
-            result = {"observations": [{"response": {"status": http_status}}]} if http_status else {}
-            return (uuid4(), hunt, capability, status, json.dumps({"input": values}), json.dumps(result))
+            action_id = uuid4()
+            if http_status:
+                answers.append((hunt, action_id, len(answers), http_status))
+            return (action_id, hunt, capability, status, json.dumps({"input": values}), "{}")
 
         await conn.executemany(
             "INSERT INTO hunt_actions(id,hunt_run_id,capability_name,status,input_summary,result_summary) "
@@ -70,6 +76,7 @@ async def test_coverage_is_read_from_the_hunts_records_and_holds_an_early_finish
              action("sqli.verify", "completed", {"path": "/search", "parameter": "q"}),
              action("http.request", "completed", {"method": "GET", "path": "/hub/orders"}, 200)],
         )
+        await conn.executemany("INSERT INTO http_transactions VALUES($1,$2,$3,$4)", answers)
         candidate = uuid4()
         await conn.execute(
             "INSERT INTO investigation_candidates(id,family,title,status,fingerprint,canonical_locus) "
