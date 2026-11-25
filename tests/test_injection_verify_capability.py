@@ -218,6 +218,25 @@ def test_command_injection_is_proven_by_evaluated_arithmetic_between_markers():
     assert all(value.startswith("127.0.0.1") for value in transport.values)
 
 
+def test_command_injection_through_cmd_exe_is_proven_by_set_a_and_the_marker_after_it():
+    def cmd(request, value):
+        match = re.search(r"&set /a (\d+)\+(\d+)&echo (\w+)&", value)
+        if match:
+            total = int(match.group(1)) + int(match.group(2))
+            return _answer(request, f"Pinging...\r\n{total}{match.group(3)}\r\n".encode())
+        return _answer(request, b"Pinging 127.0.0.1 with 32 bytes of data\r\n")
+
+    transport = Recorder(cmd)
+    result = _run(
+        _request(url="https://app.example.test/render?q=127.0.0.1"), _candidate(), transport,
+        classes=("command_injection",),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "verified"
+    assert proof["technique"] == "arithmetic_echo_cmd_ampersand_repeated"
+    assert proof["proof_contract"] == PROOF_CONTRACTS["command_injection"]
+
+
 def test_blind_command_injection_is_proven_by_a_repeated_delay():
     transport = Recorder(lambda request, value: _answer(
         request, b"ok", elapsed_ms=1100 if "|sleep 1" in value else 15,

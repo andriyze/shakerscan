@@ -112,6 +112,12 @@ _COMMAND_WRAPPERS = (
     ("double_quote_break", "\";%s;\""),
     ("single_quote_break", "';%s;'"),
 )
+# The separators ``cmd.exe`` honours. Its arithmetic is ``set /a``, which prints the result with
+# no line break, so the marker that follows is joined to it.
+_COMMAND_WRAPPERS_WINDOWS = (
+    ("cmd_ampersand", "&%s&"),
+    ("cmd_pipe", "|%s"),
+)
 _TIME_SCREEN_MS = 750
 # Loopback spellings of the application's own address. A URL parameter that fetches any of them
 # reaches an interface no outside client can.
@@ -369,6 +375,32 @@ class InjectionVerifyAdapter:
                     proof_contract=PROOF_CONTRACTS["command_injection"],
                     technique=f"arithmetic_echo_{name}_repeated",
                     payload_shape="<original>" + wrapper % "echo <marker>$((<n>+<n>))<marker>",
+                    response_pairs=[_pair(control, probe), _pair(control, repeat)],
+                )
+        # Windows: ``set /a`` prints the sum and ``echo`` the marker right after it.
+        joined = tuple(f"{pair[0] + pair[1]}{marker}" for pair in (first, second))
+
+        def windows_command(pair: tuple[int, int]) -> str:
+            return f"set /a {pair[0]}+{pair[1]}&echo {marker}"
+
+        for name, wrapper in _COMMAND_WRAPPERS_WINDOWS:
+            if left() < 3 or any(_contains(baseline, value) for value in joined):
+                break
+            probe = await send(self._with(original + wrapper % windows_command(first)))
+            if probe.error_code or not _contains(probe, joined[0]):
+                continue
+            repeat = await send(self._with(original + wrapper % windows_command(second)))
+            # The same words with no separator before them: nothing may run them.
+            control = await send(self._with(original + windows_command(first).replace("&", " ")))
+            if (
+                not repeat.error_code and not control.error_code
+                and _contains(repeat, joined[1]) and not _contains(control, joined[0])
+            ):
+                return self._observation(
+                    "command_injection",
+                    proof_contract=PROOF_CONTRACTS["command_injection"],
+                    technique=f"arithmetic_echo_{name}_repeated",
+                    payload_shape="<original>" + wrapper % "set /a <n>+<n>&echo <marker>",
                     response_pairs=[_pair(control, probe), _pair(control, repeat)],
                 )
         # Blind: nothing is echoed, so the only signal is time. One screening request per wrapper;
