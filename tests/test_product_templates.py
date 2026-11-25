@@ -254,6 +254,13 @@ def test_a_match_becomes_a_candidate_of_the_class_its_template_names():
         "cve-2023-23752", "http://t/api/index.php/v1/config/application?public=true",
         tags=["joomla", "disclosure"], severity="medium"), "a3")
     assert query["locus"]["path"] == "/api/index.php/v1/config/application?public=true"
+    redacted = product_candidate("joomla", "read_only", _match(
+        "cve-2023-23752", "http://t/api/index.php/v1/config/application?public=%3Credacted%3E",
+        tags=["joomla", "disclosure"]), "a7")
+    assert redacted["locus"]["path"] == "/api/index.php/v1/config/application"
+    doubled = product_candidate("wordpress", "read_only", _match(
+        "wordpress-accessible-wpconfig", "http://t//wp-config.php", tags=["wordpress", "backup"]), "a8")
+    assert doubled["locus"]["path"] == "/wp-config.php"
     # tagged only by product and year, named for what it reads
     named = product_candidate("joomla", "read_only", _match(
         "cve-2023-23752", "http://t/api/index.php/v1/config/application?public=true",
