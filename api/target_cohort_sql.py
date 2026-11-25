@@ -28,7 +28,8 @@ try:
 except ModuleNotFoundError:  # package import layout
     from .asset_cohorts import TARGET_COHORTS, target_cohort, target_exposure_class
 
-CLASSIFIER_VERSION = f"exposure-class/v1:py{sys.version_info.major}.{sys.version_info.minor}"
+# v2: a wildcard-DNS name that encodes a private address (10-0-0-5.sslip.io) is internal.
+CLASSIFIER_VERSION = f"exposure-class/v2:py{sys.version_info.major}.{sys.version_info.minor}"
 
 COHORT_VIEWS: dict[str, tuple[str, ...]] = {
     "operational": ("production", "staging", "unclassified"),
