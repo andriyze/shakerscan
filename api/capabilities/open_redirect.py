@@ -21,11 +21,15 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping
 
 try:
     from runtime.auth_refusal import refusal
-    from scan.posture_findings import REDIRECT_CANARY_URL, is_redirect_parameter, redirects_to_canary
+    from scan.posture_findings import (
+        REDIRECT_CANARY_HOST, REDIRECT_CANARY_URL, is_redirect_parameter, redirects_to_canary,
+    )
     from scan.work_manifests import ScanWorkManifestError, execution_url_for_endpoint
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.auth_refusal import refusal
-    from ..scan.posture_findings import REDIRECT_CANARY_URL, is_redirect_parameter, redirects_to_canary
+    from ..scan.posture_findings import (
+        REDIRECT_CANARY_HOST, REDIRECT_CANARY_URL, is_redirect_parameter, redirects_to_canary,
+    )
     from ..scan.work_manifests import ScanWorkManifestError, execution_url_for_endpoint
 
 OPEN_REDIRECT_PARSER_VERSION = "open-redirect-probe/v1"
@@ -38,6 +42,37 @@ def probe_url(url: str, parameter: str) -> str:
     parts = urllib.parse.urlsplit(url)
     query = urllib.parse.urlencode([(parameter, REDIRECT_CANARY_URL)])
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path or "/", query, ""))
+
+
+def bypass_candidates(candidate: Mapping[str, str]) -> list[dict[str, str]]:
+    """The same parameter with destinations that pass a careless allow-list.
+
+    An application that refused the plain canary may only be checking that the value mentions
+    its own address, begins with it, or begins with a slash. Each destination still resolves to
+    the canary host in a browser, so the proof is unchanged: a Location that names the canary.
+
+    * ``own_origin_in_query``: the canary URL with the application's origin in its query (a
+      "contains our address" check);
+    * ``own_host_as_userinfo``: the application's host as the user part of the canary URL (a
+      "starts with our address" check);
+    * ``scheme_relative``: ``//canary/`` (a "starts with a slash" check).
+    """
+    parts = urllib.parse.urlsplit(candidate["url"])
+    own = f"{parts.scheme}://{parts.netloc}"
+    destinations = (
+        ("own_origin_in_query", f"{REDIRECT_CANARY_URL}?next={own}/"),
+        ("own_host_as_userinfo", f"{parts.scheme}://{parts.netloc}@{REDIRECT_CANARY_HOST}/"),
+        ("scheme_relative", f"//{REDIRECT_CANARY_HOST}/"),
+    )
+    out = []
+    for name, destination in destinations:
+        query = urllib.parse.urlencode([(candidate["parameter"], destination)])
+        url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path or "/", query, ""))
+        out.append({
+            **dict(candidate), "url": url, "bypass": name,
+            "attempt_key": hashlib.sha256(url.encode()).hexdigest(),
+        })
+    return out
 
 
 def redirect_candidates(entries: Iterable[Mapping[str, Any]]) -> list[dict[str, str]]:
@@ -106,6 +141,7 @@ async def probe_candidate(candidate: Mapping[str, str], send: Callable[[str], Aw
         "url": candidate["url"],
         "parameter": candidate["parameter"],
         "route_id": candidate.get("route_id"),
+        **({"bypass": candidate["bypass"]} if candidate.get("bypass") else {}),
         "status": status,
         # Only a Location that names the canary is kept: any other value is the application's
         # own redirect target and may carry its state.
@@ -117,6 +153,6 @@ async def probe_candidate(candidate: Mapping[str, str], send: Callable[[str], Aw
 
 
 __all__ = [
-    "MAX_PARAMETERS_PER_ROUTE", "OPEN_REDIRECT_PARSER_VERSION", "probe_candidate", "probe_url",
-    "redirect_candidates",
+    "MAX_PARAMETERS_PER_ROUTE", "OPEN_REDIRECT_PARSER_VERSION", "bypass_candidates",
+    "probe_candidate", "probe_url", "redirect_candidates",
 ]

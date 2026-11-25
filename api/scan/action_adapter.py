@@ -68,7 +68,8 @@ try:
     from capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from capabilities.open_redirect import (
-        OPEN_REDIRECT_PARSER_VERSION, probe_candidate as probe_redirect_candidate,
+        OPEN_REDIRECT_PARSER_VERSION, bypass_candidates as redirect_bypass_candidates,
+        probe_candidate as probe_redirect_candidate,
         redirect_candidates,
     )
     from capabilities.graphql_probe import (
@@ -168,7 +169,8 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from ..capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from ..capabilities.open_redirect import (
-        OPEN_REDIRECT_PARSER_VERSION, probe_candidate as probe_redirect_candidate,
+        OPEN_REDIRECT_PARSER_VERSION, bypass_candidates as redirect_bypass_candidates,
+        probe_candidate as probe_redirect_candidate,
         redirect_candidates,
     )
     from ..capabilities.graphql_probe import (
@@ -3678,6 +3680,8 @@ class DatabaseNeutralScanActionDispatcher:
         unanswered: list[str] = []
         attempted = resumed = 0
         ordinal = start * 1000
+        # Candidates that answered the plain canary without redirecting to it.
+        clean_misses: list[Mapping[str, str]] = []
 
         async def send(url: str) -> tuple[int | None, Mapping[str, Any] | None, str | None]:
             nonlocal ordinal
@@ -3714,6 +3718,11 @@ class DatabaseNeutralScanActionDispatcher:
                     if isinstance(item, Mapping) and item.get("kind") == "open_redirect_proof"
                     and item.get("inconclusive_reason")
                 )
+                if prior.get("proof_state") == "not_proven" and not any(
+                    isinstance(item, Mapping) and item.get("inconclusive_reason")
+                    for item in prior.get("observations") or ()
+                ):
+                    clean_misses.append(candidate)
                 continue
             if (
                 self.cancelled() or consumed["http_requests"] >= http_ceiling
@@ -3739,6 +3748,8 @@ class DatabaseNeutralScanActionDispatcher:
             refused = proof.get("inconclusive_reason")
             if refused:
                 refused_probes.append(f"{refused}:{proof.get('refusal_status') or 0}")
+            elif proof["proof_state"] == "not_proven":
+                clean_misses.append(candidate)
             bundled = ({
                 "kind": "candidate_attempt", "attempt_id": attempt_id,
                 "candidate_id": attempt_id[:32], "family": "open_redirect",
@@ -3755,6 +3766,45 @@ class DatabaseNeutralScanActionDispatcher:
                     "budget_consumed": {"http_requests": 1},
                     "proof_state": proof["proof_state"],
                 })
+        # Destinations that pass a careless allow-list (open_redirect.bypass_candidates): only for
+        # a parameter that answered the plain canary without redirecting to it, and only with
+        # what the slice has left once every candidate had its first probe. A bypass probe is
+        # extra work on an attempted candidate, so it adds no attempt: a proof when it redirects.
+        out_of_room = False
+        for candidate in clean_misses:
+            if out_of_room:
+                break
+            for variant in redirect_bypass_candidates(candidate):
+                bypass_id = hashlib.sha256(
+                    f"{manifest_digest}:redirect:{variant['attempt_key']}".encode()
+                ).hexdigest()
+                prior = completed.get(bypass_id)
+                if prior is not None:
+                    observations.extend(prior.get("observations") or ())
+                    if prior.get("proof_state") == "verified":
+                        break
+                    continue
+                if (
+                    self.cancelled() or consumed["http_requests"] >= http_ceiling
+                    or wall_deadline - time.monotonic() < 1.0
+                ):
+                    out_of_room = True
+                    break
+                proof = await probe_redirect_candidate(variant, send)
+                if proof["proof_state"] == "unproven" or proof.get("inconclusive_reason"):
+                    continue
+                proven = proof["proof_state"] == "verified"
+                if proven:
+                    observations.append(proof)
+                if not self.cancelled():
+                    await checkpoint_attempt(action.action_id, {
+                        "attempt_id": bypass_id, "candidate_id": bypass_id[:32],
+                        "status": "success", "observations": (proof,) if proven else (),
+                        "budget_consumed": {"http_requests": 1},
+                        "proof_state": proof["proof_state"],
+                    })
+                if proven:
+                    break
         unattempted = max(0, len(candidates) - attempted)
         partial = bool(unattempted)
         if "tool_wall_seconds" in consumed:

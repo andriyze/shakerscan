@@ -371,6 +371,8 @@ def open_redirect_finding(item: Mapping[str, Any], *, make: FindingFactory) -> d
             "check": "open_redirect", "url": url, "parameter": parameter, "status": item.get("status"),
             "probe_destination": REDIRECT_CANARY_URL, "location": str(item.get("location") or "")[:500],
             "method": "GET", "severity_basis": severity_basis("open_redirect", "medium", reason),
+            # Which allow-list bypass destination the redirect followed, when the plain one did not.
+            **({"allow_list_bypass": str(item["bypass"])[:60]} if item.get("bypass") else {}),
         },
         verification_reason=f"The {parameter} parameter set to an external URL produced a redirect to it",
     )
