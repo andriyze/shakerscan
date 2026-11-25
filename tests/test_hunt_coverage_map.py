@@ -181,8 +181,7 @@ def test_finish_guard_refuses_open_coverage_with_time_left_and_names_it():
 def test_finish_guard_lets_the_hunt_finish_when_it_should():
     report = build_coverage(actions=[], endpoints=[_endpoint("/search", params="q")])
     # Forced with a reason after half the open pairs closed; refused when forced without one.
-    assert finish_guard(_run(), report, force=True, force_reason="the person asked to stop now", now=NOW,
-                        closed_since_refusal=2, open_at_refusal=3) is None
+    assert finish_guard(_run(), report, force=True, force_reason="the person asked to stop now", now=NOW) is None
     assert "force_reason" in finish_guard(_run(), report, force=True, force_reason=" ", now=NOW)
     # Wall nearly spent, HTTP budget spent, budget exhausted, not a web Hunt, nothing open.
     late = _run(created_at=NOW - timedelta(seconds=5400 - 30))
@@ -195,25 +194,6 @@ def test_finish_guard_lets_the_hunt_finish_when_it_should():
                             allowed=["web.crawl", "web.content_discover"])
     assert finish_guard(_run(), closed, force=False, force_reason=None, now=NOW) is None
     assert finish_guard(_run(), None, force=False, force_reason=None, now=NOW) is None
-
-
-def test_a_forced_finish_needs_open_pairs_closed_first():
-    many = build_coverage(actions=[], endpoints=[_endpoint(f"/api/v1/thing{index}/{index}", params="q")
-                                                 for index in range(20)])
-    assert many["pairs_open"] > 2 * coverage_map.FORCE_MIN_CLOSED
-    assert coverage_map.force_threshold(many["pairs_open"]) == coverage_map.FORCE_MIN_CLOSED
-    assert coverage_map.force_threshold(6) == 3 and coverage_map.force_threshold(1) == 1
-    reason = "the remaining routes are unrelated to the objective"
-    refused = finish_guard(_run(), many, force=True, force_reason=reason, now=NOW,
-                           closed_since_refusal=3, open_at_refusal=many["pairs_open"])
-    assert refused and "3 of the 40 pairs" in refused and "kind=coverage" in refused
-    assert finish_guard(_run(), many, force=True, force_reason=reason, now=NOW,
-                        closed_since_refusal=40, open_at_refusal=many["pairs_open"]) is None
-    late = _run(created_at=NOW - timedelta(seconds=5400 - 30))
-    assert finish_guard(late, many, force=True, force_reason=reason, now=NOW) is None
-    running = build_coverage(actions=[_action("web.crawl", status="running")], endpoints=[])
-    assert "discovery is still running" in finish_guard(
-        _run(), running, force=True, force_reason=reason, now=NOW, closed_since_refusal=100, open_at_refusal=0)
 
 
 def test_an_exposure_closes_by_judgement_or_a_refusal_not_by_a_bare_request():

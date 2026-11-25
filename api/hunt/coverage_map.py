@@ -48,15 +48,6 @@ FINISH_ITEMS = 8
 # Finishing is not held when less than this much of the Hunt's wall remains.
 FINISH_MIN_WALL_SECONDS = 120
 MIN_FORCE_REASON_CHARS = 10
-# A forced finish needs this many open pairs closed since coverage was first refused, or half of
-# them when fewer were open (finite: it never holds a Hunt forever).
-FORCE_MIN_CLOSED = 40
-
-
-def force_threshold(open_pairs: int) -> int:
-    """How many pairs a forced finish needs closed, given the pairs open at the first refusal."""
-    return min(FORCE_MIN_CLOSED, (max(0, int(open_pairs)) + 1) // 2)
-
 # Test classes: the check, and what this engine offers to run it.
 CLASS_GUIDE: Mapping[str, str] = {
     "review": "request it (http.request GET, or artifact.inspect for a file) and read what it returns",
@@ -237,7 +228,7 @@ _LOOKED_AT = frozenset({"review", "exposure", "unauthenticated_api"})
 # Answers that serve nothing: a route that only ever answered these exposed nothing to judge.
 _NOTHING_SERVED = frozenset({401, 403, 404, 405, 407, 410})
 # Process-state keys of the discovery runner that are not step outcomes.
-_STATE_KEYS = frozenset({"running", "products", "notes", "probe_hits"})
+_STATE_KEYS = frozenset({"running", "products", "notes", "probe_hits", "sweep_counts", "deferred_finish"})
 
 
 def family_classes(family: Any) -> set[str]:
@@ -482,6 +473,9 @@ def build_coverage(
                       **({"not_run": not_run, "run_with": {step: DISCOVERY_STEPS[step] for step in not_run}}
                          if not_run else {}),
                       **({"products": state["products"]} if state.get("products") else {}),
+                      **({"sweep_checks": dict(state["sweep_counts"])}
+                         if isinstance(state.get("sweep_counts"), Mapping) else {}),
+                      **({"planner_finished": True} if state.get("deferred_finish") else {}),
                       **({"notes": state["notes"]} if state.get("notes") else {})},
         "open": items,
         "class_guide": {name: CLASS_GUIDE[name] for name in by_class},
@@ -522,6 +516,8 @@ def compact_open_coverage(report: Mapping[str, Any], hunt_id: str) -> dict[str, 
         "endpoints_open": int(report.get("endpoints_open") or 0),
         "endpoints_known": int(report.get("endpoints") or 0),
         "discovery_pending": list(discovery.get("pending") or []),
+        **({"sweep": discovery["steps"]["sweep"]} if (discovery.get("steps") or {}).get("sweep") else {}),
+        **({"sweep_checks": discovery["sweep_checks"]} if discovery.get("sweep_checks") else {}),
         **({"discovery_not_run": list(discovery["not_run"])} if discovery.get("not_run") else {}),
         "next": [_item_line(item) for item in (report.get("open") or [])[:COMPACT_ITEMS]],
         "list": f"POST /hunts/{hunt_id}/query kind=coverage (or GET /hunts/{hunt_id}/coverage)",
@@ -569,17 +565,18 @@ def http_budget_left(run: Mapping[str, Any]) -> bool:
 
 
 def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, force: bool,
-                 force_reason: str | None, now: datetime | None = None,
-                 closed_since_refusal: int | None = None, open_at_refusal: int | None = None) -> str | None:
+                 force_reason: str | None, now: datetime | None = None) -> str | None:
     """Why this finish is refused, or None.
 
-    Never refuses a Hunt whose wall or HTTP budget is spent, a budget-exhausted Hunt, or one with
-    nothing open. A forced finish needs a reason and, while many pairs are open, real work on them
-    first: ``force_threshold`` open pairs closed since coverage was first refused (a candidate, a
-    settled coverage angle or the check itself closes a pair; a bare request does not close an
-    exposure). Measured agents forced the very first refusal with a rationalization, then met an
-    action count with cheap requests; this bound is finite, so a finish is never held forever."""
+    Never refuses a Hunt whose wall or HTTP budget is spent, a budget-exhausted Hunt, one with
+    nothing open, or a forced finish with a reason (the engine's own sweep, not the planner, does
+    the remaining work; a finish while it runs is deferred until it ends, see ``run_service``)."""
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or report is None:
+        return None
+    if force:
+        if len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:
+            return ("force=true needs force_reason: say in a sentence why the open coverage is left "
+                    "untested; it is recorded in the debrief")
         return None
     if str(run.get("status") or "") == "budget_exhausted":
         return None
@@ -593,21 +590,6 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
     if not pairs and not pending:
         return None
     hunt_id = str(run.get("id") or "")
-    if force:
-        if len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:
-            return ("force=true needs force_reason: say in a sentence why the open coverage is left "
-                    "untested; it is recorded in the debrief")
-        done = int(closed_since_refusal or 0)
-        needed = force_threshold(open_at_refusal if open_at_refusal is not None else pairs)
-        if pending or done < needed:
-            return (f"force is accepted after real work on the open coverage: {pairs} pairs are open"
-                    + (f" and discovery is still running ({', '.join(pending)})" if pending else "")
-                    + f"; {done} of the {needed} pairs needed have been closed since coverage was "
-                    f"first refused (run the check, or record a candidate or a negative coverage "
-                    f"angle per endpoint after reading it). Every listed endpoint answered on this target "
-                    f"differently from a path that cannot exist, so it is part of this target's "
-                    f"surface. Next: POST /hunts/{hunt_id}/query kind=coverage and run the checks.")
-        return None
     lines = [_item_line(item) for item in (report.get("open") or [])[:FINISH_ITEMS]]
     left = (f"{int(remaining // 60)} min of wall" if remaining is not None else "wall time")
     parts = [
@@ -615,16 +597,14 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
         f"{int(report.get('endpoints_open') or 0)} of {int(report.get('endpoints') or 0)} known endpoints"
         + (f"; discovery not finished: {', '.join(pending)}" if pending else "")
         + f", with {left} and HTTP budget left. Every listed endpoint answered on this target "
-        "differently from a path that cannot exist (crawl, content discovery, product probes), so it "
-        "is part of this target's surface, whatever product it belongs to.",
+        "differently from a path that cannot exist, so it is part of this target's surface.",
     ]
     if lines:
         parts.append("Untested first: " + "; ".join(lines) + ".")
     parts.append(
         f"Continue: POST /hunts/{hunt_id}/query kind=coverage lists every open pair with the check "
-        "to run (class_guide); a pair closes when you run that check, record a candidate on the "
-        "route, or record a coverage angle (status negative/blocked) for it. force=true with "
-        f"force_reason is accepted after {force_threshold(pairs)} pairs are closed; the reason and the open coverage go into the debrief.")
+        "to run (class_guide). Or finish with force=true and force_reason; the reason and the open "
+        "coverage go into the debrief.")
     return " ".join(parts)
 
 
@@ -673,7 +653,7 @@ async def load_coverage(conn: Any, run: Mapping[str, Any]) -> dict[str, Any] | N
 
 
 __all__ = [
-    "CLASSES", "CLASS_GUIDE", "COVERAGE_TARGET_KINDS", "FORCE_MIN_CLOSED", "SCHEMA", "force_threshold",
+    "CLASSES", "CLASS_GUIDE", "COVERAGE_TARGET_KINDS", "MIN_FORCE_REASON_CHARS", "SCHEMA",
     "build_coverage", "classify",
     "compact_open_coverage", "coverage_page", "debrief_coverage", "family_classes", "finish_guard",
     "key_digest", "load_coverage", "normalize_path", "wall_remaining_seconds",
