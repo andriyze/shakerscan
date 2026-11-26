@@ -100,6 +100,12 @@ def test_helpers():
     assert exposure_signal({"status": 200, "body_sample": "<p>Forgot your password? Contact IT</p>",
                             "html": {"title": "Sign in"}}) is None
     assert exposure_signal({"status": 200, "body_sample": '{"status": "ok", "version": "1.2"}'}) is None
+    # Listings of other stacks than Apache/nginx: Node serve-index, Python http.server, Tomcat.
+    for title in ("listing directory /encryptionkeys", "Directory listing for /files/",
+                  "Directory Listing For [/files/]"):
+        assert exposure_signal({"status": 200, "body_sample": "", "html": {"title": title}}) == "a directory index"
+    assert exposure_signal({"status": 200, "body_sample": "our business directory listing",
+                            "html": {"title": "Partners"}}) is None
     # A sign-in page's withheld anti-forgery token is not an exposure; a key on a page still is.
     page = {"title": "Sign in", "forms": [{"method": "POST", "action": "/login", "fields": []}]}
     assert exposure_signal({"status": 200, "body_sample": '<input name="_csrf" value="[withheld:1]">',
@@ -601,3 +607,29 @@ def test_without_a_planner_signal_the_sweep_ends_when_a_round_finds_nothing_new(
     asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
                 .run(_run(allowed=["http.request", "xss.verify"]), report, load_report=reload))
     assert state["sweep"] == "done" and state["sweep_stats"]["rounds"] == 1
+
+
+def test_one_sign_in_under_several_mounts_gets_the_default_pairs_once():
+    form = [{"method": "POST", "action": "", "fields": [
+        {"name": "pma_username", "type": "text"}, {"name": "pma_password", "type": "password"}]}]
+
+    class Mounts(_Engine):
+        async def call(self, capability, values, key):
+            self.calls.append((capability, dict(values), key))
+            if capability == "http.request" and values["method"] == "GET":
+                mount = values["path"].split("/")[1]
+                page = [dict(form[0], action=f"/{mount}/index.php")]
+                title = "Other app" if mount == "crm" else "phpMyAdmin"
+                return {"action_id": "r", "action_result": {"status": "success", "observations": [
+                    {"response": {"status": 200, "body_sample": "", "html": {"forms": page, "title": title}}}]}}
+            if capability == "http.request":
+                return _answer(200, login_attempt="rejected")
+            return {"action_id": "x", "action_result": {"status": "success", "observations": []}}
+
+    engine = Mounts()
+    report = {"open": [{"endpoint": f"GET /{mount}/", "untested": ["review"], "params": []}
+                       for mount in ("pma", "phpmyadmin", "dbadmin", "crm")]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request"]), report))
+    tried = {v["path"] for cap, v, _ in engine.calls if cap == "http.request" and v["method"] == "POST"}
+    assert tried == {"/pma/index.php", "/crm/index.php"}

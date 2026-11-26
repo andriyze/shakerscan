@@ -127,6 +127,19 @@ def test_a_token_or_a_session_redirect_away_from_the_login_is_accepted():
     assert verdict(303, b"", cookies=["hub_session"], location="/hub/") == "accepted"
 
 
+def test_a_front_controller_that_redirects_to_itself_with_the_page_to_show_is_accepted():
+    # phpMyAdmin-style: the sign-in POSTs to index.php and success redirects to index.php?route=/.
+    pma = "/phpmyadmin/index.php"
+    assert verdict(302, b"", cookies=["phpMyAdmin"], location="/phpmyadmin/index.php?route=/", path=pma) == "accepted"
+    assert verdict(302, b"", cookies=["phpMyAdmin"], location="index.php?route=/", path=pma) == "accepted"
+    # Back to the bare path, or with where to return to or a message: the sign-in shown again.
+    assert verdict(302, b"", cookies=["s"], location="/phpmyadmin/index.php", path=pma) == "rejected"
+    assert verdict(302, b"", cookies=["s"], location="/app?next=%2Fdashboard", path="/app") == "rejected"
+    assert verdict(302, b"", cookies=["s"], location="/app?msg=bad+password", path="/app") == "rejected"
+    assert verdict(302, b"", cookies=["s"], location="/app?loggedout=true", path="/app") == "rejected"
+    assert verdict(302, b"", location="/phpmyadmin/index.php?route=/", path=pma) == "unclear"  # no session cookie
+
+
 def test_refusals_are_rejected():
     assert verdict(401, {"error": "invalid credentials"}) == "rejected"
     assert verdict(200, {"success": False, "message": "Invalid username or password"}) == "rejected"

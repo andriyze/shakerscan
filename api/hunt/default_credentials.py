@@ -124,6 +124,11 @@ _TOKEN_NAMES = frozenset({"token", "access_token", "id_token", "jwt", "auth_toke
                           "session_id", "sessionid", "accesstoken", "authtoken"})
 _SUCCESS_FLAGS = frozenset({"authenticated", "is_authenticated", "logged_in", "success", "ok"})
 _LOGIN_PATH_RE = re.compile(r"(?:^|/)(?:log[-_]?in|sign[-_]?in|auth|session)s?(?:[/?#.]|$)", re.IGNORECASE)
+# Query names of a redirect back to the sign-in's own path that mean "sign in (again)".
+_SAME_PATH_RETRY_RE = re.compile(
+    r"(?:^|&)(?:next|return\w*|redirect\w*|continue|back|goto|dest\w*|from|ref\w*|url|r|msg|message|"
+    r"notice|alert|status|log[-_]?in|sign[-_]?in|auth\w*|logout|loggedout|expired|timeout|reason|code|e)=",
+    re.IGNORECASE)
 MAX_BODY_INSPECTED = 64 * 1024
 
 
@@ -415,9 +420,20 @@ def classify_response(*, status: Any, headers: Mapping[str, Any], cookie_names: 
     target = str(location or "")
     if 300 <= status < 400 and cookie_names and target:
         import urllib.parse
-        path = urllib.parse.urlsplit(target).path or "/"
-        if path.rstrip("/") != login_path.rstrip("/") and not _LOGIN_PATH_RE.search(path) \
-                and not re.search(r"error|fail|denied|invalid", target, re.IGNORECASE):
+        parts = urllib.parse.urlsplit(target)
+        path = parts.path or "/"
+        if re.search(r"error|fail|denied|invalid", target, re.IGNORECASE) or _LOGIN_PATH_RE.search(path):
+            return "rejected"
+        # A relative Location (``index.php?route=/``) names a sibling of the login's own path.
+        same = (path.rstrip("/") == login_path.rstrip("/")
+                or (not path.startswith("/") and path == login_path.rsplit("/", 1)[-1]))
+        if not same:
+            return "accepted"
+        # A front controller signs in on its own path and redirects to itself with the page to
+        # show (``/index.php?route=/``); a redirect back to the bare path, or one that carries
+        # where to return to or a message, is the sign-in shown again. The proof's control (the
+        # same user name, a random password) settles a login that redirects alike for any password.
+        if parts.query and not _SAME_PATH_RETRY_RE.search(parts.query):
             return "accepted"
         return "rejected"
     if 200 <= status < 300 and re.search(r"type=[\"']?password", text, re.IGNORECASE):

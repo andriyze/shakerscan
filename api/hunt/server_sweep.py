@@ -94,6 +94,8 @@ MAX_FOLLOW_ROUNDS = 60
 FOLLOW_POLL_SECONDS = 15.0
 FOLLOW_POLL_MAX_SECONDS = 120.0
 DEFAULT_CREDENTIAL_PACE_SECONDS = 2.2
+# Sign-ins the sweep tries the default pairs on (the default-credential module's own bound per Hunt).
+MAX_SWEEP_LOGINS = 4
 # Product-template and injection-verifier calls are long actions. While the Hunt's long-action
 # slots are all taken (the planner's scanners, the sweep's own verifiers), admission refuses them:
 # measured Hunts had 23 and 30 template refusals (one Hunt's every state-changing check among
@@ -105,7 +107,7 @@ _LONG_SLOTS_TAKEN = re.compile(r"long actions in flight", re.I)
 DEFAULT_PAIR_IDS = tuple(f"dc-{index:02d}" for index in range(1, 21))
 _SECRET_TEXT = re.compile(
     r"\[withheld:\d+\]|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|"
-    r"<title>\s*index of /|\bindex of /", re.I)
+    r"<title>\s*index of /|\bindex of /|\bdirectory listing for \[?/|\blisting directory /", re.I)
 # A field or setting named like a secret, with a value: "password": "...", DB_PASSWORD=..., token: ...
 _SECRET_FIELD = re.compile(
     r"""(?ix)["']?\b[\w.-]*(?:pass(?:word|wd)?|secret|api[_-]?key|access[_-]?key|private[_-]?key|
@@ -233,7 +235,7 @@ def exposure_signal(response: Mapping[str, Any]) -> str | None:
     page = any(html.get(name) for name in ("title", "forms", "links", "text_sample"))
     for match in _SECRET_TEXT.finditer(text):
         found = match.group(0).lower()
-        if "index of" in found:
+        if "index of" in found or "listing" in found:
             return "a directory index"
         if "private key" in found:
             return "a private key"
@@ -343,6 +345,11 @@ class Sweep:
         self.params_seen: dict[str, set[str]] = {}  # the inputs each endpoint had when a round looked at it
         self.logins: dict[str, tuple[str, str, str, bool]] = {}
         self.logins_tried: set[str] = set()
+        # The page each sign-in form was read on (its title) and the sign-ins already tried by
+        # (path after the first segment, fields, title): one application mounted under several
+        # paths gets the default pairs once, so the few logins a Hunt may try are distinct ones.
+        self.login_titles: dict[str, str] = {}
+        self.login_mirrors: set[tuple[str, str, str, str]] = set()
         self.signed_in_only: set[str] = set()
         self.seen: set[str] = set()
         self.js_done: set[str] = set()
@@ -574,6 +581,7 @@ class Sweep:
             form = login_form(response)
             if form:
                 self.logins.setdefault(form[0], (form[0], form[1], form[2], False))
+                self.login_titles.setdefault(form[0], str((response.get("html") or {}).get("title") or "")[:200])
             links.extend(form_entries(response, path))
             links.extend(hint_entries(response, path))
             signal = exposure_signal(response)
@@ -687,9 +695,19 @@ class Sweep:
         return routes
 
     async def _default_credentials(self, *, request_checks: bool = False) -> None:
-        for path, (_path, user, secret, json_body) in list(self.logins.items())[:4]:
+        for path, (_path, user, secret, json_body) in list(self.logins.items()):
             if path in self.logins_tried:
                 continue
+            if len(self.logins_tried) >= MAX_SWEEP_LOGINS:
+                break
+            segments = path.split("/")
+            title = self.login_titles.get(path, "")
+            if len(segments) >= 3 and title:
+                mirror = ("/".join(segments[2:]), user, secret, title)
+                if mirror in self.login_mirrors:
+                    self._count("mirror_skipped")
+                    continue
+                self.login_mirrors.add(mirror)
             self.logins_tried.add(path)
             await self._try_default_pairs(path, user, secret, json_body)
             if request_checks:
