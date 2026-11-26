@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from api import agent_tools
+from api.hunt import server_sweep
 from api.hunt.scanner_identity import body_authority_refusal
 from api.hunt.server_sweep import Sweep, product_candidate, template_matches
 from api.runtime import product_templates
@@ -377,3 +378,36 @@ def test_pinned_bundle_window_plan():
             assert (len(windows) > 1) == ((product, checks) in PRODUCT_WINDOW_COUNTS), (product, checks)
             assert all(bound <= hold for bound in bounds)
             assert "excluded_exceeds_window" not in counts, (product, checks)
+
+
+def test_a_product_check_waits_for_a_long_action_slot(monkeypatch):
+    monkeypatch.setattr(server_sweep, "LONG_SLOT_RETRY_SECONDS", 0)
+    engine = _Engine()
+    refusals = {"left": 2}
+    call = engine.call
+
+    async def busy(capability, values, key):
+        if capability == "templates.scan" and refusals["left"]:
+            refusals["left"] -= 1
+            raise server_sweep.Refused("This Hunt already has 2 long actions in flight (sqli.verify, xss.verify)")
+        return await call(capability, values, key)
+
+    engine.call = busy
+    asyncio.run(_sweep(engine, {"products": ["jenkins"]}).run(_sweep_run(writes=False), {"open": []}))
+    keys = [key for capability, _values, key in engine.calls if capability == "templates.scan"]
+    assert len(keys) == 1 and refusals["left"] == 0
+    assert any(c["title"].startswith("unauthenticated-jenkins") for c in engine.candidates)
+
+
+def test_a_product_check_stops_waiting_after_its_budget(monkeypatch):
+    monkeypatch.setattr(server_sweep, "LONG_SLOT_RETRY_SECONDS", 0)
+    monkeypatch.setattr(server_sweep, "PRODUCT_SLOT_WAIT_SECONDS", 0)
+    engine = _Engine()
+
+    async def always_busy(capability, values, key):
+        raise server_sweep.Refused("This Hunt already has 2 long actions in flight")
+
+    engine.call = always_busy
+    sweep = _sweep(engine, {"products": ["jenkins"]})
+    asyncio.run(sweep.run(_sweep_run(writes=False), {"open": []}))
+    assert sweep.counts["templates.scan:refused"] == 1 and not engine.candidates
