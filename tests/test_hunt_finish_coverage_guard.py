@@ -193,6 +193,23 @@ def test_a_finish_while_the_engine_sweep_runs_is_deferred_with_its_reason():
     auto_discovery._STATE.clear()
 
 
+def test_an_unforced_finish_while_the_sweep_only_follows_is_held_by_open_coverage():
+    # The engine tested what was mapped and waits for the planner: what is open is the planner's,
+    # so the finish guard applies; a forced finish with a reason is deferred to the last round.
+    from api.hunt import auto_discovery
+    auto_discovery._STATE.clear()
+    auto_discovery._STATE[str(HUNT)] = {"running": True, "sweep": "following"}
+    connection = _Connection()
+    with pytest.raises(run_router.HTTPException) as held:
+        asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[]))
+    assert held.value.status_code == 409 and "coverage is open" in held.value.detail
+    assert "deferred_finish" not in auto_discovery._STATE[str(HUNT)]
+    forced = asyncio.run(_service(connection).finish(
+        str(HUNT), summary="Done", next_actions=[], force=True, force_reason="the rest needs a second account"))
+    assert forced["finish_deferred"] is True and connection.status == "active"
+    auto_discovery._STATE.clear()
+
+
 def test_a_hunt_that_cannot_test_is_not_held_by_open_coverage():
     # Passive (zero authority) or with its approval revoked: it has no checks to close the open
     # pairs with, so the finish completes and records the coverage.

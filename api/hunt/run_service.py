@@ -30,7 +30,9 @@ from .hypothesis_release import release_hunt_claims
 from .permission_grants import settle_for_ended_hunt
 from .permission_store import pending_summary
 from .finding_verifications import HUNT_FINDINGS_QUERY
-from .auto_discovery import defer_finish, stop as stop_engine_work, sweep_running, testing_authority, wait_stopped
+from .auto_discovery import (
+    defer_finish, stop as stop_engine_work, sweep_following, sweep_running, testing_authority, wait_stopped,
+)
 from .coverage_map import (
     COVERAGE_TARGET_KINDS,
     MIN_FORCE_REASON_CHARS,
@@ -1767,6 +1769,14 @@ class HuntRunService:
                         raise HTTPException(status_code=409, detail=(
                             "force=true needs force_reason: say in a sentence why the open coverage is "
                             "left to the engine; it is recorded in the debrief"))
+                    if not force and sweep_following(str(run_uuid)):
+                        # The engine has tested what was mapped and only follows the planner now:
+                        # what is still open is the planner's, so the finish guard applies as it
+                        # does once a sweep has ended.
+                        refusal = finish_guard(dict(row), await self._finish_coverage(connection, dict(row)),
+                                               force=False, force_reason=None, can_test=can_test)
+                        if refusal:
+                            raise HTTPException(status_code=409, detail=refusal)
                     deferred = defer_finish(str(run_uuid), summary=summary, next_actions=next_actions,
                                             reason=force_reason)
                     return {**public_hunt_run(row), "already_terminal": False, "finish_deferred": True,

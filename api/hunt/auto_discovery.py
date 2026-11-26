@@ -461,6 +461,12 @@ def sweep_running(hunt_id: str) -> bool:
     return bool((_STATE.get(str(hunt_id)) or {}).get("running"))
 
 
+def sweep_following(hunt_id: str) -> bool:
+    """Whether the Hunt's sweep has tested what was mapped and now only follows the planner."""
+    state = _STATE.get(str(hunt_id)) or {}
+    return bool(state.get("running")) and state.get("sweep") == "following"
+
+
 def stop(hunt_id: str) -> bool:
     """Stop a Hunt's discovery and sweep: no further call is made, and the call in flight is
     cancelled (a worker job is told through its cancel key and settles itself). True when there
@@ -850,5 +856,5 @@ def start(hunt_id: str, *, runner: DiscoveryRunner | None = None) -> asyncio.Tas
 __all__ = [
     "CONTENT_WORDLISTS", "DiscoveryRunner", "configure_auto_discovery", "PRODUCTS", "SETTING", "Step", "answer_of",
     "discovery_state", "enabled", "plan_steps", "present", "probe_key_digests", "probe_paths",
-    "signed_in_slots", "start", "stop", "sweep_running", "defer_finish", "testing_authority", "wait_stopped",
+    "signed_in_slots", "start", "stop", "sweep_following", "sweep_running", "defer_finish", "testing_authority", "wait_stopped",
 ]
