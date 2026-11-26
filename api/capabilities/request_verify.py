@@ -217,6 +217,18 @@ def _same_page(probe: ReplayTransportResult, baseline: ReplayTransportResult,
     return len(first & second) / max(1, len(first | second)) >= 0.8
 
 
+_ABSOLUTE_HREF = re.compile(r'(?i)href\s*=\s*["\'](/[^"\'#?]+)["\']')
+
+
+def _own_directory_links(text: str, directory: str) -> tuple[str, ...]:
+    """Root-relative links to files inside the listed directory itself (some index middleware
+    writes ``/dir/file`` where others write ``file``)."""
+    base = directory if directory.endswith("/") else directory + "/"
+    return tuple(dict.fromkeys(
+        href for href in _ABSOLUTE_HREF.findall(text)
+        if href.startswith(base) and len(href) > len(base) and not href.endswith("/")))[:20]
+
+
 def _pair(control: ReplayTransportResult, payload: ReplayTransportResult) -> dict[str, Any]:
     return {
         "control_status": control.status_code,
@@ -522,11 +534,13 @@ class RequestVerifier:
         return observations or [self.observation("missing_content_security_policy")]
 
     async def _directory_listing(self, baseline: ReplayTransportResult) -> dict[str, Any]:
+        listed_path = urllib.parse.urlsplit(self.request.url).path or "/"
         def listing(result: ReplayTransportResult) -> bool:
-            if result.error_code or result.status_code != 200:
+            if (result.error_code and result.error_code != "incomplete_read") or result.status_code != 200:
                 return False
             text = result.response_body[:500_000].decode("utf-8", "replace")
-            return bool(_LISTING_RE.search(text)) and bool(directory_listing_links(result.response_body))
+            return bool(_LISTING_RE.search(text)) and bool(
+                directory_listing_links(result.response_body) or _own_directory_links(text, listed_path))
 
         if not listing(baseline) or self.left() < 2:
             return self.observation()
@@ -552,7 +566,7 @@ class RequestVerifier:
             return self.observation(inconclusive_reason="the request carries an identity")
 
         def classify(result: ReplayTransportResult) -> Any:
-            if result.error_code or result.status_code is None:
+            if (result.error_code and result.error_code != "incomplete_read") or result.status_code is None:
                 return None
             return classify_exposure(path=parsed.path or "/", status=int(result.status_code),
                                      headers=dict(result.response_headers or {}), body=result.response_body)
@@ -945,6 +959,7 @@ class RequestVerifyAdapter:
         observations: list[dict[str, Any]] = []
         refused = None
         baseline = None
+        classified_short = False
         try:
             if self.check == "file_upload":
                 # An upload builds each request it sends; the bare request is never sent.
@@ -955,8 +970,12 @@ class RequestVerifyAdapter:
                     baseline.status_code, baseline.response_headers, request_class=self.request_class,
                     url=self.request.url, body=self.request.body,
                 )
-                if refused is None and not baseline.error_code:
+                # A short body is still the server's content for the checks that only classify it.
+                usable = not baseline.error_code or (
+                    baseline.error_code == "incomplete_read" and self.check in {"directory_listing", "exposure"})
+                if refused is None and usable:
                     observations.extend(await verifier.run(baseline))
+                    classified_short = bool(baseline.error_code)
         except RequestVerifyError as exc:
             reason = str(exc)
             if reason not in {"cancelled", "deadline", "budget_exhausted"} and not attempted:
@@ -970,14 +989,15 @@ class RequestVerifyAdapter:
                 timed_out=reason == "deadline", actual_budget=spent(), partial=True,
                 parser_version=REQUEST_VERIFY_PARSER_VERSION,
             )
-        errors = tuple(item.error_code for item in results if item.error_code)
+        errors = tuple(item.error_code for item in results
+                       if item.error_code and not (classified_short and item.error_code == "incomplete_read"))
         if refused is not None and baseline is not None:
             observations.append(verifier.observation(
                 finding_verdict="inconclusive", inconclusive_reason=refused[1],
                 control_status=baseline.status_code,
             ))
             errors = (refusal_error(*refused), *errors)
-        elif baseline is not None and baseline.error_code:
+        elif baseline is not None and baseline.error_code and not classified_short:
             observations.append(verifier.observation(
                 finding_verdict="inconclusive", inconclusive_reason=baseline.error_code,
             ))

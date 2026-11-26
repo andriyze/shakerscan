@@ -223,8 +223,10 @@ def verifier_adapter(
 ) -> Any:
     """The adapter that runs this call's check against ``request``."""
     check = str(values["check"])
+    # A short body (a server that overstates Content-Length, as some directory index middleware
+    # does) is kept and marked incomplete_read, as the Scan's exposure probe keeps it.
     transport = transport or RecordedHuntReplayTransport(
-        PinnedAiohttpReplayTransport(), recorder, principal_slot=principal_slot,
+        PinnedAiohttpReplayTransport(tolerate_incomplete_body=True), recorder, principal_slot=principal_slot,
     )
     request_class = _request_class(request, check)
     budget = {key: int(value) for key, value in requested_budget.items()

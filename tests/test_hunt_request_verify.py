@@ -317,3 +317,26 @@ def test_an_exposure_class_is_proved_twice_against_a_sibling_control():
     loose = asyncio.run(run_check("exposure", url=ORIGIN + "/metrics", target=_target(), transport=Server(True),
                                   policy=ACTIVE, seed="sweep-exposure-2"))
     assert not finding_records("h", "a", ORIGIN, "r", {"check": "exposure"}, list(loose.observations))
+
+
+def test_a_directory_index_with_a_short_body_is_still_proved():
+    from api.hunt.request_verification import run_check
+    from api.runtime.request_replay_executor import ReplayTransportResult
+    import urllib.parse as parse
+
+    index = (b"<html><head><title>listing directory /ftp/</title></head><body><ul>"
+             b"<li><a href=\"/ftp/legal.md\">legal.md</a></li><li><a href=\"/ftp/a.bak\">a.bak</a></li></ul>")
+
+    class ShortIndex:
+        async def send(self, request, **_kwargs):
+            if parse.urlsplit(request.url).path == "/ftp/":
+                return ReplayTransportResult(status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                                             response_headers={"Content-Type": "text/html"}, response_body=index,
+                                             error_code="incomplete_read")
+            return ReplayTransportResult(status_code=404, connected_address="192.0.2.10", final_url=request.url,
+                                         response_body=b"Not Found")
+
+    result = asyncio.run(run_check("directory_listing", url=ORIGIN + "/ftp/", target=_target(), transport=ShortIndex(),
+                                   policy=ACTIVE, seed="sweep-short"))
+    records = finding_records("h", "a", ORIGIN, "r", {"check": "directory_listing"}, list(result.observations))
+    assert records and records[0]["cwe"] == "CWE-548" and result.status == "success"
