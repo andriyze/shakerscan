@@ -58,6 +58,10 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
 from .route_words import API_ROUTE_WORDS, MAX_API_PREFIXES
+try:
+    from capabilities.product_api import product_api_for
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..capabilities.product_api import product_api_for
 
 KEY_PREFIX = "auto-sweep"
 # Engine checks at once: leaves the planner a long slot (agent_job_concurrency gives a Hunt two
@@ -291,6 +295,7 @@ class Sweep:
         self.shape_probed: set[str] = set()
         self.signin_checked: set[str] = set()
         self.prefixes_tried: set[str] = set()
+        self.request_verify = False
 
     def _count(self, name: str) -> None:
         self.counts[name] = self.counts.get(name, 0) + 1
@@ -356,6 +361,7 @@ class Sweep:
         allowed = {str(name) for name in policy.get("allowed_capabilities") or ()}
         writes = bool(policy.get("allow_state_changing_http"))
         slots = _signed_in_slots(run)
+        self.request_verify = "request.verify" in allowed
         templates = ("templates.scan" in allowed and bool(policy.get("active_testing"))
                      and bool(policy.get("approval_receipt_id")))
         self.state["sweep"] = "running"
@@ -463,6 +469,11 @@ class Sweep:
                 self.logins.setdefault(form[0], (form[0], form[1], form[2], False))
             signal = exposure_signal(response)
             action = _action_id(result)
+            status = response.get("status")
+            if (self.request_verify and principal is None and isinstance(status, int) and 200 <= status < 300
+                    and product_api_for(path) is not None):
+                # A self-hosted product's management route answered an anonymous caller.
+                self._queue_request_check({"check": "unauthenticated_api", "method": "GET", "path": path})
             if signal and action and not (principal and signal == "account records"):
                 who = f"the {principal} principal" if principal else "an anonymous caller"
                 await self._candidate_and_verify({

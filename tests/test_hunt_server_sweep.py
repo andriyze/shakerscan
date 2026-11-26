@@ -393,3 +393,22 @@ def test_route_names_are_tried_under_each_api_root_against_a_control():
     assert len([p for p in tried if p != "/api/v1/chat/health"]) == len(API_ROUTE_WORDS) + 1  # names + control
     assert state["sweep_stats"]["api_roots"] == ["/api", "/api/v1"]
     assert not any(word in API_ROUTE_WORDS for word in ("shutdown", "restart", "purge", "delete"))
+
+
+def test_an_anonymous_answer_from_a_product_management_route_queues_its_proof():
+    class Product(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and values.get("path") == "/api/kernels":
+                self.calls.append((capability, dict(values), key))
+                return _answer(200, '[{"id":"k1","execution_state":"idle"}]')
+            return await super().call(capability, values, key)
+
+    engine = Product()
+    state = {}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(allowed=[*ALL, "request.verify"]), {"open": [
+                    {"endpoint": "GET /api/kernels", "untested": ["review"], "params": []},
+                    {"endpoint": "GET /about", "untested": ["review"], "params": []}]}))
+    checks = [(v["check"], v["path"]) for cap, v, _ in engine.calls if cap == "request.verify"]
+    assert ("unauthenticated_api", "/api/kernels") in checks
+    assert not any(check == "unauthenticated_api" and path == "/about" for check, path in checks)

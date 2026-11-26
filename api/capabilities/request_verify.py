@@ -31,7 +31,9 @@ random values and a control that must stay silent:
 * ``ldap_injection``: a sign-in accepted for an LDAP wildcard, twice, and refused for a random
   value and for the escaped wildcard;
 * ``jwt``: the principal's bearer token accepted with its signature altered, under ``alg: none``,
-  or reproduced with a well-known secret (``jwt_forgery``).
+  or reproduced with a well-known secret (``jwt_forgery``);
+* ``unauthenticated_api``: a self-hosted product's management route (``product_api``) answered an
+  anonymous GET with that product's data, twice, while a sibling route that cannot exist did not.
 
 Command injection, path traversal, template injection, XXE and in-band SSRF are proved by
 ``injection_verify``; NoSQL operator injection by ``nosqli_verify``. A response body is never
@@ -55,6 +57,11 @@ try:
     from capabilities.secret_material import keyed_body_digest
 except ModuleNotFoundError:  # package import layout
     from api.capabilities.secret_material import keyed_body_digest
+
+try:
+    from capabilities.product_api import product_api_for
+except ModuleNotFoundError:
+    from .product_api import product_api_for
 
 try:
     from capabilities import graphql_probe, jwt_forgery
@@ -88,6 +95,7 @@ REQUEST_VERIFY_PARSER_VERSION = "request-verify/v1"
 REQUEST_CHECKS = (
     "open_redirect", "crlf_injection", "host_header_injection", "cors", "security_headers",
     "directory_listing", "graphql", "file_upload", "rate_limit", "csrf", "ldap_injection", "jwt",
+    "unauthenticated_api",
 )
 # Checks that mutate one named input (``parameter``).
 FIELD_CHECKS = frozenset({
@@ -114,6 +122,7 @@ PROOF_CONTRACTS = {
     "csrf": "request_cross_site_differential/v1",
     "ldap_injection": "request_ldap_wildcard_differential/v1",
     "jwt": jwt_forgery.JWT_FORGERY_CONTRACT,
+    "unauthenticated_api": "request_anonymous_product_api_repeated/v1",
 }
 MINIMUM_REQUESTS = 4
 # Reserved (RFC 6761) names: a host under one never resolves, so it can only have come from the
@@ -529,6 +538,35 @@ class RequestVerifier:
                 response_pairs=[_pair(control, baseline), _pair(control, repeat)],
             )
         return self.observation()
+
+    async def _unauthenticated_api(self, baseline: ReplayTransportResult) -> dict[str, Any]:
+        parsed = urllib.parse.urlsplit(self.request.url)
+        api = product_api_for(parsed.path or "/")
+        if api is None or self.request.method != "GET":
+            return self.observation(inconclusive_reason="not a known product management route")
+        if self.request.auth_type != "none" or self.request.has_sensitive_material:
+            # Only an anonymous answer shows a route that needs no authentication.
+            return self.observation(inconclusive_reason="the request carries an identity")
+
+        def answered(result: ReplayTransportResult) -> bool:
+            if result.error_code or result.status_code is None or not 200 <= result.status_code < 300:
+                return False
+            return bool(api.marker.search(result.response_body[:262_144].decode("utf-8", "replace")))
+
+        if not answered(baseline) or self.left() < 2:
+            return self.observation(product=api.product)
+        repeat = await self.send(self.request)
+        parent = (parsed.path or "/").rstrip("/").rsplit("/", 1)[0]
+        missing = f"{parent}/{_marker(self.seed, 'api:missing')}"
+        control = await self.send(replace(self.request, url=urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, missing, "", ""))))
+        if answered(repeat) and not answered(control):
+            return self.observation(
+                proof_contract=PROOF_CONTRACTS["unauthenticated_api"],
+                technique="anonymous_product_api_answer_repeated", product=api.product,
+                response_pairs=[_pair(control, baseline), _pair(control, repeat)],
+            )
+        return self.observation(product=api.product)
 
     async def _graphql(self, baseline: ReplayTransportResult) -> list[dict[str, Any]]:
         parsed = urllib.parse.urlsplit(self.request.url)

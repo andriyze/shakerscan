@@ -118,6 +118,8 @@ def admission_refusal(values: Mapping[str, Any], policy: Mapping[str, Any]) -> s
             return "file_upload sends a multipart form; give other form fields in form_body"
     if check == "jwt" and not (values.get("as_principal") or values.get("session_ref")):
         return "jwt tests the token a principal signs in with: send as_principal or session_ref"
+    if check == "unauthenticated_api" and (method != "GET" or values.get("as_principal") or values.get("session_ref")):
+        return "unauthenticated_api tests an anonymous GET: send no as_principal or session_ref"
     if check in {"rate_limit", "ldap_injection"} and method not in WRITE_METHODS:
         return f"{check} tests a sign-in request (POST)"
     if is_authentication_path(values.get("path")) and check not in SIGN_IN_CHECKS:
@@ -460,6 +462,10 @@ REQUEST_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
              "the same request without the session was refused"),
     "ldap_injection": ("Verified LDAP injection in sign-in", "critical", "CWE-90",
                        "A wildcard signed in twice; a random value and the escaped wildcard did not"),
+    "unauthenticated_api": ("Management API answers without authentication", "high", "CWE-306",
+                            "An anonymous request to a self-hosted product's management route was "
+                            "answered with that product's data twice; a sibling route that does not "
+                            "exist was not"),
     "jwt": ("JSON Web Token accepted without a valid signature", "critical", "CWE-347",
             "The principal's token was accepted forged (altered signature, alg none or a well-known "
             "secret), twice"),
@@ -531,7 +537,7 @@ def finding_records(
                 "timing_ms", "operator", "header_name", "credentials", "header_issues", "attempts",
                 "refusal_status", "batch_size", "alias_count", "duplicate_count", "suggested_fields",
                 "served_content_type", "token_field_removed", "algorithm", "none_spelling",
-                "secret_in_common_list", "forged_token_accepted", "listed_links", "root_type",
+                "secret_in_common_list", "forged_token_accepted", "listed_links", "root_type", "product",
             ) if raw.get(key) is not None},
             "proof_producer": "shakerscan", "evidence_type": "deterministic_differential",
             "secret_values_visible": False,

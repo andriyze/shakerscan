@@ -12,6 +12,7 @@ CHECKS: tuple[str, ...] = (
     "sql_injection", "template_injection", "path_traversal", "command_injection", "xxe", "ssrf", "nosql_injection",
     "open_redirect", "crlf_injection", "host_header_injection", "cors", "security_headers",
     "directory_listing", "graphql", "file_upload", "rate_limit", "csrf", "ldap_injection", "jwt",
+    "unauthenticated_api",
 )
 # What one call holds: the longest check (blind command injection: a baseline, seven echo
 # probes, the substitution probes, two Windows probes and a seven-request timing confirmation; a
@@ -26,8 +27,8 @@ DESCRIPTION = (
     "as for http.request plus check (and parameter for an input check). Input checks: "
     "sql_injection, command_injection, path_traversal (GET), template_injection, xxe (xml_body), ssrf (GET), "
     "nosql_injection, ldap_injection, crlf_injection, open_redirect. Request checks: "
-    "host_header_injection, cors, security_headers, directory_listing, graphql, jwt (bearer "
-    "principal), csrf (signed-in write; token_field), rate_limit (sign-in POST; parameter = "
+    "host_header_injection, cors, security_headers, directory_listing, graphql, unauthenticated_api "
+    "(anonymous GET of a product management route), jwt (bearer principal), csrf (signed-in write; token_field), rate_limit (sign-in POST; parameter = "
     "password field), file_upload (parameter = file field; retrieve_path with {filename}). Needs "
     "active testing; writes and uploads need state-changing permission."
 )
