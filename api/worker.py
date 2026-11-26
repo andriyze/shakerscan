@@ -509,6 +509,8 @@ SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
 HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get('HEARTBEAT_INTERVAL_SECONDS', '30'))
 WORKER_QUEUE_BLOCK_SECONDS = max(1, int(os.environ.get("WORKER_QUEUE_BLOCK_SECONDS", "30")))
+# How often an agent-tool worker probes the short lane while it long-polls the agent-tool queue.
+AGENT_TOOL_SHORT_LANE_PROBE_MS = 100
 WORKER_BUILD_REPORT_INTERVAL_SECONDS = max(5, int(os.environ.get("SHAKERSCAN_WORKER_BUILD_REPORT_INTERVAL_SECONDS", "30")))
 QUEUE_VISIBILITY_TIMEOUT_SECONDS = max(
     60,
@@ -22919,6 +22921,10 @@ async def async_main():
                         consumer_name=consumer_name,
                         block_ms=WORKER_QUEUE_BLOCK_SECONDS * 1000,
                         visibility_timeout_ms=QUEUE_VISIBILITY_TIMEOUT_SECONDS * 1000,
+                        # The short lane is probed first and only the last route long-polls: at
+                        # the default two-second probe a short Hunt call waited 1.7 s (median) on
+                        # an idle worker, which bounded every Hunt at its call latency.
+                        probe_interval_ms=(AGENT_TOOL_SHORT_LANE_PROBE_MS if AGENT_TOOL_ONLY_WORKER else None),
                     ),
                     queue_keys,
                     base_queue=AGENT_TOOL_QUEUE_NAME,

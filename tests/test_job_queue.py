@@ -571,3 +571,12 @@ def test_a_single_route_worker_still_waits_in_one_read():
     assert lease_job(redis, ["device_jobs"], consumer_name="worker", block_ms=30_000,
                      visibility_timeout_ms=1000) is None
     assert redis.calls == [30_000]
+
+
+def test_a_shorter_probe_interval_slices_the_long_poll_finer():
+    from api.job_queue import QUEUE_PROBE_INTERVAL_MS, _long_poll_slices
+
+    assert _long_poll_slices(1_000, 2, 100) == [100] * 10
+    assert sum(_long_poll_slices(30_000, 2, 100)) == 30_000
+    assert _long_poll_slices(30_000, 2)[0] == min(QUEUE_PROBE_INTERVAL_MS, 30_000)
+    assert _long_poll_slices(500, 1, 100) == [500]  # one route long-polls whole
