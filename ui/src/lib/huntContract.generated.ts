@@ -1960,6 +1960,8 @@ export const HUNT_START_CONTRACT = {
           "secondary_principal",
           "primary_session_ref",
           "secondary_session_ref",
+          "primary_bindings",
+          "secondary_bindings",
           "routes"
         ],
         "required": [

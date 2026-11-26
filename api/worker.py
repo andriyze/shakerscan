@@ -21824,12 +21824,22 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             primary_ref = str(capability_input.get("primary_session_ref") or "")
             secondary_ref = str(capability_input.get("secondary_session_ref") or "")
             uses_managed_principals = bool(capability_input.get("primary_principal"))
-            if not uses_managed_principals and primary_ref == secondary_ref:
+            uses_captured_logins = bool(capability_input.get("primary_bindings"))
+            captured_distinction = None
+            if uses_captured_logins:
+                # Two logins this Hunt made itself; refused unless they are provably two accounts.
+                from hunt.authz_captured import resolve_captured_principals
+                primary_headers, secondary_headers, captured_distinction = await resolve_captured_principals(
+                    pool=db_pool, run=run, hunt_id=hunt_id, context=context, target=target, policy=policy,
+                    hunt_policy=hunt_policy, target_url=authz_base, values=capability_input,
+                    stack=credential_stack, session_store=session_store)
+                primary_profile_id, secondary_profile_id = "captured:primary", "captured:secondary"
+            elif not uses_managed_principals and primary_ref == secondary_ref:
                 raise AuthSessionStoreError(
                     "authorization proof requires two distinct session references"
                 )
             async with db_pool.acquire() as authority_conn:
-                authority = await validate_worker_credential_authority(
+                authority = None if uses_captured_logins else await validate_worker_credential_authority(
                     authority_conn,
                     owner_kind="hunt",
                     owner_id=str(hunt_id),
@@ -21838,7 +21848,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     scope_receipt_id=target.scope_receipt_id,
                     action_name="hunt.capability:authz.verify",
                 )
-                if uses_managed_principals:
+                if uses_captured_logins:
+                    pass
+                elif uses_managed_principals:
                     from hunt.authz_credentials import resolve_hunt_authz_principals
                     principals = await resolve_hunt_authz_principals(
                         authority_conn, context=context, target=target,
@@ -21901,7 +21913,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 "secondary_session_ref": secondary_ref,
                 "primary_profile_id": primary_profile_id,
                 "secondary_profile_id": secondary_profile_id,
-                "credential_source": "managed_principals" if uses_managed_principals else "sessions",
+                "credential_source": ("captured_logins" if uses_captured_logins
+                                      else "managed_principals" if uses_managed_principals else "sessions"),
+                **({"principal_distinction": captured_distinction} if captured_distinction else {}),
                 "routes": [redact_url(item) for item in routes],
                 "route_inventory_digest": authz_route_inventory_digest(routes),
                 "route_count": len(routes),

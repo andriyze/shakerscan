@@ -346,13 +346,12 @@ class CapabilityRegistry:
         if name == "authz.verify":
             session_keys = {"primary_session_ref", "secondary_session_ref"}
             principal_keys = {"primary_principal", "secondary_principal"}
-            if not (session_keys <= value.keys()) and not (principal_keys <= value.keys()):
+            captured_keys = {"primary_bindings", "secondary_bindings"}
+            modes = [keys for keys in (session_keys, principal_keys, captured_keys) if keys & value.keys()]
+            if len(modes) != 1 or not (modes[0] <= value.keys()):
                 raise CapabilityInputContractError(
-                    "authz.verify requires both session refs or both managed principals"
-                )
-            if (session_keys & value.keys()) and (principal_keys & value.keys()):
-                raise CapabilityInputContractError(
-                    "authz.verify cannot mix sessions and managed principals"
+                    "authz.verify requires both session refs, both managed principals, or both "
+                    "captured logins (primary_bindings and secondary_bindings), and never a mix"
                 )
         return dict(value)
 
@@ -1733,6 +1732,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
                 },
+                # Two logins this Hunt made itself (two accounts it registered or signed in to), each
+                # by reference to what its sign-in captured. The server refuses them unless its own
+                # records show two different accounts.
+                "primary_bindings": _ARTIFACT_REQUEST_BINDINGS,
+                "secondary_bindings": _ARTIFACT_REQUEST_BINDINGS,
                 "routes": {
                     "type": "array",
                     "items": {"type": "string", "maxLength": 4_000},
@@ -1742,6 +1746,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             }, required=("routes",)) | {"oneOf": [
                 {"required": ["primary_session_ref", "secondary_session_ref"]},
                 {"required": ["primary_principal", "secondary_principal"]},
+                {"required": ["primary_bindings", "secondary_bindings"]},
             ]},
         ),
         CapabilitySpec(

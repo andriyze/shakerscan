@@ -2194,6 +2194,13 @@ async def _execute_hunt_capability_lifecycle(
                             )
                         )
                     )
+                    if name == "authz.verify" and request.input.get("primary_bindings"):
+                        # Two logins the Hunt captured itself: a workflow binding, admitted as
+                        # http.request admits one (active testing, the approval, an active action).
+                        if policy.get("active_testing") is not True:
+                            raise HTTPException(status_code=403, detail=(
+                                "authz.verify with captured logins requires this Hunt's active_testing permission"))
+                        workflow_http = True
                     if name in {"artifact.inspect", "request.verify"}:
                         # A signed-in read takes http.request's identities, admitted as for it.
                         principal_slot, uses_session, workflow_http = artifact_read_identity(

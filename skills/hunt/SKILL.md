@@ -556,7 +556,12 @@ endpoint, default credentials on sign-ins, function-level authorization, `sqli.v
 `xss.verify` on every parameter); its candidates and findings are this Hunt's. When it has tested
 what was mapped it follows the Hunt (`sweep: following`): every route your own requests reach, and
 every input they carry (query, JSON or form body fields), gets the same checks, so request the
-routes and inputs you find and do not wait for it. A finish while it runs or follows is accepted
+routes and inputs you find and do not wait for it. A route you reach with a login you made
+yourself (`request_bindings` naming what your sign-in captured) is tested by the engine as that
+login. Without attached principals, register or sign in to two different accounts and pass their
+captured logins to `authz.verify` as `primary_bindings` and `secondary_bindings`: the server runs
+the comparison only when its own records show two different accounts (different token subjects,
+or two sign-in requests with different account names). A finish while it runs or follows is accepted
 and kept (`finish_deferred`); the Hunt finishes with your debrief after the sweep's last round.
 A passive Hunt gets none of this and is never refused for open coverage; neither is a Hunt
 whose approval was revoked or expired, and its finish stops the engine's work.

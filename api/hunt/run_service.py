@@ -643,7 +643,11 @@ ENGINE_WEB_ACTION = (
     "own requests reach. Do what it cannot: use the application as its users do. Create an account "
     "and sign in where it lets you, walk each feature through its pages and API with real values "
     "(each request maps a route and its inputs for the engine), compare what two accounts can read "
-    "and change (authz.verify), and try multi-step and business-logic paths. GET /hunts/{id}/coverage "
+    "and change, and try multi-step and business-logic paths. With no attached principals, make two "
+    "accounts yourself: capture each sign-in's session (http.request capture of the Set-Cookie or the "
+    "token) and send signed-in requests with request_bindings; authz.verify takes the two as "
+    "primary_bindings and secondary_bindings, and request.verify check jwt tests a captured token. "
+    "GET /hunts/{id}/coverage "
     "lists what is mapped and untested; record a candidate for each evidence-backed signal and prove "
     "it (candidate.verify)."
 )
