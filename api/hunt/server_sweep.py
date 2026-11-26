@@ -21,7 +21,14 @@ check never runs twice):
    themselves. They are long calls (an SQL injection verification takes minutes at its pace), so
    they run from a queue beside the rounds: a round queues them and goes on reading and verifying
    what the next round maps; the sweep ends when the rounds are done and the queue is drained.
-5. **Product templates**: for every product discovery recognised (``products``), its own templates
+5. **Request checks** (``request.verify``): every input of every endpoint gets the injection classes
+   a deterministic differential proves (command, template, path traversal; SSRF, open redirect
+   and CRLF for an input named like a URL or a redirect target), a GraphQL endpoint its GraphQL
+   check, an XML endpoint XXE, a sign-in its rate-limit, LDAP and NoSQL checks, and the root and
+   a bounded set of API answers their CORS and header checks. Each is a short action (seconds,
+   tens of requests) run from a second queue beside the long verifiers; inputs whose name points
+   at a class go first.
+6. **Product templates**: for every product discovery recognised (``products``), its own templates
    from the pinned bundle (``templates.scan`` with ``product``; ``runtime/product_templates.py``),
    at the root and at the path the product answered under. The read-only checks run right after
    the reads; the state-changing ones (non-GET and exploit-class templates) after the default
@@ -57,6 +64,12 @@ MAX_READS = 800
 MAX_INJECTION_TARGETS = 400
 MAX_FIELDS_PER_BODY = 4
 MAX_AUTHZ_ROUTES = 50
+# request.verify calls one sweep may queue (measured: about 3-40 requests and 1-20 s each).
+MAX_REQUEST_CHECKS = 1_200
+REQUEST_CONCURRENCY = 2
+MAX_HEADER_CHECK_ROUTES = 40
+# Routes that refuse GET (405) the sweep sends one empty JSON POST to learn their inputs.
+MAX_SHAPE_PROBES = 200
 MAX_SCRIPTS = 40
 # Rounds of read-record-test; each round only tests what earlier rounds did not.
 MAX_ROUNDS = 8
@@ -81,6 +94,26 @@ _SECRET_FIELD = re.compile(
 _RECORDS = re.compile(r'(?s)"(?:email|username|user_name|login)"\s*:\s*"[^"]+".*?"(?:email|username|user_name|login)"\s*:\s*"[^"]+"')
 _LOGIN_PATH = re.compile(r"(?:^|/)(?:log-?in|sign-?in|auth(?:enticate)?|session|token)(?:/|$|\.)", re.I)
 _USER_FIELDS = ("username", "user", "email", "login", "user_name", "userName")
+# Input names that point at one class (request.verify checks); matched case-insensitively.
+_URL_INPUT = re.compile(r"(?:^|_)(?:url|uri|link|href|src|source|feed|fetch|proxy|endpoint|webhook|callback|"
+                        r"image_?url|site|host|domain|target|resource|remote)$", re.I)
+_REDIRECT_INPUT = re.compile(r"^(?:redirect\w*|return\w*|next|continue|goto|go|dest|destination|forward|"
+                             r"back|to|r|u|url|redir|out|exit|target|location|callback\w*)$", re.I)
+_FILE_INPUT = re.compile(r"(?:^|_)(?:file\w*|path|filepath|dir|directory|folder|doc|document|download|"
+                         r"attachment|include|inc|page|template|tpl|view|log\w*|img|image|load|read|"
+                         r"preview|name|report|lang|locale)$", re.I)
+_COMMAND_INPUT = re.compile(r"(?:^|_)(?:cmd|command|exec\w*|run|shell|host\w*|ip|addr\w*|ping|domain|"
+                            r"target|server|lookup|query|arg\w*|opt\w*)$", re.I)
+_TEMPLATE_INPUT = re.compile(r"(?:^|_)(?:template|tpl|tmpl|name|message|msg|text|content|body|greeting|"
+                             r"subject|title|preview|expr\w*|q|search|bio|comment|note|description)$", re.I)
+_XML_PATH = re.compile(r"(?:^|/|\.)(?:xml|soap|wsdl|rss|import|parse|svg)(?:/|$|\.)", re.I)
+_RESET_PATH = re.compile(r"(?:reset|forgot|recover)[-_]?(?:password|pass|pw)?|password[-_/]?reset", re.I)
+_GRAPHQL_PATH = re.compile(r"(?:^|/)graph(?:i)?ql(?:/|$)", re.I)
+# A framework's validation answer that names the inputs a route requires (FastAPI/pydantic
+# ``"loc": ["query", "id"]``, and the plain "missing parameter 'x'" wording of other stacks).
+_LOC_FIELD = re.compile(r'"loc"\s*:\s*\[\s*"(query|body|form)"\s*,\s*"([A-Za-z_][A-Za-z0-9_.-]{0,63})"')
+_MISSING_FIELD = re.compile(r"(?:missing|required)\s+(?:required\s+)?(?:query\s+|body\s+|form\s+)?"
+                            r"(?:param(?:eter)?|field|argument|value)s?\s*[:=]?\s*['\"`]?([A-Za-z_][A-Za-z0-9_.-]{0,63})", re.I)
 _SECRET_FIELDS = ("password", "pass", "passwd", "pwd")
 
 Call = Callable[[str, Mapping[str, Any], str], Awaitable[Any]]
@@ -154,6 +187,45 @@ def login_form(response: Mapping[str, Any]) -> tuple[str, str, str] | None:
     return None
 
 
+def required_inputs(response: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """``(location, name)`` of the inputs a 400/422 answer says the route requires."""
+    if response.get("status") not in {400, 422}:
+        return []
+    text = str(response.get("body_sample") or "")
+    found = [(location, name) for location, name in _LOC_FIELD.findall(text)]
+    if not found:
+        found = [("query", name) for name in _MISSING_FIELD.findall(text)
+                 if name.lower() not in {"param", "parameter", "field", "value", "the", "a", "an"}]
+    unique: list[tuple[str, str]] = []
+    for item in found:
+        if item not in unique:
+            unique.append(item)
+    return unique[:12]
+
+
+def input_checks(name: str, method: str) -> list[tuple[int, str]]:
+    """``(rank, check)`` request.verify runs on one input: the classes its name points at
+    (rank 0, open redirect's CRLF twin rank 1), then the injection classes every input gets (rank 2)."""
+    read = method == "GET"
+    named: list[str] = []
+    if read and _REDIRECT_INPUT.match(name):
+        named.append("open_redirect")
+    if read and _URL_INPUT.search(name):
+        named.append("ssrf")
+    if read and _FILE_INPUT.search(name):
+        named.append("path_traversal")
+    if _COMMAND_INPUT.search(name):
+        named.append("command_injection")
+    if _TEMPLATE_INPUT.search(name):
+        named.append("template_injection")
+    checks = [(0, check) for check in named]
+    if "open_redirect" in named:
+        checks.append((1, "crlf_injection"))
+    generic = ("command_injection", "template_injection", *(("path_traversal",) if read else ()))
+    checks += [(2, check) for check in generic if check not in named]
+    return checks
+
+
 def _default_credential_request(path: str, user: str, secret: str, pair: str, *, json_body: bool) -> dict[str, Any]:
     body = {user: "", secret: ""}
     return {
@@ -198,6 +270,12 @@ class Sweep:
         self._long_jobs: set[asyncio.Task] = set()
         self.injection_queued = 0
         self.injection_done = 0
+        self._request_gate = asyncio.Semaphore(REQUEST_CONCURRENCY)
+        self.request_checks_queued = 0
+        self.request_checks_done = 0
+        self.request_checks_sent: set[str] = set()
+        self.shape_probed: set[str] = set()
+        self.signin_checked: set[str] = set()
 
     def _count(self, name: str) -> None:
         self.counts[name] = self.counts.get(name, 0) + 1
@@ -207,7 +285,8 @@ class Sweep:
         stats = dict(self.state.get("sweep_stats") or {})
         stats.update(extra, seconds=int(time.monotonic() - self.started), pairs_tested=len(self.tested),
                      endpoints_seen=len(self.seen), injection_queued=self.injection_queued,
-                     injection_done=self.injection_done)
+                     injection_done=self.injection_done, request_checks_queued=self.request_checks_queued,
+                     request_checks_done=self.request_checks_done)
         self.state["sweep_stats"] = stats
 
     def _note(self, text: str) -> None:
@@ -283,11 +362,13 @@ class Sweep:
                 self._stats(rounds=rounds, endpoints_known=int(current.get("endpoints") or len(items)))
                 found: list[str] = []
                 if "http.request" in allowed:
-                    found += await self._read_all(fresh, slots=slots)
+                    found += await self._read_all(fresh, slots=slots, writes=writes)
                 if "javascript.analyze" in allowed:
                     found += await self._javascript(items)
                 if "http.request" in allowed and writes:
-                    await self._default_credentials()
+                    await self._default_credentials(request_checks="request.verify" in allowed)
+                if "request.verify" in allowed:
+                    self._request_checks(fresh, writes=writes, slots=slots, first=rounds == 1)
                 if templates and writes and "state_changing" not in self.product_checks_run:
                     await self._product_templates("state_changing")
                 if "authz.verify" in allowed and {"primary", "secondary"} <= set(slots):
@@ -298,11 +379,13 @@ class Sweep:
                     handled.add("function_authz")
                 handled |= {klass for capability, klass in (("sqli.verify", "sqli"), ("xss.verify", "xss"))
                             if capability in allowed}
+                if "request.verify" in allowed:
+                    handled |= {"injection", "graphql"}
                 for item in fresh:
                     for klass in item.get("untested") or ():
                         pair = (str(item.get("endpoint")), str(klass))
                         self.considered.add(pair)
-                        if klass in handled and (klass not in {"sqli", "xss"} or item.get("params")):
+                        if klass in handled and (klass not in {"sqli", "xss", "injection"} or item.get("params")):
                             self.tested.add(pair)
                 found = [entry for entry in dict.fromkeys(found) if entry not in self.seen]
                 self.seen.update(found)
@@ -333,7 +416,8 @@ class Sweep:
         endpoint = str(item.get("endpoint") or "")
         return [str(klass) for klass in item.get("untested") or () if (endpoint, str(klass)) not in self.considered]
 
-    async def _read_all(self, items: Sequence[Mapping[str, Any]], *, slots: Sequence[str]) -> list[str]:
+    async def _read_all(self, items: Sequence[Mapping[str, Any]], *, slots: Sequence[str],
+                        writes: bool = False) -> list[str]:
         """GET every new endpoint (anonymously, then as each principal where anonymous is refused);
         record exposures; remember sign-ins; return same-origin links the answers carry."""
         gate = asyncio.Semaphore(SHORT_CONCURRENCY)
@@ -384,7 +468,10 @@ class Sweep:
             if response.get("status") in {401, 403} and slots:
                 self.signed_in_only.add(route)
                 for slot in slots:
-                    await look(path, slot)
+                    response = await look(path, slot)
+            links.extend(self._shape_from(route, response, "GET"))
+            if response.get("status") == 405 and writes and not _LOGIN_PATH.search(route):
+                links.extend(await self._probe_shape(route, slots if route in self.signed_in_only else ()))
 
         await asyncio.gather(*(read(route) for route in targets))
         return links
@@ -407,34 +494,40 @@ class Sweep:
                             routes.append(f"GET {text}")
         return routes
 
-    async def _default_credentials(self) -> None:
+    async def _default_credentials(self, *, request_checks: bool = False) -> None:
         for path, (_path, user, secret, json_body) in list(self.logins.items())[:4]:
             if path in self.logins_tried:
                 continue
             self.logins_tried.add(path)
-            for index, pair in enumerate(DEFAULT_PAIR_IDS):
-                if index:
-                    # The default-credential module paces attempts on one login; keep to its pace.
-                    await asyncio.sleep(DEFAULT_CREDENTIAL_PACE_SECONDS)
-                result = await self._safe(
-                    "http.request", _default_credential_request(path, user, secret, pair, json_body=json_body),
-                    sweep_key("default-credentials", path, pair))
-                response = _response(result)
-                verdict = str((response.get("login_attempt") or {}).get("verdict")
-                              or ((result or {}).get("login_attempt") or {}).get("verdict") or "")
-                if result is None or verdict in {"rate_limited", "locked", "not_sent"}:
-                    break
-                action = _action_id(result)
-                if verdict == "accepted" and action:
-                    await self._candidate_and_verify({
-                        "family": "default_credentials",
-                        "title": f"{path} accepts a built-in default credential pair",
-                        "claim": f"The sign-in at {path} accepted the built-in pair {pair} (engine sweep).",
-                        "severity": "critical",
-                        "locus": {"method": "POST", "path": path},
-                        "evidence_refs": [f"action:{action}"],
-                    })
-                    break
+            await self._try_default_pairs(path, user, secret, json_body)
+            if request_checks:
+                # After the default pairs: the rate-limit run's wrong passwords never lock them out.
+                await self._signin_checks(path, user, secret, json_body)
+
+    async def _try_default_pairs(self, path: str, user: str, secret: str, json_body: bool) -> None:
+        for index, pair in enumerate(DEFAULT_PAIR_IDS):
+            if index:
+                # The default-credential module paces attempts on one login; keep to its pace.
+                await asyncio.sleep(DEFAULT_CREDENTIAL_PACE_SECONDS)
+            result = await self._safe(
+                "http.request", _default_credential_request(path, user, secret, pair, json_body=json_body),
+                sweep_key("default-credentials", path, pair))
+            response = _response(result)
+            verdict = str((response.get("login_attempt") or {}).get("verdict")
+                          or ((result or {}).get("login_attempt") or {}).get("verdict") or "")
+            if result is None or verdict in {"rate_limited", "locked", "not_sent"}:
+                break
+            action = _action_id(result)
+            if verdict == "accepted" and action:
+                await self._candidate_and_verify({
+                    "family": "default_credentials",
+                    "title": f"{path} accepts a built-in default credential pair",
+                    "claim": f"The sign-in at {path} accepted the built-in pair {pair} (engine sweep).",
+                    "severity": "critical",
+                    "locus": {"method": "POST", "path": path},
+                    "evidence_refs": [f"action:{action}"],
+                })
+                break
 
     async def _product_templates(self, checks: str) -> None:
         """Run each recognised product's own templates; every match becomes a candidate."""
@@ -507,6 +600,117 @@ class Sweep:
         jobs.sort(key=lambda job: 0 if job[0] == "xss.verify" else 1)
         for job in jobs:
             self._queue_long(job)
+
+    def _shape_from(self, route: str, response: Mapping[str, Any], method: str) -> list[str]:
+        """Inventory entries for the inputs a validation answer says ``route`` requires."""
+        inputs = required_inputs(response)
+        if not inputs:
+            return []
+        query = [name for location, name in inputs if location == "query"]
+        body = [name for location, name in inputs if location in {"body", "form"}]
+        entries: list[str] = []
+        if query:
+            entries.append(f"{method} {route}?" + "&".join(f"{name}=1" for name in query))
+        if body and method != "GET":
+            fields = {name.split(".")[-1]: "1" for name in body}
+            entries.append(f"{method} {route} json:{json.dumps(fields, separators=(',', ':'))}")
+        return entries
+
+    async def _probe_shape(self, route: str, slots: Sequence[str]) -> list[str]:
+        """A route that refuses GET (405): one POST with an empty JSON object, whose validation
+        answer names the fields the route requires."""
+        if route in self.shape_probed or len(self.shape_probed) >= MAX_SHAPE_PROBES:
+            return []
+        self.shape_probed.add(route)
+        values = {"method": "POST", "path": concrete(route), "json_body": {}, "follow_redirects": False,
+                  **({"as_principal": slots[0]} if slots else {})}
+        result = await self._safe("http.request", values, sweep_key("shape", route))
+        response = _response(result)
+        entries = self._shape_from(route, response, "POST")
+        if not entries and isinstance(response.get("status"), int) and response["status"] < 400:
+            entries.append(f"POST {route}")
+        return entries
+
+    def _request_checks(self, items: Sequence[Mapping[str, Any]], *, writes: bool, slots: Sequence[str],
+                        first: bool = False) -> None:
+        """Queue request.verify on every input and endpoint the checks fit (short actions)."""
+        jobs: list[tuple[int, dict[str, Any]]] = []
+        if first:
+            jobs += [(1, {"check": "cors", "method": "GET", "path": "/"}),
+                     (1, {"check": "security_headers", "method": "GET", "path": "/"}),
+                     (2, {"check": "host_header_injection", "method": "GET", "path": "/"})]
+        for item in items:
+            method, _, route = str(item.get("endpoint") or "").partition(" ")
+            if not route.startswith("/") or method not in {"GET", "POST", "PUT", "PATCH"}:
+                continue
+            if method != "GET" and not writes:
+                continue
+            untested = set(item.get("untested") or ())
+            params = [str(name) for name in item.get("params") or () if str(name)]
+            path = concrete(route)
+            identity = {"as_principal": slots[0]} if route in self.signed_in_only and slots else {}
+            if _GRAPHQL_PATH.search(route):
+                jobs.append((0, {"check": "graphql", "method": "POST" if writes else "GET", "path": path, **identity}))
+                continue
+            if method == "GET" and "unauthenticated_api" in untested and \
+                    sum(1 for _rank, job in jobs if job["check"] == "cors") < MAX_HEADER_CHECK_ROUTES:
+                jobs.append((2, {"check": "cors", "method": "GET", "path": path, **identity}))
+            if method != "GET" and _XML_PATH.search(route):
+                jobs.append((0, {"check": "xxe", "method": method, "path": path, **identity,
+                                 "xml_body": '<?xml version="1.0"?><data><value>1</value></data>'}))
+            if not params or _LOGIN_PATH.search(route):
+                # A sign-in gets its own checks (_signin_checks); injection probes are never sent to one.
+                continue
+            if method == "GET":
+                base: dict[str, Any] = {"method": "GET", "path": path, "query": {name: "1" for name in params[:10]}}
+                names = params[:10]
+            else:
+                login = self.logins.get(route)
+                body_key = "form_body" if login is not None and not login[3] else "json_body"
+                base = {"method": method, "path": path, body_key: {name: "1" for name in params[:20]}}
+                names = params[:MAX_FIELDS_PER_BODY]
+                if _RESET_PATH.search(route):
+                    jobs.append((1, {**base, **identity, "check": "host_header_injection"}))
+            for name in names:
+                for rank, check in input_checks(name, method):
+                    jobs.append((rank, {**base, **identity, "check": check, "parameter": name}))
+        jobs.sort(key=lambda job: job[0])
+        for _rank, values in jobs:
+            self._queue_request_check(values)
+
+    async def _signin_checks(self, path: str, user: str, secret: str, json_body: bool) -> None:
+        """A sign-in's own request checks: rate limiting, LDAP and NoSQL wildcards (request.verify)."""
+        if path in self.signin_checked:
+            return
+        self.signin_checked.add(path)
+        body = {user: "shakerscan-probe", secret: "shakerscan-probe-1"}
+        base = {"method": "POST", "path": path, ("json_body" if json_body else "form_body"): body}
+        self._queue_request_check({**base, "check": "rate_limit", "parameter": secret})
+        self._queue_request_check({**base, "check": "ldap_injection", "parameter": user})
+        if json_body:
+            self._queue_request_check({**base, "check": "nosql_injection", "parameter": user})
+
+    def _queue_request_check(self, values: Mapping[str, Any]) -> None:
+        """Run one request.verify call from the short queue (REQUEST_CONCURRENCY at a time)."""
+        identity = json.dumps(
+            [values.get("check"), values.get("method"), values.get("path"), values.get("parameter"),
+             values.get("as_principal")], sort_keys=True)
+        if identity in self.request_checks_sent or len(self.request_checks_sent) >= MAX_REQUEST_CHECKS:
+            return
+        self.request_checks_sent.add(identity)
+
+        async def one() -> None:
+            async with self._request_gate:
+                try:
+                    await self._safe("request.verify", values, sweep_key("request", identity))
+                finally:
+                    self.request_checks_done += 1
+                    self._stats()
+
+        task = asyncio.get_running_loop().create_task(one())
+        self._long_jobs.add(task)
+        task.add_done_callback(self._long_jobs.discard)
+        self.request_checks_queued += 1
 
     def _queue_long(self, job: tuple[str, dict[str, Any], str]) -> None:
         """Run one long verifier call from the queue (LONG_CONCURRENCY at a time); never awaited
