@@ -233,3 +233,20 @@ def test_a_following_sweep_is_not_pending_discovery():
     assert "auto_discovery" in running["discovery"]["pending"]
     assert following["discovery"]["pending"] == []
     assert following["discovery"]["steps"]["sweep"] == "following"
+
+
+def test_a_request_check_closes_the_class_its_proof_covers():
+    endpoints = [_endpoint("/rest/user/security-question", params="email"), _endpoint("/backup/db.sql")]
+    before = build_coverage(endpoints=endpoints, actions=[])
+    opened = {item["endpoint"]: set(item["untested"]) for item in before["open"]}
+    assert "sqli" in opened["GET /rest/user/security-question"] and "exposure" in opened["GET /backup/db.sql"]
+    after = build_coverage(endpoints=endpoints, actions=[
+        _action("request.verify", check="sql_injection", method="GET", path="/rest/user/security-question",
+                query={"email": "1"}, parameter="email"),
+        _action("request.verify", check="exposure", method="GET", path="/backup/db.sql"),
+        _action("request.verify", check="cors", method="GET", path="/backup/db.sql"),
+    ])
+    closed = {item["endpoint"]: set(item["untested"]) for item in after["open"]}
+    assert "sqli" not in closed.get("GET /rest/user/security-question", set())
+    assert "xss" in closed["GET /rest/user/security-question"]  # only xss.verify settles it
+    assert "exposure" not in closed.get("GET /backup/db.sql", set())

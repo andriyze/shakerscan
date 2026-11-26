@@ -226,6 +226,14 @@ _VERIFIER_CLASS = {
     "xss.verify": ("xss",),
     "authz.verify": ("object_authz", "function_authz", "unauthenticated_api"),
 }
+# What one request.verify check settles on its route: the class its deterministic proof covers.
+_REQUEST_CHECK_CLASS: Mapping[str, tuple[str, ...]] = {
+    "sql_injection": ("sqli",), "exposure": ("exposure",), "directory_listing": ("exposure",),
+    "unauthenticated_api": ("unauthenticated_api",), "graphql": ("graphql",),
+    **{check: ("injection",) for check in (
+        "command_injection", "path_traversal", "template_injection", "ssrf", "xxe", "open_redirect",
+        "crlf_injection", "nosql_injection", "ldap_injection")},
+}
 _FAMILY_CLASSES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"sql", re.I), ("sqli",)),
     (re.compile(r"xss|cross.?site.?script", re.I), ("xss",)),
@@ -410,6 +418,8 @@ def build_coverage(
                 ledger.written.add(route)
             if name in _VERIFIER_CLASS:
                 ledger.close(route, _VERIFIER_CLASS[name])
+            if name == "request.verify":
+                ledger.close(route, _REQUEST_CHECK_CLASS.get(str(values.get("check") or ""), ()))
             if name == "http.request" and _uses_default_credential(values):
                 ledger.close(route, ("default_credentials",))
         found = _discovered_from_action(row)
