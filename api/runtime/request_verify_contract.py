@@ -25,11 +25,11 @@ DESCRIPTION = (
     "Prove one vulnerability class on one exact request: a repeat with fresh random values and a "
     "negative control that must stay silent; a verified result becomes a finding. Name the request "
     "as for http.request plus check (and parameter for an input check). Input checks: "
-    "sql_injection, command_injection, path_traversal (GET), template_injection, xxe (xml_body), ssrf (GET), "
-    "nosql_injection, ldap_injection, crlf_injection, open_redirect. Request checks: "
+    "sql_injection, command_injection, path_traversal (GET), template_injection, xxe (xml_body), "
+    "ssrf (GET), nosql_injection, ldap_injection, crlf_injection, open_redirect. Request checks: "
     "host_header_injection, cors, security_headers, directory_listing, graphql, unauthenticated_api "
-    "(anonymous GET of a product management route), jwt (bearer principal), csrf (signed-in write; token_field), rate_limit (sign-in POST; parameter = "
-    "password field), file_upload (parameter = file field; retrieve_path with {filename}). Needs "
+    "(anonymous GET), jwt (bearer principal), csrf (signed-in write; token_field), rate_limit "
+    "(sign-in POST; parameter = password field), file_upload (parameter = file field; retrieve_path with {filename}). Needs "
     "active testing; writes and uploads need state-changing permission."
 )
 
