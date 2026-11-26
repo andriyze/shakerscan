@@ -633,6 +633,18 @@ FIRST_WEB_ACTION = (
     "evidence-backed signal and prove it with the server's verifier (candidate.verify; sqli.verify "
     "or xss.verify for injection; authz.verify across principals)."
 )
+# A Hunt the engine maps and tests itself (``auto_discovery.testing_authority``): the planner's
+# first minutes go to what no deterministic check does, and its requests feed the engine's sweep.
+ENGINE_WEB_ACTION = (
+    "The engine maps this target and runs its own checks (crawl, content discovery, every mapped "
+    "route and input, default credentials, known products), and it tests every route and input your "
+    "own requests reach. Do what it cannot: use the application as its users do. Create an account "
+    "and sign in where it lets you, walk each feature through its pages and API with real values "
+    "(each request maps a route and its inputs for the engine), compare what two accounts can read "
+    "and change (authz.verify), and try multi-step and business-logic paths. GET /hunts/{id}/coverage "
+    "lists what is mapped and untested; record a candidate for each evidence-backed signal and prove "
+    "it (candidate.verify)."
+)
 _FIRST_WEB_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("http.request", {"method": "GET", "path": "/", "follow_redirects": True},
      "the landing page: its links, forms and sign-in"),
@@ -647,8 +659,17 @@ def first_calls_for(target_kind: Any, policy: Mapping[str, Any]) -> list[dict[st
     if str(target_kind or "") != "web":
         return []
     allowed = {str(name) for name in policy.get("allowed_capabilities") or ()}
+    # The engine runs the crawl and content discovery itself: the planner starts on the landing page.
+    calls = _FIRST_WEB_CALLS[:1] if engine_maps(target_kind, policy) else _FIRST_WEB_CALLS
     return [{"capability": name, "input": dict(value), "why": why}
-            for name, value, why in _FIRST_WEB_CALLS if name in allowed]
+            for name, value, why in calls if name in allowed]
+
+
+def engine_maps(target_kind: Any, policy: Mapping[str, Any]) -> bool:
+    """Whether the engine's own discovery and sweep run for this Hunt (a web Hunt with active
+    testing and an approval, discovery not switched off)."""
+    from .auto_discovery import enabled
+    return str(target_kind or "") == "web" and enabled() and testing_authority({"policy": dict(policy)})
 
 
 def public_hunt_run(
@@ -710,7 +731,9 @@ def public_hunt_run(
         "target_name": item.get("target_name"),
         "root_domain": item.get("root_domain"),
         "next_action": (
-            (FIRST_WEB_ACTION if first_calls_for(item.get("target_kind"), policy) else
+            ((ENGINE_WEB_ACTION.replace("{id}", str(item.get("id")))
+              if engine_maps(item.get("target_kind"), policy) else FIRST_WEB_ACTION)
+             if first_calls_for(item.get("target_kind"), policy) else
              f"POST /hunts/{item.get('id')}/query")
             if item.get("status") in {"active", "awaiting_planner"}
             else None
