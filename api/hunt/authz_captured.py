@@ -102,6 +102,13 @@ def distinction(primary_subjects: Mapping[str, str], secondary_subjects: Mapping
     return None
 
 
+def _source_action(binding: Mapping[str, Any]) -> str:
+    """The action of this Hunt a binding's value came from (a capture, or a withheld value's)."""
+    if binding.get("withheld_ref"):
+        return str(binding["withheld_ref"]).split("/")[3]
+    return str(binding["source_action_id"])
+
+
 async def resolve_captured_principals(
     *, pool: Any, run: Mapping[str, Any], hunt_id: Any, context: Any, target: Any, policy: Any,
     hunt_policy: Mapping[str, Any], target_url: str, values: Mapping[str, Any], stack: Any,
@@ -119,7 +126,7 @@ async def resolve_captured_principals(
             hunt_policy=hunt_policy, target_url=target_url,
             values={"request_bindings": bindings, **({"origin": values["origin"]} if values.get("origin") else {})},
             stack=stack, session_store=session_store, capability="authz.verify")
-        sides[side] = (headers, bound, {str(item["source_action_id"]) for item in bindings})
+        sides[side] = (headers, bound, {_source_action(item) for item in bindings})
     (primary_headers, primary_bound, primary_sources) = sides["primary"]
     (secondary_headers, secondary_bound, secondary_sources) = sides["secondary"]
     if primary_sources & secondary_sources or dict(primary_headers) == dict(secondary_headers):

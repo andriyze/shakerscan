@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 import hashlib
+import heapq
 import json
 import re
 import secrets
@@ -99,6 +100,8 @@ COMMON_PARAMETERS: tuple[str, ...] = (
     "comment", "title", "content", "data", "value", "input", "format", "debug", "token", "key", "code",
     "action", "mode", "item", "product", "ref", "target", "dest", "src", "from", "to",
 )
+# An unrendered client-side template expression in a path (``/{{href}}``, ``/${id}``, ``/<%= x %>``).
+_TEMPLATE_ARTIFACT = re.compile(r"\{\{|%7B%7B|\$\{|%24%7B|<%|%3C%25", re.I)
 _STATIC_ROUTE = re.compile(r"\.(?:js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|map|txt|xml|json|pdf|zip|gz)$", re.I)
 MAX_SCRIPTS = 40
 # HTML pages whose inline scripts the sweep analyzes for routes (one request each).
@@ -189,6 +192,40 @@ _CHECK_COST = {"exposure": 3, "unauthenticated_api": 3, "directory_listing": 3, 
                "ldap_injection": 6, "rate_limit": 13, "graphql": 10, "jwt": 8, "command_injection": 14,
                "path_traversal": 8, "template_injection": 6, "ssrf": 6, "xxe": 6, "open_redirect": 6,
                "crlf_injection": 6}
+
+
+class PriorityGate:
+    """At most ``limit`` holders at once; of the waiters, the lowest rank goes first (then first
+    come). A sweep queues hundreds of generic input checks; a check that matters more (an exposure,
+    an input named for its class, anything sent as a signed-in identity) is not left behind them."""
+
+    def __init__(self, limit: int) -> None:
+        self._free = max(1, int(limit))
+        self._waiting: list[tuple[int, int, asyncio.Future]] = []
+        self._order = 0
+
+    async def acquire(self, rank: int) -> None:
+        if self._free > 0:
+            self._free -= 1
+            return
+        self._order += 1
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        entry = (int(rank), self._order, future)
+        heapq.heappush(self._waiting, entry)
+        try:
+            await future
+        except asyncio.CancelledError:
+            if future.done() and not future.cancelled():
+                self.release()  # the slot was handed over as the wait was cancelled
+            raise
+
+    def release(self) -> None:
+        while self._waiting:
+            _rank, _order, future = heapq.heappop(self._waiting)
+            if not future.done():
+                future.set_result(None)
+                return
+        self._free += 1
 
 
 class WirePace:
@@ -386,7 +423,7 @@ class Sweep:
         self._long_jobs: set[asyncio.Task] = set()
         self.injection_queued = 0
         self.injection_done = 0
-        self._request_gate = asyncio.Semaphore(REQUEST_CONCURRENCY)
+        self._request_gate = PriorityGate(REQUEST_CONCURRENCY)
         self.request_checks_queued = 0
         self.request_checks_done = 0
         self.request_checks_sent: set[str] = set()
@@ -491,7 +528,8 @@ class Sweep:
                 first = None
                 if current is None:
                     break
-                items = [item for item in current.get("open") or () if isinstance(item, Mapping)]
+                items = [item for item in (*(current.get("open") or ()), *(current.get("signed_in") or ()))
+                         if isinstance(item, Mapping)]
                 fresh = [item for item in items if self._untested(item) or self._new_params(item)]
                 if not fresh:
                     if not follow or last_look:
@@ -593,13 +631,13 @@ class Sweep:
         """Whether an endpoint a round already looked at has since gained inputs (a later request
         of the planner's used them): its inputs are then tested like a new endpoint's."""
         endpoint = str(item.get("endpoint") or "")
+        # A login the planner has reached it with counts the same: its inputs are tested (again)
+        # as that login, whether or not a round looked at the endpoint before.
+        if item.get("identity") and endpoint not in self.identity_seen:
+            return True
         seen = self.params_seen.get(endpoint)
         if seen is None:
             return False
-        # A login the planner has since reached it with counts the same: its inputs are tested
-        # again as that login.
-        if item.get("identity") and endpoint not in self.identity_seen:
-            return True
         return any(str(name) not in seen for name in item.get("params") or ())
 
     async def _read_all(self, items: Sequence[Mapping[str, Any]], *, slots: Sequence[str],
@@ -1091,6 +1129,8 @@ class Sweep:
                 continue
             if self._mirror(method, route):
                 continue
+            if _TEMPLATE_ARTIFACT.search(route):
+                continue  # a client-side template's placeholder a crawl read as a link, not a route
             untested = set(item.get("untested") or ())
             params = [str(name) for name in item.get("params") or () if str(name)]
             path = concrete(route)
@@ -1133,8 +1173,8 @@ class Sweep:
                                            None if method == "GET" else name, identity)
                     jobs.append((rank, {**base, **identity, "check": check, "parameter": name}, follow))
         jobs.sort(key=lambda job: job[0])
-        for _rank, values, follow in jobs:
-            self._queue_request_check(values, follow_up=follow)
+        for rank, values, follow in jobs:
+            self._queue_request_check(values, follow_up=follow, rank=rank)
 
     async def _signin_checks(self, path: str, user: str, secret: str, json_body: bool) -> None:
         """A sign-in's own request checks: rate limiting, LDAP and NoSQL wildcards (request.verify)."""
@@ -1149,9 +1189,13 @@ class Sweep:
             self._queue_request_check({**base, "check": "nosql_injection", "parameter": user})
 
     def _queue_request_check(self, values: Mapping[str, Any], *,
-                             follow_up: tuple[str, dict[str, Any], str] | None = None) -> None:
-        """Run one request.verify call from the short queue (REQUEST_CONCURRENCY at a time); a
+                             follow_up: tuple[str, dict[str, Any], str] | None = None,
+                             rank: int = 0) -> None:
+        """Run one request.verify call from the short queue (REQUEST_CONCURRENCY at a time, lowest
+        ``rank`` first; a check sent as a signed-in identity goes before every anonymous one); a
         ``follow_up`` long verifier is queued when the check's answer says the tool should look."""
+        if values.get("request_bindings") or values.get("as_principal"):
+            rank = -1
         identity = json.dumps(
             [values.get("check"), values.get("method"), values.get("path"), values.get("parameter"),
              values.get("as_principal"), *(["captured-login"] if values.get("request_bindings") else [])],
@@ -1161,12 +1205,13 @@ class Sweep:
         self.request_checks_sent.add(identity)
 
         async def one() -> None:
-            async with self._request_gate:
-                try:
-                    result = await self._safe("request.verify", values, sweep_key("request", identity))
-                finally:
-                    self.request_checks_done += 1
-                    self._stats()
+            await self._request_gate.acquire(rank)
+            try:
+                result = await self._safe("request.verify", values, sweep_key("request", identity))
+            finally:
+                self._request_gate.release()
+                self.request_checks_done += 1
+                self._stats()
             if follow_up is not None and sql_screen_escalates(result):
                 self._queue_long(follow_up)
 

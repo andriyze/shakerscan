@@ -176,7 +176,7 @@ def _request_inputs(values: Mapping[str, Any]) -> set[str]:
     return set(names[:MAX_REQUEST_INPUTS])
 
 
-_CAPTURE_BINDING_KEYS = frozenset({"source_action_id", "capture_name", "header", "prefix"})
+_CAPTURE_BINDING_KEYS = frozenset({"source_action_id", "capture_name", "withheld_ref", "header", "prefix"})
 
 
 def _capture_identity(values: Mapping[str, Any]) -> list[dict[str, str]] | None:
@@ -187,11 +187,13 @@ def _capture_identity(values: Mapping[str, Any]) -> list[dict[str, str]] | None:
         return None
     found: list[dict[str, str]] = []
     for item in bindings:
-        if not isinstance(item, Mapping) or not set(item) <= _CAPTURE_BINDING_KEYS or not all(
-                isinstance(item.get(key), str) and item.get(key) for key in ("source_action_id", "capture_name", "header")):
+        if not isinstance(item, Mapping) or not set(item) <= _CAPTURE_BINDING_KEYS:
             return None
-        found.append({key: str(item[key]) for key in ("source_action_id", "capture_name", "header", "prefix")
-                      if key in item})
+        source = (("withheld_ref",) if item.get("withheld_ref") else ("source_action_id", "capture_name"))
+        if ("withheld_ref" in item) == ("source_action_id" in item) or not all(
+                isinstance(item.get(key), str) and item.get(key) for key in (*source, "header")):
+            return None
+        found.append({key: str(item[key]) for key in (*source, "header", "prefix") if key in item})
     return found
 
 
@@ -494,6 +496,13 @@ def build_coverage(
                 **({"identity": identities[route]} if route in identities else {}),
             })
     items.sort(key=_item_rank)
+    # Routes reached with the Hunt's own login whose classes are all settled anonymously: the sweep
+    # still tests their inputs as that login. Not open coverage (nothing here holds a finish).
+    listed = {item["endpoint"] for item in items}
+    signed_in = [{"endpoint": f"{method} {route}", "untested": [], "params": sorted(entry["params"])[:8],
+                  "identity": identities[route]}
+                 for (method, route), entry in known.items()
+                 if route in identities and f"{method} {route}" not in listed][:MAX_PAGE]
     pairs_open = sum(len(item["untested"]) for item in items)
     state = dict(discovery or {})
     allowed_names = None if allowed is None else {str(name) for name in allowed}
@@ -539,6 +548,7 @@ def build_coverage(
                          if isinstance(state.get("sweep_stats"), Mapping) else {}),
                       **({"notes": state["notes"]} if state.get("notes") else {})},
         "open": items,
+        **({"signed_in": signed_in} if signed_in else {}),
         "class_guide": {name: CLASS_GUIDE[name] for name in by_class},
     }
 

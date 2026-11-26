@@ -768,3 +768,40 @@ def test_the_sweep_sends_its_checks_as_the_login_the_planner_reached_a_route_wit
     assert any(v["check"] == "sql_injection" and "request_bindings" not in v for v in checks)
     # The long tools take a managed principal, never a captured login.
     assert not any(cap == "sqli.verify" and v.get("request_bindings") for cap, v, _ in engine.calls)
+
+
+def test_the_priority_gate_lets_the_lowest_rank_waiter_go_first():
+    async def scenario():
+        gate = server_sweep.PriorityGate(1)
+        order = []
+        await gate.acquire(5)
+
+        async def job(name, rank):
+            await gate.acquire(rank)
+            order.append(name)
+            gate.release()
+
+        tasks = [asyncio.create_task(job(name, rank)) for name, rank in
+                 (("generic-1", 2), ("generic-2", 2), ("signed-in", -1), ("named", 0))]
+        await asyncio.sleep(0)
+        gate.release()
+        await asyncio.gather(*tasks)
+        return order
+
+    assert asyncio.run(scenario()) == ["signed-in", "named", "generic-1", "generic-2"]
+
+
+def test_signed_in_routes_with_nothing_open_and_template_artifacts():
+    login = [{"withheld_ref": "withheld://hunt/11111111-1111-4111-8111-111111111111/1",
+              "header": "Authorization", "prefix": "Bearer "}]
+    engine = _Engine()
+    report = {"open": [{"endpoint": "GET /{{href}}", "untested": ["sqli", "xss"], "params": ["id"]}],
+              "signed_in": [{"endpoint": "GET /rest/basket/{id}", "untested": [], "params": ["coupon"],
+                             "identity": login}]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request", "request.verify"], slots=()), report))
+    checks = [v for cap, v, _ in engine.calls if cap == "request.verify"]
+    basket = [v for v in checks if v["path"] == "/rest/basket/1"]
+    assert basket and all(v["request_bindings"] == login for v in basket)
+    assert {"jwt", "sql_injection"} <= {v["check"] for v in basket}
+    assert not any("{{" in v["path"] for v in checks)  # an unrendered template is not a route

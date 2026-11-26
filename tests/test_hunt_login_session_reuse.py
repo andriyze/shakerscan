@@ -429,7 +429,11 @@ def test_artifact_inspect_takes_a_session_and_capture_bindings_in_its_schema():
     CAPABILITY_REGISTRY.validate_hunt_input("artifact.inspect", {"path": "/hub/admin", "as_principal": "primary"})
     CAPABILITY_REGISTRY.validate_hunt_input("artifact.inspect", {
         "path": "/hub/admin", "session_ref": "11111111-2222-4333-8444-555555555555"})
+    # A value this Hunt withheld from an answer (a sign-in's token) is a login too.
+    withheld = {"withheld_ref": f"withheld://hunt/{ACTION}/1", "header": "Authorization", "prefix": "Bearer "}
+    CAPABILITY_REGISTRY.validate_hunt_input("artifact.inspect", {"path": "/hub/admin", "request_bindings": [withheld]})
     for bad in ({**binding, "withheld_ref": "withheld://hunt/x/1"}, {"capture_name": "session", "header": "Cookie"},
+                {**binding, "withheld_ref": withheld["withheld_ref"]}, {"source_action_id": ACTION, "header": "Cookie"},
                 {**binding, "body_pointer": "/x"}):
         with pytest.raises(CapabilityInputContractError):
             CAPABILITY_REGISTRY.validate_hunt_input("artifact.inspect", {"path": "/", "request_bindings": [bad]})

@@ -265,3 +265,17 @@ def test_a_route_reached_with_the_hunts_own_login_carries_that_identity_by_refer
     items = {item["endpoint"]: item for item in report["open"]}
     assert items["GET /rest/basket/{id}"]["identity"] == login
     assert "identity" not in items["GET /rest/refused/{id}"] and "identity" not in items["GET /rest/other/{id}"]
+
+
+def test_a_signed_in_route_with_nothing_open_is_still_listed_for_the_sweep():
+    login = [{"withheld_ref": "withheld://hunt/11111111-1111-4111-8111-111111111111/1",
+              "header": "Authorization", "prefix": "Bearer "}]
+    report = build_coverage(endpoints=[], actions=[
+        _action("http.request", method="GET", path="/static/app.css", request_bindings=login),
+        _action("http.request", method="GET", path="/rest/basket/1", request_bindings=login),
+    ], candidates=[{"family": "bola", "canonical_locus": {"path": "/rest/basket/1", "method": "GET"}}])
+    opened = {item["endpoint"] for item in report["open"]}
+    signed = {item["endpoint"]: item for item in report.get("signed_in", [])}
+    assert set(signed) | opened >= {"GET /rest/basket/{id}", "GET /static/app.css"}
+    assert all(item["identity"] == login and item["untested"] == [] for item in signed.values())
+    assert report["pairs_open"] == sum(len(item["untested"]) for item in report["open"])
