@@ -30,6 +30,6 @@ history activity recent popular trending featured recommended
 """.split()))
 
 # API roots tried per Hunt.
-MAX_API_PREFIXES = 6
+MAX_API_PREFIXES = 3
 
 __all__ = ["API_ROUTE_WORDS", "MAX_API_PREFIXES"]
