@@ -295,3 +295,67 @@ def test_long_verifiers_run_from_a_queue_beside_the_rounds_and_drain_before_done
     assert state["sweep"] == "done"
     assert state["sweep_stats"]["injection_done"] == state["sweep_stats"]["injection_queued"]
     assert sweep.injection_done == sweep.injection_queued
+
+
+def test_required_inputs_and_input_checks():
+    from api.hunt.server_sweep import input_checks, required_inputs
+    fastapi = ('{"detail":[{"type":"missing","loc":["query","id"],"msg":"Field required"},'
+               '{"type":"missing","loc":["body","url"],"msg":"Field required"}]}')
+    assert required_inputs({"status": 422, "body_sample": fastapi}) == [("query", "id"), ("body", "url")]
+    assert required_inputs({"status": 400, "body_sample": "Missing parameter 'host'"}) == [("query", "host")]
+    assert required_inputs({"status": 200, "body_sample": fastapi}) == []
+    checks = dict((check, rank) for rank, check in input_checks("url", "GET"))
+    assert checks["ssrf"] == 0 and checks["open_redirect"] == 0 and checks["crlf_injection"] == 1
+    assert checks["command_injection"] == 2 and checks["path_traversal"] == 2
+    post = [check for _rank, check in input_checks("file", "POST")]
+    assert "path_traversal" not in post and "ssrf" not in post and "command_injection" in post
+
+
+class _ShapeEngine(_Engine):
+    async def call(self, capability, values, key):
+        if capability == "http.request" and values.get("method") == "GET" and values["path"] in {"/api/echo", "/api/pickle"}:
+            self.calls.append((capability, dict(values), key))
+            if values["path"] == "/api/echo":
+                return _answer(422, '{"detail":[{"loc":["query","msg"],"msg":"Field required"}]}')
+            return _answer(405, '{"detail":"Method Not Allowed"}')
+        if capability == "http.request" and values.get("method") == "POST" and values["path"] == "/api/pickle":
+            self.calls.append((capability, dict(values), key))
+            return _answer(422, '{"detail":[{"loc":["body","data"],"msg":"Field required"}]}')
+        return await super().call(capability, values, key)
+
+
+def test_the_sweep_learns_inputs_from_validation_answers_and_runs_request_checks():
+    engine = _ShapeEngine()
+    state = {}
+    recorded = []
+    report = {"open": [
+        {"endpoint": "GET /api/echo", "untested": ["review", "unauthenticated_api"], "params": []},
+        {"endpoint": "GET /api/pickle", "untested": ["review", "unauthenticated_api"], "params": []},
+        {"endpoint": "GET /fetch", "untested": ["review", "injection"], "params": ["url"]},
+        {"endpoint": "POST /api/xml/parse", "untested": ["review"], "params": []},
+        {"endpoint": "POST /graphql", "untested": ["graphql"], "params": []},
+        {"endpoint": "GET /hub/login", "untested": ["default_credentials", "review"], "params": []},
+    ]}
+
+    async def record(worklist):
+        recorded.extend(worklist)
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(allowed=[*ALL, "request.verify"]), report, load_report=None, record=record))
+    assert "GET /api/echo?msg=1" in recorded
+    assert 'POST /api/pickle json:{"data":"1"}' in recorded
+    shape = [v for cap, v, _ in engine.calls if cap == "http.request" and v["method"] == "POST"
+             and v["path"] == "/api/pickle"]
+    assert shape == [{"method": "POST", "path": "/api/pickle", "json_body": {}, "follow_redirects": False}]
+    checks = [(v["check"], v["path"], v.get("parameter")) for cap, v, _ in engine.calls if cap == "request.verify"]
+    assert ("ssrf", "/fetch", "url") in checks and ("open_redirect", "/fetch", "url") in checks
+    assert ("command_injection", "/fetch", "url") in checks
+    assert ("xxe", "/api/xml/parse", None) in checks and ("graphql", "/graphql", None) in checks
+    assert ("cors", "/", None) in checks and ("security_headers", "/", None) in checks
+    assert ("rate_limit", "/hub/login", "password") in checks and ("ldap_injection", "/hub/login", "username") in checks
+    # named classes before the generic ones, and never an injection probe at a sign-in
+    order = [c for c in checks if c[1] == "/fetch"]
+    assert order.index(("ssrf", "/fetch", "url")) < order.index(("command_injection", "/fetch", "url"))
+    assert not any(path == "/hub/login" and check not in {"rate_limit", "ldap_injection", "nosql_injection"}
+                   for check, path, _ in checks)
+    assert state["sweep_stats"]["request_checks_done"] == state["sweep_stats"]["request_checks_queued"] == len(checks)
