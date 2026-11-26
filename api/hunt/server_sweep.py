@@ -22,7 +22,7 @@ check never runs twice):
    they run from a queue beside the rounds: a round queues them and goes on reading and verifying
    what the next round maps; the sweep ends when the rounds are done and the queue is drained.
 5. **Request checks** (``request.verify``): every input of every endpoint gets the injection classes
-   a deterministic differential proves (command, template, path traversal; SSRF, open redirect
+   a deterministic differential proves (SQL, command, template, path traversal; SSRF, open redirect
    and CRLF for an input named like a URL or a redirect target), a GraphQL endpoint its GraphQL
    check, an XML endpoint XXE, a sign-in its rate-limit, LDAP and NoSQL checks, and the root and
    a bounded set of API answers their CORS and header checks. Each is a short action (seconds,
@@ -221,6 +221,8 @@ def input_checks(name: str, method: str) -> list[tuple[int, str]]:
     checks = [(0, check) for check in named]
     if "open_redirect" in named:
         checks.append((1, "crlf_injection"))
+    # The SQL injection proof takes a few requests; the long sqli.verify tool runs from its own queue.
+    checks.append((1, "sql_injection"))
     generic = ("command_injection", "template_injection", *(("path_traversal",) if read else ()))
     checks += [(2, check) for check in generic if check not in named]
     return checks

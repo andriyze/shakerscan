@@ -9,6 +9,9 @@ deterministic differential with a repeat and a negative control:
 * ``command_injection``, ``path_traversal``, ``template_injection``, ``xxe``, ``ssrf``: the Scan's
   server-side injection verifier (``capabilities/injection_verify.py``);
 * ``nosql_injection``: the Scan's NoSQL operator verifier (``capabilities/nosqli_verify.py``);
+* ``sql_injection``: the Scan's SQL injection proof (``capabilities/sqli_proof.py``): a repeated
+  database-error, boolean (quoted and numeric) or delay differential in a few requests, never an
+  OR pair, and never at a sign-in (``sqli.verify`` runs the full tool);
 * the request-level checks of ``capabilities/request_verify.py``.
 
 A verified observation becomes a finding through ``deterministic_findings``, as ``sqli.verify`` and
@@ -30,6 +33,7 @@ import urllib.parse
 try:
     from capabilities.injection_verify import INJECTION_CLASSES, InjectionVerifyAdapter
     from capabilities.nosqli_verify import NoSQLiVerifyAdapter
+    from capabilities.sqli_proof import SQLiProofAdapter
     from capabilities.request_verify import (
         FIELD_CHECKS, REQUEST_CHECKS, RequestVerifyAdapter, RequestVerifyError,
     )
@@ -41,6 +45,7 @@ try:
 except ModuleNotFoundError:  # package import layout
     from ..capabilities.injection_verify import INJECTION_CLASSES, InjectionVerifyAdapter
     from ..capabilities.nosqli_verify import NoSQLiVerifyAdapter
+    from ..capabilities.sqli_proof import SQLiProofAdapter
     from ..capabilities.request_verify import (
         FIELD_CHECKS, REQUEST_CHECKS, RequestVerifyAdapter, RequestVerifyError,
     )
@@ -57,6 +62,7 @@ except ModuleNotFoundError:
 
 CAPABILITY = "request.verify"
 NOSQL_CHECK = "nosql_injection"
+SQL_CHECK = "sql_injection"
 # The registry's contract names the checks (CHECKS); the verifiers implement exactly these
 # (tests/test_hunt_request_verify.py). Checks about signing in are the only ones a sign-in
 # endpoint is sent: the Scan never sends its injection probes to the credential profile's own
@@ -88,7 +94,7 @@ def admission_refusal(values: Mapping[str, Any], policy: Mapping[str, Any]) -> s
     if writes(values) and policy.get("allow_state_changing_http") is not True:
         return (f"{check} with {method} sends state-changing requests and needs this Hunt's "
                 "allow_state_changing_http permission")
-    needs_field = check in FIELD_CHECKS or check in INJECTION_CLASSES or check == NOSQL_CHECK
+    needs_field = check in FIELD_CHECKS or check in INJECTION_CLASSES or check in {NOSQL_CHECK, SQL_CHECK}
     if needs_field and check != "xxe" and not values.get("parameter"):
         return f"{check} tests one input: name it in parameter (a query name, form field or JSON field path)"
     bodies = [key for key in ("json_body", "form_body", "xml_body") if key in values]
@@ -234,6 +240,14 @@ def verifier_adapter(
             specification=CAPABILITY_REGISTRY.require("injection.verify_batch"), target=target,
             request=request, candidate=_candidate(request, values, seed, request_class),
             transport=transport, requested_budget=budget, classes=(check,),
+        )
+    if check == SQL_CHECK:
+        # Never the sign-in bypass pair (admission keeps it off sign-in endpoints): a write is
+        # proved with the AND pairs only, as the Scan proves it.
+        return SQLiProofAdapter(
+            specification=CAPABILITY_REGISTRY.require("sqli.prove_batch"), target=target,
+            request=request, candidate=_candidate(request, values, seed, request_class),
+            transport=transport, requested_budget=budget, extended=True,
         )
     if check == NOSQL_CHECK:
         return NoSQLiVerifyAdapter(
@@ -450,6 +464,9 @@ REQUEST_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
             "The principal's token was accepted forged (altered signature, alg none or a well-known "
             "secret), twice"),
 }
+_SQL_FINDING = ("Verified SQL injection", "critical", "CWE-89",
+                "A database error, a true/false pair or a delay followed the injected SQL syntax twice; "
+                "the unchanged request did not")
 _NOSQL_FINDING = ("Verified NoSQL injection", "high", "CWE-943",
                   "An operator-wrapped value answered differently from the same value sent literally, twice")
 
@@ -478,6 +495,8 @@ def finding_records(
         if kind == "injection_proof" and int(raw.get("repetitions") or 0) >= 2:
             known = _injection_findings().get(str(raw.get("injection_class")))
             proof_class = str(raw.get("injection_class"))
+        elif kind == "sqli_proof" and int(raw.get("repetitions") or 0) >= 2:
+            known, proof_class = _SQL_FINDING, "sql_injection"
         elif kind == "nosqli_proof" and int(raw.get("repetitions") or 0) >= 2:
             known, proof_class = _NOSQL_FINDING, "nosql_injection"
         elif kind == "request_proof" and int(raw.get("repetitions") or 0) >= 2:

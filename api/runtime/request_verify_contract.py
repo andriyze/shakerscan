@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 CHECKS: tuple[str, ...] = (
-    "template_injection", "path_traversal", "command_injection", "xxe", "ssrf", "nosql_injection",
+    "sql_injection", "template_injection", "path_traversal", "command_injection", "xxe", "ssrf", "nosql_injection",
     "open_redirect", "crlf_injection", "host_header_injection", "cors", "security_headers",
     "directory_listing", "graphql", "file_upload", "rate_limit", "csrf", "ldap_injection", "jwt",
 )
@@ -24,7 +24,7 @@ DESCRIPTION = (
     "Prove one vulnerability class on one exact request: a repeat with fresh random values and a "
     "negative control that must stay silent; a verified result becomes a finding. Name the request "
     "as for http.request plus check (and parameter for an input check). Input checks: "
-    "command_injection, path_traversal (GET), template_injection, xxe (xml_body), ssrf (GET), "
+    "sql_injection, command_injection, path_traversal (GET), template_injection, xxe (xml_body), ssrf (GET), "
     "nosql_injection, ldap_injection, crlf_injection, open_redirect. Request checks: "
     "host_header_injection, cors, security_headers, directory_listing, graphql, jwt (bearer "
     "principal), csrf (signed-in write; token_field), rate_limit (sign-in POST; parameter = "

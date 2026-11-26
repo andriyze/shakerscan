@@ -11,7 +11,7 @@ from api.capabilities.injection_verify import INJECTION_CLASSES
 from api.capabilities.request_verify import REQUEST_CHECKS
 from api.hunt.capability_executor import CapabilityAdapterResult
 from api.hunt.request_verification import (
-    CAPABILITY, CHECKS, NOSQL_CHECK, REQUEST_FINDINGS, RequestVerificationExecutionAdapter,
+    CAPABILITY, CHECKS, NOSQL_CHECK, SQL_CHECK, REQUEST_FINDINGS, RequestVerificationExecutionAdapter,
     admission_refusal, build_request, finding_records, verifier_adapter, writes,
 )
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
@@ -23,7 +23,7 @@ ORIGIN = "https://app.example.test"
 
 
 def test_the_published_checks_are_exactly_the_ones_the_verifiers_implement():
-    assert set(CHECKS) == {*INJECTION_CLASSES, NOSQL_CHECK, *REQUEST_CHECKS}
+    assert set(CHECKS) == {*INJECTION_CLASSES, NOSQL_CHECK, SQL_CHECK, *REQUEST_CHECKS}
     spec = CAPABILITY_REGISTRY.require(CAPABILITY)
     assert spec.planner_visible and spec.hunt_executor == "worker_http"
     assert spec.required_approval == "active_testing" and spec.risk_tier == "active"
@@ -214,3 +214,37 @@ def test_a_server_side_sweep_runs_a_check_from_endpoint_parameter_and_class_alon
                               form_body={"name": "a"}, target=_target(), transport=Redirector(),
                               policy=WRITES, seed="sweep-2"))
     assert Redirector.sent == before
+
+
+def test_sql_injection_is_proved_in_a_few_requests_by_the_scan_proof_and_never_at_a_sign_in():
+    from api.hunt.request_verification import run_check
+    from api.runtime.request_replay_executor import ReplayTransportResult
+    import urllib.parse as parse
+
+    class Database:
+        """id=1 finds a row; a quote breaks the statement; AND 1=1 keeps the row, AND 1=2 drops it."""
+        sent = 0
+
+        async def send(self, request, **_kwargs):
+            Database.sent += 1
+            value = parse.parse_qs(parse.urlsplit(request.url).query).get("id", [""])[0]
+            if value.count("'") % 2:
+                body = b"You have an error in your SQL syntax; check the manual that corresponds to your MySQL"
+                return ReplayTransportResult(status_code=500, connected_address="192.0.2.10",
+                                             final_url=request.url, response_body=body)
+            row = value == "1" or value.endswith("'1'='1") or value.endswith("1=1")
+            body = b'{"id": 1, "name": "widget"}' if row else b"[]"
+            return ReplayTransportResult(status_code=200, connected_address="192.0.2.10",
+                                         final_url=request.url, response_body=body)
+
+    result = asyncio.run(run_check(SQL_CHECK, url=ORIGIN + "/item?id=1", parameter="id", target=_target(),
+                                   transport=Database(), policy=ACTIVE, seed="sweep-sql"))
+    verified = [item for item in result.observations if item.get("proof_state") == "verified"]
+    assert verified and verified[0]["kind"] == "sqli_proof" and Database.sent <= 48
+    records = finding_records("h", "a", ORIGIN, "r", {"check": SQL_CHECK}, list(result.observations))
+    assert records and records[0]["cwe"] == "CWE-89" and records[0]["severity"] == "critical"
+    assert records[0]["finding_type"] == "sql_injection"
+    # An input check: the parameter is required, and a sign-in is never sent SQL probes.
+    assert "parameter" in admission_refusal({"check": SQL_CHECK, "method": "GET", "path": "/item"}, ACTIVE)
+    assert "sign-in" in admission_refusal({"check": SQL_CHECK, "method": "POST", "path": "/login",
+                                           "parameter": "username", "form_body": {"username": "a"}}, WRITES)

@@ -666,7 +666,9 @@ Hunt `request.verify` proves one vulnerability class on one exact request (the `
 shape plus `check` and, for an input check, `parameter`), as the same identity `artifact.inspect`
 reads as. Each check needs a repeat with fresh random values and a negative control that stays
 silent: command injection, path traversal, template injection, XXE and in-band SSRF run the Scan's
-server-side injection verifier on one class, NoSQL injection its operator verifier; open
+server-side injection verifier on one class, NoSQL injection its operator verifier, SQL
+injection the Scan's SQL injection proof (a repeated database-error, boolean or delay
+differential in a few requests, never an OR pair and never at a sign-in); open
 redirect, CRLF and host header injection, CORS, security headers, directory listing, GraphQL,
 file upload (a benign HTML marker file read back), sign-in rate limiting (a paced run of wrong
 passwords), CSRF (a cross-site simple request accepted while the same request without the session
