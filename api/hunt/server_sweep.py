@@ -124,6 +124,13 @@ _DESTRUCTIVE_ROUTE = re.compile(
     r"cancel|withdraw|refund|transfer|pay(?:ment)?s?|purchase|checkout|approve|disable|deactivate|"
     r"unsubscribe|terminate|kill|stop|logout|signout|import|deploy|install|exec|run|build)", re.I)
 _GRAPHQL_PATH = re.compile(r"(?:^|/)graph(?:i)?ql(?:/|$)", re.I)
+# Routes whose anonymous answer the Scan's exposure classifier is worth running on (request.verify
+# check exposure): a file name with an extension, a directory, a dot-path, or a name operators
+# expose diagnostics under.
+_EXPOSURE_ROUTE = re.compile(
+    r"(?:/$|/\.[^/]+|\.[A-Za-z0-9~]{1,8}$|(?:^|/)(?:metrics|debug|status|server-status|server-info|info|"
+    r"env|environment|trace|logs?|console|actuator(?:/[a-z]+)?|heapdump|dump|backups?|config|"
+    r"configuration|settings|ftp|well-known)$)", re.I)
 # An API root a route sits under: /api, /api/v1, /rest, /v2 ... (the sweep tries API_ROUTE_WORDS there).
 _API_PREFIX = re.compile(r"^(/(?:api|rest|v[0-9]{1,2})(?:/v[0-9]{1,2})?)(?=/|$)", re.I)
 # A framework's validation answer that names the inputs a route requires (FastAPI/pydantic
@@ -489,6 +496,10 @@ class Sweep:
             if self.request_verify and principal is None and signal == "a directory index":
                 # The listing proof: served twice, and not for a sibling directory that does not exist.
                 self._queue_request_check({"check": "directory_listing", "method": "GET", "path": path})
+            if (self.request_verify and principal is None and status == 200 and "?" not in path
+                    and _EXPOSURE_ROUTE.search(path)):
+                # The Scan's exposure classes (metrics, autoindex, debug pages, secret files ...).
+                self._queue_request_check({"check": "exposure", "method": "GET", "path": path})
             if signal and action and not (principal and signal == "account records"):
                 who = f"the {principal} principal" if principal else "an anonymous caller"
                 await self._candidate_and_verify({

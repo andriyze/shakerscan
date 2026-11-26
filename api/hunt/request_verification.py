@@ -118,8 +118,8 @@ def admission_refusal(values: Mapping[str, Any], policy: Mapping[str, Any]) -> s
             return "file_upload sends a multipart form; give other form fields in form_body"
     if check == "jwt" and not (values.get("as_principal") or values.get("session_ref")):
         return "jwt tests the token a principal signs in with: send as_principal or session_ref"
-    if check == "unauthenticated_api" and (method != "GET" or values.get("as_principal") or values.get("session_ref")):
-        return "unauthenticated_api tests an anonymous GET: send no as_principal or session_ref"
+    if check in {"unauthenticated_api", "exposure"} and (method != "GET" or values.get("as_principal") or values.get("session_ref")):
+        return f"{check} tests an anonymous GET: send no as_principal or session_ref"
     if check in {"rate_limit", "ldap_injection"} and method not in WRITE_METHODS:
         return f"{check} tests a sign-in request (POST)"
     if is_authentication_path(values.get("path")) and check not in SIGN_IN_CHECKS:
@@ -470,6 +470,19 @@ REQUEST_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
             "The principal's token was accepted forged (altered signature, alg none or a well-known "
             "secret), twice"),
 }
+def _exposure_finding(exposure_class: str, severity: Any) -> tuple[str, str, str, str] | None:
+    """(title, severity, CWE, why) for a proved Scan exposure class."""
+    if not exposure_class:
+        return None
+    cwe = {"directory_listing": "CWE-548", "verbose_error_disclosure": "CWE-209",
+           "debug_interface_exposure": "CWE-489", "phpinfo_disclosure": "CWE-200",
+           "metrics_endpoint": "CWE-200", "version_control_exposure": "CWE-527",
+           "backup_or_source_artifact": "CWE-530"}.get(exposure_class, "CWE-200")
+    label = exposure_class.replace("_", " ")
+    return (f"Exposed {label}", str(severity or "medium"), cwe,
+            f"An anonymous read was classified as {label} twice; a sibling path that does not exist was not")
+
+
 _SQL_FINDING = ("Verified SQL injection", "critical", "CWE-89",
                 "A database error, a true/false pair or a delay followed the injected SQL syntax twice; "
                 "the unchanged request did not")
@@ -505,6 +518,9 @@ def finding_records(
             known, proof_class = _SQL_FINDING, "sql_injection"
         elif kind == "nosqli_proof" and int(raw.get("repetitions") or 0) >= 2:
             known, proof_class = _NOSQL_FINDING, "nosql_injection"
+        elif kind == "request_proof" and raw.get("check") == "exposure" and int(raw.get("repetitions") or 0) >= 2:
+            proof_class = str(raw.get("exposure_class") or "")
+            known = _exposure_finding(proof_class, raw.get("exposure_severity"))
         elif kind == "request_proof" and int(raw.get("repetitions") or 0) >= 2:
             proof_class = str(raw.get("proof_class") or raw.get("check"))
             known = REQUEST_FINDINGS.get(proof_class)
@@ -538,6 +554,7 @@ def finding_records(
                 "refusal_status", "batch_size", "alias_count", "duplicate_count", "suggested_fields",
                 "served_content_type", "token_field_removed", "algorithm", "none_spelling",
                 "secret_in_common_list", "forged_token_accepted", "listed_links", "root_type", "product",
+                "exposure_class", "matched_pattern", "secret_keys",
             ) if raw.get(key) is not None},
             "proof_producer": "shakerscan", "evidence_type": "deterministic_differential",
             "secret_values_visible": False,

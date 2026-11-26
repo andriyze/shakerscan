@@ -672,7 +672,8 @@ differential in a few requests, never an OR pair and never at a sign-in); open
 redirect, CRLF and host header injection, CORS, security headers, directory listing, GraphQL,
 file upload (a benign HTML marker file read back), sign-in rate limiting (a paced run of wrong
 passwords), CSRF (a cross-site simple request accepted while the same request without the session
-is refused), LDAP injection, JWT forgery and an unauthenticated product management API (an
+is refused), LDAP injection, JWT forgery, a Scan exposure class read anonymously (the Scan's exposure
+classifier twice on the path and not on a sibling that cannot exist) and an unauthenticated product management API (an
 anonymous GET of a known self-hosted product's management route answered with that product's data
 twice while a sibling route that cannot exist was not, `capabilities/product_api.py`) run
 `capabilities/request_verify.py`. The Scan's safety

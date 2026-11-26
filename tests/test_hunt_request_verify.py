@@ -288,3 +288,32 @@ def test_an_anonymous_product_management_api_is_proved_against_a_sibling_control
     assert not finding_records("h", "a", ORIGIN, "r", {"check": "unauthenticated_api"}, list(unknown.observations))
     assert "anonymous" in admission_refusal({"check": "unauthenticated_api", "method": "GET", "path": "/api/kernels",
                                              "as_principal": "primary"}, ACTIVE)
+
+
+def test_an_exposure_class_is_proved_twice_against_a_sibling_control():
+    from api.hunt.request_verification import run_check
+    from api.runtime.request_replay_executor import ReplayTransportResult
+    import urllib.parse as parse
+
+    metrics = b"# HELP http_requests_total Total requests.\n# TYPE http_requests_total counter\nhttp_requests_total 3\n"
+
+    class Server:
+        def __init__(self, everywhere=False):
+            self.everywhere = everywhere
+
+        async def send(self, request, **_kwargs):
+            path = parse.urlsplit(request.url).path
+            if path == "/metrics" or self.everywhere:
+                return ReplayTransportResult(status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                                             response_headers={"Content-Type": "text/plain"}, response_body=metrics)
+            return ReplayTransportResult(status_code=404, connected_address="192.0.2.10", final_url=request.url,
+                                         response_body=b"not found")
+
+    result = asyncio.run(run_check("exposure", url=ORIGIN + "/metrics", target=_target(), transport=Server(),
+                                   policy=ACTIVE, seed="sweep-exposure"))
+    records = finding_records("h", "a", ORIGIN, "r", {"check": "exposure"}, list(result.observations))
+    assert records and records[0]["finding_type"] == "metrics_endpoint" and records[0]["cwe"] == "CWE-200"
+    assert "Exposed metrics endpoint" == records[0]["title"]
+    loose = asyncio.run(run_check("exposure", url=ORIGIN + "/metrics", target=_target(), transport=Server(True),
+                                  policy=ACTIVE, seed="sweep-exposure-2"))
+    assert not finding_records("h", "a", ORIGIN, "r", {"check": "exposure"}, list(loose.observations))
