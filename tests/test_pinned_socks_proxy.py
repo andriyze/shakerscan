@@ -217,5 +217,5 @@ def test_a_hunt_proxy_holds_relayed_requests_to_the_origin_pace():
     with origin_pace.activate(None, 4) as pace:
         elapsed, delivered = asyncio.run(scenario())
     assert delivered == 6  # nothing dropped
-    assert elapsed >= 0.4  # 6 requests at 4 a second after a 4-request burst: (6 - 4) / 4 s
+    assert elapsed >= 1.2  # 6 requests at 4 a second, no burst: 5 / 4 s
     assert pace.requests == 6

@@ -16,7 +16,7 @@ def test_origin_keys_scheme_host_and_port():
     assert origin_of("/relative") is None
 
 
-def test_requests_never_start_faster_than_the_rate_after_one_second_of_burst():
+def test_requests_never_start_faster_than_the_rate():
     pace = OriginPace(None, 20)  # no shared store: the process-local bucket, same rule
 
     async def burst():
@@ -30,11 +30,11 @@ def test_requests_never_start_faster_than_the_rate_after_one_second_of_burst():
         return sorted(stamps)
 
     stamps = asyncio.run(burst())
-    # 20 a second with a 20-request burst: 60 requests need at least (60 - 20) / 20 = 2 s.
-    assert stamps[-1] >= 1.9
-    for second in range(1, 3):
-        window = [s for s in stamps if second <= s < second + 1]
-        assert len(window) <= 21
+    # 20 a second, no burst: 60 requests take at least 59 / 20 s, and no one-second window holds
+    # more than 20 of them.
+    assert stamps[-1] >= 2.9
+    for start in stamps:
+        assert len([s for s in stamps if start <= s < start + 1]) <= 21  # scheduler jitter: one
     assert pace.requests == 60 and pace.waited_seconds > 0
 
 
@@ -46,7 +46,7 @@ def test_origins_are_paced_apart_and_nothing_is_dropped():
                              *(pace.take("http://b.test/") for _ in range(5)))
     started = time.monotonic()
     asyncio.run(run())
-    assert time.monotonic() - started < 0.5  # each origin within its own burst
+    assert 0.7 <= time.monotonic() - started < 1.3  # each origin paced on its own: 5 at 5/s, in parallel
     assert pace.requests == 10
 
 
@@ -61,7 +61,7 @@ def test_the_shared_store_decides_the_wait():
     store = Store()
     pace = OriginPace(store, 10)
     asyncio.run(pace.take("http://t.test/x", 3))
-    assert store.calls == [("hunt:origin_pace:http://t.test:80", pytest.approx(0.3), 1.0)]
+    assert store.calls == [("hunt:origin_pace:http://t.test:80", pytest.approx(0.3), 0.0)]
 
 
 def test_outside_hunt_work_nothing_waits_and_inside_the_active_pace_counts():
