@@ -543,3 +543,61 @@ def test_html_pages_the_reads_found_are_analyzed_for_routes_too():
                      load_report=None, record=record))
     analyzed = [v["path"] for cap, v, _ in engine.calls if cap == "javascript.analyze"]
     assert analyzed == ["/chat"] and "GET /api/chat/send" in recorded
+
+
+class _ParamApp(_Engine):
+    """/search reflects q; /items filters on category (no reflection, a different answer)."""
+
+    async def call(self, capability, values, key):
+        if capability == "http.request" and values.get("method") == "GET":
+            import urllib.parse as parse
+            parts = parse.urlsplit(values["path"])
+            query = dict(parse.parse_qsl(parts.query))
+            if parts.path == "/search":
+                self.calls.append((capability, dict(values), key))
+                return _answer(200, f"<p>results for {query.get('q', '')}</p>")
+            if parts.path == "/items":
+                self.calls.append((capability, dict(values), key))
+                return _answer(200, '[{"id":1},{"id":2},{"id":3}]' if "category" not in query else "[]")
+        return await super().call(capability, values, key)
+
+
+def test_parameters_of_mapped_routes_are_discovered_by_reflection_and_by_halving():
+    from api.hunt.server_sweep import COMMON_PARAMETERS, MAX_PARAMETER_REQUESTS
+    engine = _ParamApp()
+    recorded = []
+
+    async def record(worklist):
+        recorded.extend(worklist)
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(), {"open": [{"endpoint": "GET /search", "untested": ["review"], "params": []},
+                                       {"endpoint": "GET /items", "untested": ["review"], "params": []}]},
+                     load_report=None, record=record))
+    assert "GET /search?q=1" in recorded and "GET /items?category=1" in recorded
+    items_requests = [v for cap, v, _ in engine.calls if cap == "http.request" and v["path"].startswith("/items?")]
+    assert 1 < len(items_requests) <= MAX_PARAMETER_REQUESTS
+    assert "category" in COMMON_PARAMETERS
+
+
+def test_a_recognised_products_inputs_get_the_long_tools_only_when_flagged():
+    class Product(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and values.get("path", "").startswith("/jenkins/search?"):
+                self.calls.append((capability, dict(values), key))
+                import urllib.parse as parse
+                q = dict(parse.parse_qsl(parse.urlsplit(values["path"]).query)).get("q", "")
+                return _answer(200, f"found {q}")
+            return await super().call(capability, values, key)
+
+    engine = Product()
+    state = {"products": ["jenkins"]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(), {"open": [
+                    {"endpoint": "GET /jenkins/search", "untested": ["sqli", "xss"], "params": ["q"]},
+                    {"endpoint": "GET /shop/search", "untested": ["sqli", "xss"], "params": ["q"]}]}))
+    tools = [(cap, v["path"]) for cap, v, _ in engine.calls if cap in {"xss.verify", "sqli.verify"}]
+    assert ("xss.verify", "/shop/search?q=1") in tools and ("sqli.verify", "/shop/search?q=1") in tools
+    # The product's input reflected the marker unencoded: xss.verify follows; sqlmap does not.
+    assert ("xss.verify", "/jenkins/search?q=1") in tools
+    assert ("sqli.verify", "/jenkins/search?q=1") not in tools

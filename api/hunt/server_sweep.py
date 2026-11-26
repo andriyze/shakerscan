@@ -49,6 +49,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 import hashlib
 import json
 import re
+import secrets
 import time
 from typing import Any
 import urllib.parse
@@ -82,6 +83,21 @@ REQUEST_CONCURRENCY = 4
 MAX_HEADER_CHECK_ROUTES = 5
 # Routes that refuse GET (405) the sweep sends one empty JSON POST to learn their inputs.
 MAX_SHAPE_PROBES = 200
+# Parameter discovery: routes per Hunt, and requests per route (one, plus halving when an answer
+# changes with nothing reflected).
+MAX_PARAMETER_ROUTES = 120
+MAX_PARAMETER_REQUESTS = 16  # one, plus two per halving of 64 names (13), with room
+# Common parameter names, from the most frequent names of Arjun's default list and the inputs the
+# OWASP Web Security Testing Guide's examples use; one request carries all of them.
+COMMON_PARAMETERS: tuple[str, ...] = (
+    "q", "query", "search", "s", "keyword", "id", "uid", "user", "user_id", "username", "name",
+    "email", "page", "limit", "offset", "sort", "order", "category", "cat", "type", "filter", "file",
+    "filename", "path", "dir", "url", "uri", "redirect", "next", "return", "returnUrl", "callback",
+    "host", "ip", "domain", "cmd", "lang", "locale", "view", "template", "msg", "message", "text",
+    "comment", "title", "content", "data", "value", "input", "format", "debug", "token", "key", "code",
+    "action", "mode", "item", "product", "ref", "target", "dest", "src", "from", "to",
+)
+_STATIC_ROUTE = re.compile(r"\.(?:js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|map|txt|xml|json|pdf|zip|gz)$", re.I)
 MAX_SCRIPTS = 40
 # HTML pages whose inline scripts the sweep analyzes for routes (one request each).
 MAX_HTML_PAGES = 60
@@ -351,6 +367,9 @@ class Sweep:
         self.answers: dict[str, tuple[Any, int, str]] = {}
         self.mirror_tested: dict[tuple[str, str, tuple[Any, int, str]], str] = {}
         self.prefixes_tried: set[str] = set()
+        self._product_prefixes: tuple[str, ...] | None = None
+        self.reflection_probed: set[str] = set()
+        self.params_mined: set[str] = set()
         self.request_verify = False
         self.sqli_tool = False
         self._long_keys: set[str] = set()
@@ -445,6 +464,7 @@ class Sweep:
                 found: list[str] = []
                 if "http.request" in allowed:
                     found += await self._read_all(fresh, slots=slots, writes=writes)
+                    found += await self._discover_parameters(fresh)
                 if "javascript.analyze" in allowed:
                     found += await self._javascript(items)
                 if "http.request" in allowed and writes:
@@ -739,8 +759,17 @@ class Sweep:
             # follows only where the screen saw the query break (``_queue_request_check``); a sign-in,
             # which the screen never probes, goes straight to the tool.
             screened = self.request_verify and not _LOGIN_PATH.search(route)
+            # A recognised product's own routes (its forms and pages) get the quick checks; the long
+            # tools follow there only when a quick check flags the input (the SQL proof's break, a
+            # reflected marker), so the application's own inputs are first in the tools' queue.
+            product = self._product_route(route)
             for capability, klass in (("sqli.verify", "sqli"), ("xss.verify", "xss")):
                 if capability not in allowed or klass not in untested or (capability == "sqli.verify" and screened):
+                    continue
+                if product:
+                    self._count(f"{capability}:product_flag_needed")
+                    if capability == "xss.verify" and (method == "GET" or writes):
+                        self._queue_reflection(method, route, params, identity)
                     continue
                 if method == "GET":
                     jobs.append(_tool_job(capability, klass, method, route, params, None, identity))
@@ -763,6 +792,137 @@ class Sweep:
         key = (method, "/".join(segments[2:]), answer)
         first = self.mirror_tested.setdefault(key, route)
         return first != route
+
+    def _product_route(self, route: str) -> bool:
+        """Whether ``route`` belongs to a product discovery recognised: under one of its mounts, one
+        of its own identity or route paths, or a management route of a known product API."""
+        if self._product_prefixes is None:
+            try:
+                from .auto_discovery import PRODUCTS
+            except ImportError:  # pragma: no cover - the module is always present
+                PRODUCTS = ()
+            recognised = {str(key) for key in self.state.get("products") or ()}
+            prefixes: set[str] = set()
+            for product in PRODUCTS:
+                if product.key not in recognised:
+                    continue
+                prefixes.update(mount.rstrip("/") for mount in PRODUCT_MOUNTS.get(product.key, ()))
+                for path in (*product.identity, *product.routes):
+                    clean = path.split("?", 1)[0].rstrip("/")
+                    if clean:
+                        prefixes.add(clean)
+            self._product_prefixes = tuple(sorted(prefixes))
+        clean = route.split("?", 1)[0].rstrip("/") or "/"
+        if product_api_for(clean) is not None:
+            return True
+        return any(clean == prefix or clean.startswith(prefix + "/") for prefix in self._product_prefixes)
+
+    def _queue_reflection(self, method: str, route: str, params: Sequence[str],
+                          identity: Mapping[str, Any]) -> None:
+        """One request with a marker in every input of a product route; xss.verify follows for each
+        input that comes back with the marker's angle bracket unencoded."""
+        key = f"{method} {route}"
+        if key in self.reflection_probed:
+            return
+        self.reflection_probed.add(key)
+        names = list(params[:10]) if method == "GET" else list(params[:MAX_FIELDS_PER_BODY])
+        tag = secrets.token_hex(3)
+        marks = {name: f"zsk{index}r{tag}<" for index, name in enumerate(names)}
+
+        async def probe() -> None:
+            values: dict[str, Any] = {"method": method, "path": concrete(route), "follow_redirects": False,
+                                      **identity}
+            if method == "GET":
+                values["path"] = f"{concrete(route)}?" + urllib.parse.urlencode(marks)
+            else:
+                values["form_body"] = dict(marks)
+            result = await self._safe("http.request", values, sweep_key("reflect", method, route))
+            text = str(_response(result).get("body_sample") or "")
+            for name, mark in marks.items():
+                if mark in text:
+                    self._count("reflection_flagged")
+                    self._queue_long(_tool_job("xss.verify", "xss", method, route, params,
+                                               None if method == "GET" else name, identity))
+                    if method == "GET":
+                        break
+
+        task = asyncio.get_running_loop().create_task(probe())
+        self._long_jobs.add(task)
+        task.add_done_callback(self._long_jobs.discard)
+
+    async def _discover_parameters(self, items: Sequence[Mapping[str, Any]]) -> list[str]:
+        """Inputs of mapped GET routes that answered with none known: one request carries every
+        common parameter name with its own marker; a reflected marker names an input, and an answer
+        unlike the route's own with nothing reflected is halved until the input is found."""
+        found: list[str] = []
+        gate = asyncio.Semaphore(SHORT_CONCURRENCY)
+
+        async def mine(route: str) -> None:
+            baseline = self.answers.get(route)
+            if baseline is None:
+                return
+            names = list(COMMON_PARAMETERS)
+            tag = secrets.token_hex(3)
+            marks = {name: f"zsp{index}m{tag}" for index, name in enumerate(names)}
+            sent = 0
+
+            async def ask(subset: Sequence[str]) -> Mapping[str, Any]:
+                nonlocal sent
+                sent += 1
+                query = urllib.parse.urlencode({name: marks[name] for name in subset})
+                async with gate:
+                    result = await self._safe("http.request", {"method": "GET", "path": f"{concrete(route)}?{query}",
+                                                               "follow_redirects": False},
+                                              sweep_key("params", route, ",".join(subset)))
+                return _response(result)
+
+            def differs(answer: Mapping[str, Any]) -> bool:
+                status = answer.get("status")
+                if not isinstance(status, int) or status in {429} or status >= 500 and baseline[0] < 500:
+                    return False
+                length = len(str(answer.get("body_sample") or ""))
+                return status != baseline[0] or abs(length - baseline[1]) > max(16, 0.05 * max(length, baseline[1]))
+
+            answer = await ask(names)
+            text = str(answer.get("body_sample") or "")
+            inputs = [name for name in names if marks[name] in text]
+            if not inputs and differs(answer):
+                pending = [names]
+                while pending and sent < MAX_PARAMETER_REQUESTS:
+                    group = pending.pop()
+                    if len(group) == 1:
+                        inputs.append(group[0])
+                        continue
+                    half = len(group) // 2
+                    changed = []
+                    for part in (group[:half], group[half:]):
+                        if sent >= MAX_PARAMETER_REQUESTS:
+                            break
+                        if differs(await ask(part)):
+                            changed.append(part)
+                    if len(changed) == 2:
+                        # Both halves change the answer: the route answers any query differently
+                        # (a strict validator, a cache key); no one name is an input. Stop.
+                        pending.clear()
+                        break
+                    pending.extend(changed)
+            if inputs:
+                self._count("parameters_found")
+                found.append(f"GET {route}?" + "&".join(f"{urllib.parse.quote(name)}=1" for name in inputs[:10]))
+
+        routes = []
+        for item in items:
+            method, _, route = str(item.get("endpoint") or "").partition(" ")
+            answer = self.answers.get(route)
+            if (method != "GET" or item.get("params") or route in self.params_mined or "{" in route
+                    or not isinstance(answer, tuple) or not isinstance(answer[0], int) or not 200 <= answer[0] < 300
+                    or _STATIC_ROUTE.search(route) or self._product_route(route)):
+                continue
+            routes.append(route)
+        for route in routes[:max(0, MAX_PARAMETER_ROUTES - len(self.params_mined))]:
+            self.params_mined.add(route)
+        await asyncio.gather(*(mine(route) for route in routes if route in self.params_mined))
+        return found
 
     def _shape_from(self, route: str, response: Mapping[str, Any], method: str) -> list[str]:
         """Inventory entries for the inputs a validation answer says ``route`` requires."""

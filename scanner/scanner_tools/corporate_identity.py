@@ -34,7 +34,7 @@ MAX_LEADS = 60
 MAX_EVIDENCE_PER_LEAD = 5
 _VERSION = re.compile(r"^[0-9]{1,6}(?:\.[0-9]{1,9}){0,5}$")
 # Statuses that say a path exists (or is protected); a 404/5xx says nothing about a product.
-_PATH_HIT_STATUSES = frozenset({200, 204, 301, 302, 303, 307, 308, 401, 403, 405})
+_PATH_HIT_STATUSES = frozenset({200, 204, 301, 302, 303, 307, 308, 401, 403, 405, 422})
 
 
 @dataclass(frozen=True)
