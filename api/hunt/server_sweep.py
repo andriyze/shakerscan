@@ -365,6 +365,7 @@ class Sweep:
         self.tested: set[tuple[str, str]] = set()  # pairs a sweep check ran on
         self.considered: set[tuple[str, str]] = set()  # pairs a round has looked at (never repeated)
         self.params_seen: dict[str, set[str]] = {}  # the inputs each endpoint had when a round looked at it
+        self.identity_seen: set[str] = set()  # endpoints a round looked at with the planner's login
         self.logins: dict[str, tuple[str, str, str, bool]] = {}
         self.logins_tried: set[str] = set()
         # The page each sign-in form was read on (its title) and the sign-ins already tried by
@@ -540,6 +541,8 @@ class Sweep:
                 for item in fresh:
                     self.params_seen.setdefault(str(item.get("endpoint")), set()).update(
                         str(name) for name in item.get("params") or ())
+                    if item.get("identity"):
+                        self.identity_seen.add(str(item.get("endpoint")))
                     for klass in item.get("untested") or ():
                         pair = (str(item.get("endpoint")), str(klass))
                         self.considered.add(pair)
@@ -574,11 +577,29 @@ class Sweep:
         endpoint = str(item.get("endpoint") or "")
         return [str(klass) for klass in item.get("untested") or () if (endpoint, str(klass)) not in self.considered]
 
+    def _identity(self, item: Mapping[str, Any], route: str, slots: Sequence[str]) -> dict[str, Any]:
+        """Who a check on ``route`` is sent as: the Hunt's first principal where anonymous is
+        refused, else the login the planner's own request reached the route with (values its
+        login captured, by reference), else nobody."""
+        if route in self.signed_in_only and slots:
+            return {"as_principal": slots[0]}
+        bindings = item.get("identity")
+        if isinstance(bindings, list) and bindings and all(isinstance(entry, Mapping) for entry in bindings):
+            return {"request_bindings": [dict(entry) for entry in bindings[:4]]}
+        return {}
+
     def _new_params(self, item: Mapping[str, Any]) -> bool:
         """Whether an endpoint a round already looked at has since gained inputs (a later request
         of the planner's used them): its inputs are then tested like a new endpoint's."""
-        seen = self.params_seen.get(str(item.get("endpoint") or ""))
-        return seen is not None and any(str(name) not in seen for name in item.get("params") or ())
+        endpoint = str(item.get("endpoint") or "")
+        seen = self.params_seen.get(endpoint)
+        if seen is None:
+            return False
+        # A login the planner has since reached it with counts the same: its inputs are tested
+        # again as that login.
+        if item.get("identity") and endpoint not in self.identity_seen:
+            return True
+        return any(str(name) not in seen for name in item.get("params") or ())
 
     async def _read_all(self, items: Sequence[Mapping[str, Any]], *, slots: Sequence[str],
                         writes: bool = False) -> list[str]:
@@ -1072,7 +1093,14 @@ class Sweep:
             untested = set(item.get("untested") or ())
             params = [str(name) for name in item.get("params") or () if str(name)]
             path = concrete(route)
-            identity = {"as_principal": slots[0]} if route in self.signed_in_only and slots else {}
+            identity = self._identity(item, route, slots)
+            if identity.get("request_bindings") and method == "GET":
+                # The first route reached with a login the planner made: its bearer token gets the
+                # JWT check once (one request when the login is not a bearer JWT).
+                who = json.dumps(identity["request_bindings"], sort_keys=True)
+                if who not in self.jwt_checked:
+                    self.jwt_checked.add(who)
+                    jobs.append((0, {"check": "jwt", "method": "GET", "path": path, **identity}, None))
             if _GRAPHQL_PATH.search(route):
                 jobs.append((0, {"check": "graphql", "method": "POST" if writes else "GET", "path": path, **identity}, None))
                 continue
@@ -1098,7 +1126,8 @@ class Sweep:
             for name in names:
                 for rank, check in input_checks(name, method):
                     follow = None
-                    if check == "sql_injection" and self.sqli_tool:
+                    if check == "sql_injection" and self.sqli_tool and "request_bindings" not in identity:
+                        # The long tools take a managed principal, not a captured login.
                         follow = _tool_job("sqli.verify", "sqli", method, route, params,
                                            None if method == "GET" else name, identity)
                     jobs.append((rank, {**base, **identity, "check": check, "parameter": name}, follow))
@@ -1124,7 +1153,8 @@ class Sweep:
         ``follow_up`` long verifier is queued when the check's answer says the tool should look."""
         identity = json.dumps(
             [values.get("check"), values.get("method"), values.get("path"), values.get("parameter"),
-             values.get("as_principal")], sort_keys=True)
+             values.get("as_principal"), *(["captured-login"] if values.get("request_bindings") else [])],
+            sort_keys=True)
         if identity in self.request_checks_sent or len(self.request_checks_sent) >= MAX_REQUEST_CHECKS:
             return
         self.request_checks_sent.add(identity)

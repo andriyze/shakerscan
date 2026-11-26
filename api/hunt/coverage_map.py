@@ -176,6 +176,25 @@ def _request_inputs(values: Mapping[str, Any]) -> set[str]:
     return set(names[:MAX_REQUEST_INPUTS])
 
 
+_CAPTURE_BINDING_KEYS = frozenset({"source_action_id", "capture_name", "header", "prefix"})
+
+
+def _capture_identity(values: Mapping[str, Any]) -> list[dict[str, str]] | None:
+    """The identity one request of this Hunt was sent as, when it is made only of values the
+    Hunt's own login captured (a session cookie, a bearer token): the bindings, by reference."""
+    bindings = values.get("request_bindings")
+    if not isinstance(bindings, list) or not 1 <= len(bindings) <= 4:
+        return None
+    found: list[dict[str, str]] = []
+    for item in bindings:
+        if not isinstance(item, Mapping) or not set(item) <= _CAPTURE_BINDING_KEYS or not all(
+                isinstance(item.get(key), str) and item.get(key) for key in ("source_action_id", "capture_name", "header")):
+            return None
+        found.append({key: str(item[key]) for key in ("source_action_id", "capture_name", "header", "prefix")
+                      if key in item})
+    return found
+
+
 def _params(value: Any) -> set[str]:
     if isinstance(value, str):
         return {item.strip() for item in re.split(r"[,&;\s]+", value) if item.strip()}
@@ -360,6 +379,8 @@ def build_coverage(
     ledger = _Ledger()
     known: dict[tuple[str, str], dict[str, Any]] = {}
     ran: dict[str, str] = {}
+    # The signed-in identity this Hunt's own request last reached each route with (2xx answer).
+    identities: dict[str, list[dict[str, str]]] = {}
 
     def add(method: str, raw_path: str, params: Iterable[str], content_type: str, source: str) -> None:
         route = normalize_path(raw_path)
@@ -429,6 +450,10 @@ def build_coverage(
                 ledger.statuses.setdefault(route, set()).add(http_status)
             # An answer that is not "absent" names a route that exists. The engine's own probes
             # enter the inventory through the runner's negative control, never from here.
+            if not is_probe and http_status is not None and 200 <= http_status < 300 and name == "http.request":
+                identity = _capture_identity(values)
+                if identity:
+                    identities[route] = identity
             if not is_probe and http_status is not None and http_status != 404 and http_status < 500:
                 # The inputs the request itself carried are the route's inputs: the sweep tests them.
                 add(method, path, _request_inputs(values), content_type, "hunt_request")
@@ -465,6 +490,8 @@ def build_coverage(
                 "params": sorted(entry["params"])[:8],
                 "requested": route in ledger.requested,
                 "sources": sorted(entry["sources"])[:4],
+                # By reference only: the sweep sends its checks on this route as the same login.
+                **({"identity": identities[route]} if route in identities else {}),
             })
     items.sort(key=_item_rank)
     pairs_open = sum(len(item["untested"]) for item in items)

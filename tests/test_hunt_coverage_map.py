@@ -250,3 +250,18 @@ def test_a_request_check_closes_the_class_its_proof_covers():
     assert "sqli" not in closed.get("GET /rest/user/security-question", set())
     assert "xss" in closed["GET /rest/user/security-question"]  # only xss.verify settles it
     assert "exposure" not in closed.get("GET /backup/db.sql", set())
+
+
+def test_a_route_reached_with_the_hunts_own_login_carries_that_identity_by_reference():
+    login = [{"source_action_id": "11111111-1111-4111-8111-111111111111", "capture_name": "token",
+              "header": "Authorization", "prefix": "Bearer "}]
+    report = build_coverage(endpoints=[], actions=[
+        _action("http.request", method="GET", path="/rest/basket/1", request_bindings=login),
+        _action("http.request", method="GET", path="/rest/refused/1", http_status=401, request_bindings=login),
+        # A managed credential or a default pair is not a captured login.
+        _action("http.request", method="GET", path="/rest/other/1",
+                request_bindings=[{"principal": "primary", "credential_field": "secret", "header": "X-Key"}]),
+    ])
+    items = {item["endpoint"]: item for item in report["open"]}
+    assert items["GET /rest/basket/{id}"]["identity"] == login
+    assert "identity" not in items["GET /rest/refused/{id}"] and "identity" not in items["GET /rest/other/{id}"]

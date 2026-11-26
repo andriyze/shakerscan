@@ -14,10 +14,14 @@ from typing import Any, Mapping
 import urllib.parse
 
 try:
-    from runtime.hunt_http_exchange import MIN_SCRUBBED_COOKIE_CHARS, captured_binding, cookie_values
+    from runtime.hunt_http_exchange import (
+        MIN_SCRUBBED_CAPTURE_CHARS, MIN_SCRUBBED_COOKIE_CHARS, captured_binding, cookie_values,
+    )
     from runtime.hunt_http_exchange_contract import _FORBIDDEN_HEADERS
 except ModuleNotFoundError:  # package import layout
-    from api.runtime.hunt_http_exchange import MIN_SCRUBBED_COOKIE_CHARS, captured_binding, cookie_values
+    from api.runtime.hunt_http_exchange import (
+        MIN_SCRUBBED_CAPTURE_CHARS, MIN_SCRUBBED_COOKIE_CHARS, captured_binding, cookie_values,
+    )
     from api.runtime.hunt_http_exchange_contract import _FORBIDDEN_HEADERS
 
 _ANONYMOUS = {"", "anonymous", "anon", "none"}
@@ -84,12 +88,16 @@ async def resolve_artifact_identity(
                     raise CredentialReferenceError(str(exc)) from None
                 text = str(value)
                 secrets = cookie_values(text) if is_cookie else []
-                if not secrets or any(len(item) < MIN_SCRUBBED_COOKIE_CHARS for item in secrets):
+                token = not is_cookie and len(text) >= MIN_SCRUBBED_CAPTURE_CHARS
+                if not token and (not secrets or any(len(item) < MIN_SCRUBBED_COOKIE_CHARS for item in secrets)):
                     # A read shows the page, so only a value withheld exactly can be sent: a session
-                    # cookie this Hunt's login set. A PIN or token capture stays http.request's.
+                    # cookie this Hunt's login set, or a token it captured from a login's answer (a
+                    # bearer JWT), as http.request sends them. A PIN or a short value stays
+                    # http.request's.
                     raise CredentialReferenceError(
                         f"{capability} sends only a captured session cookie (Set-Cookie capture, "
-                        "values of at least 8 characters); use http.request for other captures")
+                        "values of at least 8 characters) or a captured token of at least "
+                        f"{MIN_SCRUBBED_CAPTURE_CHARS} characters; use http.request for other captures")
                 if any(ord(char) < 32 or ord(char) == 127 for char in text):
                     raise CredentialReferenceError("HTTP workflow header value is invalid")
                 name = str(binding["header"])

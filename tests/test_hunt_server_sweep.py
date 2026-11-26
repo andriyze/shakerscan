@@ -738,3 +738,33 @@ def test_a_recognised_products_inputs_get_the_long_tools_only_when_flagged():
     # The product's input reflected the marker unencoded: xss.verify follows; sqlmap does not.
     assert ("xss.verify", "/jenkins/search?q=1") in tools
     assert ("sqli.verify", "/jenkins/search?q=1") not in tools
+
+
+def test_the_sweep_sends_its_checks_as_the_login_the_planner_reached_a_route_with(monkeypatch):
+    monkeypatch.setattr(server_sweep, "FOLLOW_POLL_SECONDS", 0.01)
+    login = [{"source_action_id": "11111111-1111-4111-8111-111111111111", "capture_name": "token",
+              "header": "Authorization", "prefix": "Bearer "}]
+    engine = _Engine()
+    anonymous = {"open": [{"endpoint": "GET /rest/basket/{id}", "untested": ["sqli", "object_authz"],
+                           "params": ["coupon"]}]}
+    signed_in = {"open": [dict(anonymous["open"][0], identity=login)]}
+    finished = {"value": False}
+    looks = []
+
+    async def reload():
+        looks.append(1)
+        if len(looks) >= 2:
+            finished["value"] = True
+        return signed_in
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request", "request.verify", "sqli.verify"], slots=()), anonymous,
+                     load_report=reload, planner_finished=lambda: finished["value"]))
+    checks = [v for cap, v, _ in engine.calls if cap == "request.verify"]
+    as_login = [v for v in checks if v.get("request_bindings") == login]
+    assert {v["check"] for v in as_login} >= {"jwt", "sql_injection", "command_injection"}
+    assert sum(1 for v in as_login if v["check"] == "jwt") == 1
+    # The same input was also checked anonymously in the first round; both are kept apart.
+    assert any(v["check"] == "sql_injection" and "request_bindings" not in v for v in checks)
+    # The long tools take a managed principal, never a captured login.
+    assert not any(cap == "sqli.verify" and v.get("request_bindings") for cap, v, _ in engine.calls)

@@ -116,10 +116,14 @@ def admission_refusal(values: Mapping[str, Any], policy: Mapping[str, Any]) -> s
             return "file_upload needs POST or PUT and retrieve_path, a same-origin path with {filename}"
         if "json_body" in values or "xml_body" in values:
             return "file_upload sends a multipart form; give other form fields in form_body"
-    if check == "jwt" and not (values.get("as_principal") or values.get("session_ref")):
-        return "jwt tests the token a principal signs in with: send as_principal or session_ref"
-    if check in {"unauthenticated_api", "exposure"} and (method != "GET" or values.get("as_principal") or values.get("session_ref")):
-        return f"{check} tests an anonymous GET: send no as_principal or session_ref"
+    if check == "jwt" and not (values.get("as_principal") or values.get("session_ref")
+                               or values.get("request_bindings")):
+        return ("jwt tests the token a principal signs in with: send as_principal, session_ref, or "
+                "request_bindings with the token this Hunt's own login captured (header Authorization, "
+                "prefix \"Bearer \")")
+    if check in {"unauthenticated_api", "exposure"} and (method != "GET" or values.get("as_principal") or values.get("session_ref")
+                                                        or values.get("request_bindings")):
+        return f"{check} tests an anonymous GET: send no as_principal, session_ref or request_bindings"
     if check in {"rate_limit", "ldap_injection"} and method not in WRITE_METHODS:
         return f"{check} tests a sign-in request (POST)"
     if is_authentication_path(values.get("path")) and check not in SIGN_IN_CHECKS:
