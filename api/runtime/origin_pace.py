@@ -32,6 +32,7 @@ from typing import Any, Iterator
 import urllib.parse
 
 KEY = "hunt:origin_pace:{origin}"
+SPACING_MARGIN = 0.9
 # GCRA on the Redis clock: KEYS[1] holds the theoretical arrival time (seconds, float). ARGV:
 # cost (seconds of rate this call takes), burst (seconds of tolerance). Returns the wait.
 _RESERVE = """
@@ -69,6 +70,10 @@ class OriginPace:
     def __init__(self, redis_client: Any, rate: float) -> None:
         self.redis = redis_client
         self.rate = max(1.0, float(rate))
+        # A sender starts a little after its token comes due (scheduling, the proxy's relay), so
+        # a late request and the next on-time one can share a second: measured 11 in one second at
+        # 10. Spacing at 90 % of the rate keeps every second at the target at or under the rate.
+        self.spacing_rate = self.rate * SPACING_MARGIN
         self.waited_seconds = 0.0
         self.requests = 0
         self._local: dict[str, float] = {}
@@ -81,7 +86,7 @@ class OriginPace:
         return max(0.0, tat + cost - now - burst)
 
     def _reserve(self, origin: str, requests: int) -> float:
-        cost = max(1, int(requests)) / self.rate
+        cost = max(1, int(requests)) / self.spacing_rate
         # No burst tolerance: requests start at least 1/rate apart, so any one second at the target
         # holds at most ``rate`` of them. (A burst allowance of one second of the rate let a burst
         # plus that second's refill, twice the rate, into one second: measured 18/s at 10.)

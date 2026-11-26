@@ -32,7 +32,7 @@ def test_requests_never_start_faster_than_the_rate():
     stamps = asyncio.run(burst())
     # 20 a second, no burst: 60 requests take at least 59 / 20 s, and no one-second window holds
     # more than 20 of them.
-    assert stamps[-1] >= 2.9
+    assert stamps[-1] >= 59 / 18 - 0.05  # spaced at 90 % of the rate
     for start in stamps:
         assert len([s for s in stamps if start <= s < start + 1]) <= 21  # scheduler jitter: one
     assert pace.requests == 60 and pace.waited_seconds > 0
@@ -61,7 +61,7 @@ def test_the_shared_store_decides_the_wait():
     store = Store()
     pace = OriginPace(store, 10)
     asyncio.run(pace.take("http://t.test/x", 3))
-    assert store.calls == [("hunt:origin_pace:http://t.test:80", pytest.approx(0.3), 0.0)]
+    assert store.calls == [("hunt:origin_pace:http://t.test:80", pytest.approx(3 / 9), 0.0)]
 
 
 def test_outside_hunt_work_nothing_waits_and_inside_the_active_pace_counts():
