@@ -459,3 +459,20 @@ def test_the_sql_tool_follows_only_where_the_quick_sql_proof_saw_the_query_break
     assert sql_screen_escalates(None) is True
     assert sql_screen_escalates({"action_result": {"status": "success", "observations": [
         {"kind": "sqli_proof", "proof_state": "verified", "finding_verdict": "verified"}]}}) is False
+
+
+def test_one_application_under_several_mounts_is_tested_once():
+    class Mounts(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and values.get("method") == "GET" and values["path"].endswith("/app.php"):
+                self.calls.append((capability, dict(values), key))
+                return _answer(200, "<html>same tool</html>" if not values["path"].startswith("/other") else "<html>else</html>")
+            return await super().call(capability, values, key)
+
+    engine = Mounts()
+    report = {"open": [{"endpoint": f"GET /{mount}/app.php", "untested": ["sqli", "xss"], "params": ["url"]}
+                       for mount in ("a", "b", "c", "other")]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(), report))
+    tested = sorted({v["path"].split("?")[0] for cap, v, _ in engine.calls if cap in {"sqli.verify", "xss.verify"}})
+    assert tested == ["/a/app.php", "/other/app.php"]

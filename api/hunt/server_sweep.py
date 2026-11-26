@@ -294,6 +294,11 @@ class Sweep:
         self.request_checks_sent: set[str] = set()
         self.shape_probed: set[str] = set()
         self.signin_checked: set[str] = set()
+        # The anonymous answer each read route gave (status, sample length, title), and the
+        # mounts already queued for testing per route tail: one application served under several
+        # mounts (/a/app.php, /b/app.php answering alike) is tested once.
+        self.answers: dict[str, tuple[Any, int, str]] = {}
+        self.mirror_tested: dict[tuple[str, str, tuple[Any, int, str]], str] = {}
         self.prefixes_tried: set[str] = set()
         self.request_verify = False
         self.sqli_tool = False
@@ -496,6 +501,9 @@ class Sweep:
         async def read(route: str) -> None:
             path = concrete(route)
             response = await look(path, None)
+            html = response.get("html") if isinstance(response.get("html"), Mapping) else {}
+            self.answers[route] = (response.get("status"), len(str(response.get("body_sample") or "")),
+                                   str(html.get("title") or "")[:200])
             if _LOGIN_PATH.search(route) and response.get("status") in {405, 400} and "/api" in route:
                 self.logins.setdefault(route, (route, "username", "password", True))
             if response.get("status") in {401, 403} and slots:
@@ -645,6 +653,9 @@ class Sweep:
         jobs: list[tuple[str, dict[str, Any], str]] = []
         for item in items[:MAX_INJECTION_TARGETS]:
             method, _, route = str(item.get("endpoint") or "").partition(" ")
+            if self._mirror(method, route):
+                self._count("mirror_skipped")
+                continue
             params = [str(name) for name in item.get("params") or () if str(name)]
             untested = set(self._untested(item))
             if not params or not route.startswith("/"):
@@ -668,6 +679,17 @@ class Sweep:
         jobs.sort(key=lambda job: 0 if job[0] == "xss.verify" else 1)
         for job in jobs:
             self._queue_long(job)
+
+    def _mirror(self, method: str, route: str) -> bool:
+        """Whether ``route`` is another mount of a route already queued for testing: the same path
+        after its first segment, answering the anonymous read exactly alike."""
+        segments = route.split("/")
+        answer = self.answers.get(route)
+        if len(segments) < 3 or answer is None or not isinstance(answer[0], int) or answer[0] >= 400:
+            return False
+        key = (method, "/".join(segments[2:]), answer)
+        first = self.mirror_tested.setdefault(key, route)
+        return first != route
 
     def _shape_from(self, route: str, response: Mapping[str, Any], method: str) -> list[str]:
         """Inventory entries for the inputs a validation answer says ``route`` requires."""
@@ -713,6 +735,8 @@ class Sweep:
             if not route.startswith("/") or method not in {"GET", "POST", "PUT", "PATCH"}:
                 continue
             if method != "GET" and not writes:
+                continue
+            if self._mirror(method, route):
                 continue
             untested = set(item.get("untested") or ())
             params = [str(name) for name in item.get("params") or () if str(name)]
