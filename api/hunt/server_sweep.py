@@ -83,6 +83,8 @@ MAX_HEADER_CHECK_ROUTES = 5
 # Routes that refuse GET (405) the sweep sends one empty JSON POST to learn their inputs.
 MAX_SHAPE_PROBES = 200
 MAX_SCRIPTS = 40
+# HTML pages whose inline scripts the sweep analyzes for routes (one request each).
+MAX_HTML_PAGES = 60
 # Rounds of read-record-test; each round only tests what earlier rounds did not.
 MAX_ROUNDS = 8
 DEFAULT_CREDENTIAL_PACE_SECONDS = 2.2
@@ -330,6 +332,7 @@ class Sweep:
         self.signed_in_only: set[str] = set()
         self.seen: set[str] = set()
         self.js_done: set[str] = set()
+        self.html_done: set[str] = set()
         self.started = time.monotonic()
         # The long-verifier queue: jobs run LONG_CONCURRENCY at a time beside the rounds.
         self._long_gate = asyncio.Semaphore(LONG_CONCURRENCY)
@@ -616,11 +619,20 @@ class Sweep:
     async def _javascript(self, items: Sequence[Mapping[str, Any]]) -> list[str]:
         """Routes the application's own JavaScript names (``javascript.analyze``)."""
         routes: list[str] = []
-        for item in items:
-            method, _, route = str(item.get("endpoint") or "").partition(" ")
-            if method != "GET" or not route.endswith(".js") or route in self.js_done or len(self.js_done) >= MAX_SCRIPTS:
+        # Scripts, and the HTML pages the reads found (their inline scripts call the same APIs).
+        pages = [route for route, answer in self.answers.items()
+                 if answer[0] == 200 and answer[2] and route not in self.html_done][:MAX_HTML_PAGES - len(self.html_done)]
+        candidates = [str(item.get("endpoint") or "") for item in items] + [f"GET {route}" for route in pages]
+        for endpoint in candidates:
+            method, _, route = endpoint.partition(" ")
+            script = route.endswith(".js")
+            if method != "GET" or route in self.js_done or route in self.html_done:
                 continue
-            self.js_done.add(route)
+            if script and len(self.js_done) >= MAX_SCRIPTS:
+                continue
+            if not script and route not in pages:
+                continue
+            (self.js_done if script else self.html_done).add(route)
             result = await self._safe("javascript.analyze", {"path": route}, sweep_key("javascript", route))
             action = (result or {}).get("action_result") if isinstance(result, Mapping) else None
             for observation in (action or {}).get("observations") or ():
