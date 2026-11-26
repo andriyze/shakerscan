@@ -414,7 +414,7 @@ def _delivery_attempts(redis_client: Any, key: str, message_id: str) -> int:
     return 1
 
 
-def _long_poll_slices(block_ms: int, route_count: int) -> list[int]:
+def _long_poll_slices(block_ms: int, route_count: int, probe_interval_ms: int | None = None) -> list[int]:
     """The blocking reads that make up one long poll, adding up to the caller's ``block_ms``.
 
     Only the last route may block (see ``lease_job``), so one long read would leave every earlier
@@ -425,9 +425,10 @@ def _long_poll_slices(block_ms: int, route_count: int) -> list[int]:
     total = max(1, block_ms)
     if route_count <= 1:
         return [total]
+    interval = max(50, int(probe_interval_ms or QUEUE_PROBE_INTERVAL_MS))
     slices: list[int] = []
     while total > 0:
-        slices.append(min(QUEUE_PROBE_INTERVAL_MS, total))
+        slices.append(min(interval, total))
         total -= slices[-1]
     return slices
 
@@ -439,7 +440,11 @@ def lease_job(
     consumer_name: str,
     block_ms: int,
     visibility_timeout_ms: int,
+    probe_interval_ms: int | None = None,
 ) -> QueueLease | None:
+    """Lease one job, earlier routes first. ``probe_interval_ms`` (default
+    ``QUEUE_PROBE_INTERVAL_MS``) is how often the earlier routes are probed again while the last
+    one long-polls: the longest a job on an earlier route waits on an idle worker."""
     queues = list(dict.fromkeys(queue_names))
     if not queues:
         return None
@@ -499,7 +504,7 @@ def lease_job(
         # number of routes and make a broker lease request exceed its deadline.
         # The long poll is sliced so the earlier routes are probed again at
         # least every QUEUE_PROBE_INTERVAL_MS rather than once per poll.
-        for slice_ms in _long_poll_slices(block_ms, len(queues)):
+        for slice_ms in _long_poll_slices(block_ms, len(queues), probe_interval_ms):
             for index, queue_name in enumerate(queues):
                 response = redis_client.xreadgroup(
                     CONSUMER_GROUP, consumer_name, {stream_key(queue_name): ">"},
