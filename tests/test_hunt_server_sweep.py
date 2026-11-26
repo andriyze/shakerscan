@@ -129,7 +129,7 @@ def test_the_sweep_reads_proves_logs_in_checks_authz_and_runs_injection_verifier
     assert ("sqli.verify", {"path": "/api/comment", "method": "POST", "body_field_names": ["body", "author"],
                             "injection_field": "body"}) in injections
     order = [cap for cap, _ in injections]
-    assert order.index("xss.verify") >= order.count("sqli.verify") - 1  # SQL injection first
+    assert order.index("sqli.verify") >= order.count("xss.verify") - 1  # XSS (fast) first
     keys = [key for _cap, _v, key in engine.calls]
     assert len(keys) == len(set(keys)) and all(key.startswith("auto-sweep:") for key in keys)
     assert state["sweep"] == "done" and state["sweep_counts"]["sqli.verify"] >= 3
@@ -251,3 +251,47 @@ def test_rounds_record_what_reads_reveal_read_signed_in_and_never_repeat_a_check
     stats = state["sweep_stats"]
     assert stats["rounds"] == 2 and stats["pairs_tested"] >= 5 and stats["endpoints_seen"] == 3
     assert "seconds" in stats and state["sweep"] == "done"
+
+
+def test_long_verifiers_run_from_a_queue_beside_the_rounds_and_drain_before_done():
+    # A slow SQL injection verification never holds the next round: its reads run while it waits,
+    # and the sweep is done only once every queued verifier has ended.
+    gate = asyncio.Event()
+    order = []
+
+    class Slow(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "sqli.verify":
+                order.append(("sqli-start", values["path"]))
+                await gate.wait()
+                order.append(("sqli-end", values["path"]))
+            elif capability == "http.request" and values.get("method") == "GET":
+                order.append(("read", values["path"]))
+            return await super().call(capability, values, key)
+
+    engine = Slow()
+    state = {}
+    second = {**REPORT, "open": [{"endpoint": "GET /later", "untested": ["review", "exposure"], "params": []}]}
+    reports = iter([second, {"open": []}])
+
+    async def scenario():
+        async def reload():
+            return next(reports, {"open": []})
+
+        sweep = Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+        task = asyncio.get_running_loop().create_task(sweep.run(_run(), REPORT, load_report=reload))
+        for _ in range(400):  # round 1 paces its default-credential attempts (seconds)
+            await asyncio.sleep(0.05)
+            if ("read", "/later") in order:
+                break
+        assert ("read", "/later") in order  # round 2 read while SQL injection still ran
+        assert not any(kind == "sqli-end" for kind, _ in order)
+        assert state["sweep"] != "done" and state["sweep_stats"]["injection_queued"] > 0
+        gate.set()
+        await task
+        return sweep
+
+    sweep = asyncio.run(scenario())
+    assert state["sweep"] == "done"
+    assert state["sweep_stats"]["injection_done"] == state["sweep_stats"]["injection_queued"]
+    assert sweep.injection_done == sweep.injection_queued
