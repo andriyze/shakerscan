@@ -52,6 +52,7 @@ import re
 import time
 from typing import Any
 import urllib.parse
+import uuid
 
 try:
     from runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
@@ -548,7 +549,7 @@ class Sweep:
             if root in self.prefixes_tried or len(self.prefixes_tried) >= MAX_API_PREFIXES:
                 continue
             self.prefixes_tried.add(root)
-            absent = f"{root}/shakerscan-absent-{hashlib.sha256(root.encode()).hexdigest()[:10]}"
+            absent = f"{root}/shakerscan-absent-{uuid.uuid5(uuid.NAMESPACE_URL, 'route-control:' + root).hex[:10]}"
             control = _response(await self._safe("http.request", {"method": "GET", "path": absent,
                                                                   "follow_redirects": False},
                                                  sweep_key("route-control", root)))
