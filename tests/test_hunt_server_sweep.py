@@ -100,6 +100,12 @@ def test_helpers():
     assert exposure_signal({"status": 200, "body_sample": "<p>Forgot your password? Contact IT</p>",
                             "html": {"title": "Sign in"}}) is None
     assert exposure_signal({"status": 200, "body_sample": '{"status": "ok", "version": "1.2"}'}) is None
+    # A sign-in page's withheld anti-forgery token is not an exposure; a key on a page still is.
+    page = {"title": "Sign in", "forms": [{"method": "POST", "action": "/login", "fields": []}]}
+    assert exposure_signal({"status": 200, "body_sample": '<input name="_csrf" value="[withheld:1]">',
+                            "html": page}) is None
+    assert exposure_signal({"status": 200, "body_sample": "[withheld:1] AKIAABCDEFGHIJKLMNOP",
+                            "html": page}) == "credential-shaped values"
     assert login_form({"html": {"forms": [{"method": "POST", "action": "/login", "fields": [
         {"name": "email", "type": "email"}, {"name": "pw", "type": "password"}]}]}}) == ("/login", "email", "pw")
     assert sweep_key("read", "/a") == sweep_key("read", "/a") != sweep_key("read", "/b")
@@ -543,3 +549,55 @@ def test_html_pages_the_reads_found_are_analyzed_for_routes_too():
                      load_report=None, record=record))
     analyzed = [v["path"] for cap, v, _ in engine.calls if cap == "javascript.analyze"]
     assert analyzed == ["/chat"] and "GET /api/chat/send" in recorded
+
+
+def test_the_sweep_follows_the_hunt_and_tests_what_the_planner_maps_until_it_finishes(monkeypatch):
+    # Its own rounds done, the sweep waits for the planner: a route the planner's request reached
+    # later, and an input a later request added to a route already tested, get the same checks;
+    # the sweep ends with a last look once the planner has finished.
+    monkeypatch.setattr(server_sweep, "FOLLOW_POLL_SECONDS", 0.01)
+    engine = _Engine()
+    state = {}
+    first = {"open": [{"endpoint": "GET /search", "untested": ["sqli", "xss", "review"], "params": ["q"]}]}
+    later = {"open": first["open"] + [
+        {"endpoint": "GET /track", "untested": ["sqli", "xss"], "params": ["id"]}]}
+    more = {"open": [{"endpoint": "GET /search", "untested": ["sqli", "xss"], "params": ["q", "sort"]},
+                     later["open"][1]]}
+    last = {"open": more["open"] + [{"endpoint": "GET /late", "untested": ["xss", "sqli"], "params": ["x"]}]}
+    looks = []
+    finished = {"value": False}
+
+    async def reload():
+        looks.append(state.get("sweep"))
+        if len(looks) < 3:
+            return first  # nothing new yet: the sweep keeps following
+        if len(looks) == 3:
+            return later
+        if len(looks) < 6:
+            return more
+        if not finished["value"]:
+            finished["value"] = True  # the planner finishes; its last request mapped /late
+            return more
+        return last
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(allowed=["http.request", "xss.verify"]), first, load_report=reload,
+                     planner_finished=lambda: finished["value"]))
+    xss = [v["path"] for cap, v, _ in engine.calls if cap == "xss.verify"]
+    assert xss == ["/search?q=1", "/track?id=1", "/search?q=1&sort=1", "/late?x=1"]
+    assert "following" in looks and state["sweep"] == "done"
+    reads = [v["path"] for cap, v, _ in engine.calls if cap == "http.request"]
+    assert reads.count("/search") == 1  # back for its new input, never read again
+
+
+def test_without_a_planner_signal_the_sweep_ends_when_a_round_finds_nothing_new():
+    engine = _Engine()
+    state = {}
+    report = {"open": [{"endpoint": "GET /search", "untested": ["xss"], "params": ["q"]}]}
+
+    async def reload():
+        return report
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(allowed=["http.request", "xss.verify"]), report, load_report=reload))
+    assert state["sweep"] == "done" and state["sweep_stats"]["rounds"] == 1

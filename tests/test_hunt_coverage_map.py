@@ -206,3 +206,30 @@ def test_an_exposure_closes_by_judgement_or_a_refusal_not_by_a_bare_request():
                                      "status": "negative"}])
     open_routes = {item["endpoint"]: item["untested"] for item in report["open"]}
     assert open_routes == {"GET /.env": ["exposure"]}
+
+
+def test_the_inputs_a_hunt_request_carried_become_the_routes_inputs():
+    report = build_coverage(endpoints=[], actions=[
+        _action("http.request", method="GET", path="/rest/track", query={"id": "1", "bad name!": "x"}),
+        _action("http.request", method="POST", path="/api/feedback", json_body={"comment": "x", "rating": 1}),
+        _action("http.request", method="POST", path="/profile", form_body={"bio": "x"}),
+        # A default-credential attempt names a sign-in's fields, which the sign-in checks cover.
+        _action("http.request", method="POST", path="/api/login", json_body={"username": "", "password": ""},
+                request_bindings=[{"default_credential": "dc-01", "credential_field": "username",
+                                   "body_pointer": "/username"}]),
+    ])
+    params = {item["endpoint"]: item["params"] for item in report["open"]}
+    assert params["GET /rest/track"] == ["id"]
+    assert params["POST /api/feedback"] == ["comment", "rating"]
+    assert params["POST /profile"] == ["bio"]
+    assert params.get("POST /api/login", []) == []
+    track = next(item for item in report["open"] if item["endpoint"] == "GET /rest/track")
+    assert {"sqli", "xss"} <= set(track["untested"])
+
+
+def test_a_following_sweep_is_not_pending_discovery():
+    running = build_coverage(endpoints=[], actions=[], discovery={"running": True, "sweep": "running"})
+    following = build_coverage(endpoints=[], actions=[], discovery={"running": True, "sweep": "following"})
+    assert "auto_discovery" in running["discovery"]["pending"]
+    assert following["discovery"]["pending"] == []
+    assert following["discovery"]["steps"]["sweep"] == "following"

@@ -553,8 +553,11 @@ A web Hunt with open coverage and wall time and budget left is refused (409) wit
 keep testing it, or finish with `force: true` and a `force_reason`; the debrief records the reason
 and the open coverage. After discovery the engine also runs its own sweep (reading every mapped
 endpoint, default credentials on sign-ins, function-level authorization, `sqli.verify` and
-`xss.verify` on every parameter); its candidates and findings are this Hunt's. A finish while it
-runs is accepted and kept (`finish_deferred`); the Hunt finishes with your debrief when it ends.
+`xss.verify` on every parameter); its candidates and findings are this Hunt's. When it has tested
+what was mapped it follows the Hunt (`sweep: following`): every route your own requests reach, and
+every input they carry (query, JSON or form body fields), gets the same checks, so request the
+routes and inputs you find and do not wait for it. A finish while it runs or follows is accepted
+and kept (`finish_deferred`); the Hunt finishes with your debrief after the sweep's last round.
 A passive Hunt gets none of this and is never refused for open coverage; neither is a Hunt
 whose approval was revoked or expired, and its finish stops the engine's work.
 

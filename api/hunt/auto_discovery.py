@@ -598,7 +598,10 @@ class DiscoveryRunner:
             return await self._record(target_id, worklist, "hunt_sweep") if target_id else 0
 
         try:
-            await sweep.run(run, report, load_report=reload, record=record)
+            # The sweep follows the Hunt until the planner finishes (its finish is deferred while
+            # the sweep runs): what the planner maps later gets the same checks.
+            await sweep.run(run, report, load_report=reload, record=record,
+                            planner_finished=lambda: bool(self.state.get("deferred_finish")))
         except asyncio.CancelledError:
             if self.state.get("sweep") != "stopped":
                 raise

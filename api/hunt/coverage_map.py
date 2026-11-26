@@ -158,6 +158,24 @@ def _query_names(path: Any) -> set[str]:
     return {name for name, _ in urllib.parse.parse_qsl(query, keep_blank_values=True) if name}
 
 
+_INPUT_NAME = re.compile(r"[A-Za-z0-9_.\[\]-]{1,64}")
+MAX_REQUEST_INPUTS = 20
+
+
+def _request_inputs(values: Mapping[str, Any]) -> set[str]:
+    """The input names one request of this Hunt carried besides its path's query: the keys of
+    its ``query``/``params`` and of a JSON or form body object. A default-credential attempt
+    names a sign-in's own fields, which the sign-in checks already cover."""
+    if _uses_default_credential(values):
+        return set()
+    names: list[str] = []
+    for key in ("query", "params", "json_body", "form_body"):
+        value = values.get(key)
+        if isinstance(value, Mapping):
+            names += [str(name) for name in value if isinstance(name, str) and _INPUT_NAME.fullmatch(name)]
+    return set(names[:MAX_REQUEST_INPUTS])
+
+
 def _params(value: Any) -> set[str]:
     if isinstance(value, str):
         return {item.strip() for item in re.split(r"[,&;\s]+", value) if item.strip()}
@@ -402,7 +420,8 @@ def build_coverage(
             # An answer that is not "absent" names a route that exists. The engine's own probes
             # enter the inventory through the runner's negative control, never from here.
             if not is_probe and http_status is not None and http_status != 404 and http_status < 500:
-                add(method, path, (), content_type, "hunt_request")
+                # The inputs the request itself carried are the route's inputs: the sweep tests them.
+                add(method, path, _request_inputs(values), content_type, "hunt_request")
 
     for row in candidates:
         locus = _json(row.get("canonical_locus"), {})
@@ -456,7 +475,9 @@ def build_coverage(
     pending = sorted(step for step, value in steps.items()
                      if value in {"running", "queued"} and step in DISCOVERY_STEPS)
     not_run = sorted(step for step, value in steps.items() if value == "not_run" and step in DISCOVERY_STEPS)
-    if state.get("running"):
+    # A sweep that follows the Hunt has tested what was mapped and waits for the planner's own
+    # requests: nothing of the engine's is pending then.
+    if state.get("running") and state.get("sweep") != "following":
         pending = sorted(set(pending) | {"auto_discovery"})
     by_class: dict[str, int] = {}
     for item in items:

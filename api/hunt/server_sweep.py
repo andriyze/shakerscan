@@ -87,6 +87,12 @@ MAX_SCRIPTS = 40
 MAX_HTML_PAGES = 60
 # Rounds of read-record-test; each round only tests what earlier rounds did not.
 MAX_ROUNDS = 8
+# Once its own rounds find nothing new the sweep follows the Hunt: it re-reads the coverage report
+# and runs a round on whatever the planner's requests mapped since (routes, and inputs of routes
+# already tested), until the planner finishes. The wait between two looks grows while nothing is new.
+MAX_FOLLOW_ROUNDS = 60
+FOLLOW_POLL_SECONDS = 15.0
+FOLLOW_POLL_MAX_SECONDS = 120.0
 DEFAULT_CREDENTIAL_PACE_SECONDS = 2.2
 # Product-template and injection-verifier calls are long actions. While the Hunt's long-action
 # slots are all taken (the planner's scanners, the sweep's own verifiers), admission refuses them:
@@ -222,14 +228,17 @@ def exposure_signal(response: Mapping[str, Any]) -> str | None:
     html = response.get("html") if isinstance(response.get("html"), Mapping) else {}
     text += " " + str(html.get("title") or "") + " " + str(html.get("text_sample") or "")
     keys = " ".join(f'"{key}":' for key in response.get("json_keys") or ())
-    match = _SECRET_TEXT.search(text)
-    if match:
+    # An HTML page carries withheld values as a matter of course (a form's anti-forgery token, a
+    # session nonce in a script): on a page only a key, a provider key id or an index is a signal.
+    page = any(html.get(name) for name in ("title", "forms", "links", "text_sample"))
+    for match in _SECRET_TEXT.finditer(text):
         found = match.group(0).lower()
         if "index of" in found:
             return "a directory index"
         if "private key" in found:
             return "a private key"
-        return "credential-shaped values"
+        if not page or not found.startswith("[withheld"):
+            return "credential-shaped values"
     if _SECRET_FIELD.search(text) or _SECRET_FIELD.search(keys):
         return "secret-named fields"
     if not html and _RECORDS.search(text):
@@ -314,6 +323,10 @@ class Sweep:
     (``record``), which the next round's report lists. Every pair it tests is remembered, so a
     round never repeats a check; its wall, rounds, endpoints and pairs are reported in
     ``sweep_stats``.
+
+    With ``planner_finished`` (``run``) the sweep does not end when a round finds nothing new: it
+    follows the Hunt (state ``following``), running a round on each route or input the planner's
+    own requests reveal, and ends with a last look once the planner has finished.
     """
 
     def __init__(self, *, call: Call, create_candidate: CreateCandidate, state: dict[str, Any],
@@ -327,6 +340,7 @@ class Sweep:
         self.product_checks_run: set[str] = set()
         self.tested: set[tuple[str, str]] = set()  # pairs a sweep check ran on
         self.considered: set[tuple[str, str]] = set()  # pairs a round has looked at (never repeated)
+        self.params_seen: dict[str, set[str]] = {}  # the inputs each endpoint had when a round looked at it
         self.logins: dict[str, tuple[str, str, str, bool]] = {}
         self.logins_tried: set[str] = set()
         self.signed_in_only: set[str] = set()
@@ -416,7 +430,8 @@ class Sweep:
 
     async def run(self, run: Mapping[str, Any], report: Mapping[str, Any] | None = None, *,
                   load_report: Callable[[], Awaitable[Mapping[str, Any] | None]] | None = None,
-                  record: Callable[[list[str]], Awaitable[Any]] | None = None) -> None:
+                  record: Callable[[list[str]], Awaitable[Any]] | None = None,
+                  planner_finished: Callable[[], bool] | None = None) -> None:
         policy = _json(run.get("policy_json"))
         allowed = {str(name) for name in policy.get("allowed_capabilities") or ()}
         writes = bool(policy.get("allow_state_changing_http"))
@@ -431,15 +446,34 @@ class Sweep:
             if templates:
                 # The products discovery recognised are known before the first round.
                 await self._product_templates("read_only")
-            while rounds < MAX_ROUNDS:
-                current = report if (rounds == 0 and report is not None) else (
+            follow = planner_finished is not None and load_report is not None
+            first, last_look, wait = report, False, FOLLOW_POLL_SECONDS
+            while rounds < (MAX_ROUNDS + MAX_FOLLOW_ROUNDS if follow else MAX_ROUNDS):
+                current = first if (rounds == 0 and first is not None) else (
                     await load_report() if load_report is not None else None)
+                first = None
                 if current is None:
                     break
                 items = [item for item in current.get("open") or () if isinstance(item, Mapping)]
-                fresh = [item for item in items if self._untested(item)]
+                fresh = [item for item in items if self._untested(item) or self._new_params(item)]
                 if not fresh:
-                    break
+                    if not follow or last_look:
+                        break
+                    if planner_finished():
+                        # One more look: what the planner's last requests mapped is tested too.
+                        last_look = True
+                        continue
+                    if not await self._live():
+                        break
+                    self.state["sweep"] = "following"
+                    waited = 0.0
+                    while waited < wait and not planner_finished():  # a finish is noticed within a second
+                        await asyncio.sleep(min(1.0, wait - waited))
+                        waited += 1.0
+                    wait = min(FOLLOW_POLL_MAX_SECONDS, wait * 1.5)
+                    continue
+                last_look, wait = False, FOLLOW_POLL_SECONDS
+                self.state["sweep"] = "running"
                 rounds += 1
                 self._stats(rounds=rounds, endpoints_known=int(current.get("endpoints") or len(items)))
                 found: list[str] = []
@@ -468,6 +502,8 @@ class Sweep:
                 if "request.verify" in allowed:
                     handled |= {"injection", "graphql"}
                 for item in fresh:
+                    self.params_seen.setdefault(str(item.get("endpoint")), set()).update(
+                        str(name) for name in item.get("params") or ())
                     for klass in item.get("untested") or ():
                         pair = (str(item.get("endpoint")), str(klass))
                         self.considered.add(pair)
@@ -502,6 +538,12 @@ class Sweep:
         endpoint = str(item.get("endpoint") or "")
         return [str(klass) for klass in item.get("untested") or () if (endpoint, str(klass)) not in self.considered]
 
+    def _new_params(self, item: Mapping[str, Any]) -> bool:
+        """Whether an endpoint a round already looked at has since gained inputs (a later request
+        of the planner's used them): its inputs are then tested like a new endpoint's."""
+        seen = self.params_seen.get(str(item.get("endpoint") or ""))
+        return seen is not None and any(str(name) not in seen for name in item.get("params") or ())
+
     async def _read_all(self, items: Sequence[Mapping[str, Any]], *, slots: Sequence[str],
                         writes: bool = False) -> list[str]:
         """GET every new endpoint (anonymously, then as each principal where anonymous is refused);
@@ -514,7 +556,8 @@ class Sweep:
             if not route.startswith("/"):
                 continue
             if method == "GET":
-                targets.append(route)
+                if route not in self.answers:  # an endpoint back for its new inputs was read already
+                    targets.append(route)
             elif method == "POST" and "default_credentials" in (item.get("untested") or ()) and "/api" in route:
                 self.logins.setdefault(route, (route, "username", "password", True))
 
@@ -730,7 +773,10 @@ class Sweep:
                 self._count("mirror_skipped")
                 continue
             params = [str(name) for name in item.get("params") or () if str(name)]
-            untested = set(self._untested(item))
+            # New inputs on an endpoint already looked at: the verifiers still open on it run again
+            # (their keys carry the inputs, so no call repeats).
+            untested = (set(str(klass) for klass in item.get("untested") or ()) if self._new_params(item)
+                        else set(self._untested(item)))
             if not params or not route.startswith("/"):
                 continue
             # A route that refuses anonymous callers is tested signed in, as the first principal.
