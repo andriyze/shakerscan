@@ -29,6 +29,7 @@ from runtime.archive_body_masking import (
     CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
     mask_public_http_urls,
 )
+from runtime import origin_pace
 from runtime.models import TargetBinding
 from runtime.target_bound_socket import FrozenTargetSocketFactory
 
@@ -683,6 +684,8 @@ async def execute_bound_http_request(
             current_form_body = form_body
             while True:
                 final_url = current_url
+                # The Hunt's aggregate rate at this origin (runtime/origin_pace; no-op outside Hunts).
+                await origin_pace.take(current_url)
                 hop_started = time.perf_counter()
                 hop_started_at = datetime.now(timezone.utc)
                 response = None

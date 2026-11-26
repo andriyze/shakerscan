@@ -177,3 +177,45 @@ def test_local_proxy_probe_and_rejected_destination_do_not_spend_target_connecti
             actual.close(); await actual.wait_closed()
         upstream.close(); await upstream.wait_closed()
     asyncio.run(scenario())
+
+
+def test_a_hunt_proxy_holds_relayed_requests_to_the_origin_pace():
+    """Requests on one keep-alive connection are paced one by one, never dropped."""
+    from runtime import origin_pace
+
+    async def scenario():
+        received = []
+
+        async def sink(reader, writer):
+            while data := await reader.read(65536):
+                received.append((asyncio.get_running_loop().time(), data.count(b"GET /")))
+            writer.close()
+
+        try:
+            upstream = await asyncio.start_server(sink, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("the unit-test sandbox forbids loopback listeners")
+        port = upstream.sockets[0].getsockname()[1]
+        async with PinnedSocksProxy(hostname="app.example.test", pinned_address="127.0.0.1", port=port,
+                                    scheme="http") as proxy:
+            reader, writer, code = await _socks_connect(proxy.proxy_url, "app.example.test", port)
+            assert code == 0
+            started = asyncio.get_running_loop().time()
+            for index in range(6):
+                writer.write(f"GET /{index} HTTP/1.1\r\nHost: app.example.test\r\n\r\n".encode())
+                await writer.drain()
+            for _ in range(80):
+                if sum(count for _t, count in received) >= 6:
+                    break
+                await asyncio.sleep(0.05)
+            writer.close()
+            elapsed = asyncio.get_running_loop().time() - started
+        upstream.close()
+        await upstream.wait_closed()
+        return elapsed, sum(count for _t, count in received)
+
+    with origin_pace.activate(None, 4) as pace:
+        elapsed, delivered = asyncio.run(scenario())
+    assert delivered == 6  # nothing dropped
+    assert elapsed >= 0.4  # 6 requests at 4 a second after a 4-request burst: (6 - 4) / 4 s
+    assert pace.requests == 6

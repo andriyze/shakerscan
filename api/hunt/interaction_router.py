@@ -4842,7 +4842,23 @@ async def _enqueue_hunt_replay_capability(
     }
 
 
-async def _execute_hunt_candidate_verification(
+async def _execute_hunt_candidate_verification(**kwargs: Any) -> dict[str, Any]:
+    """A candidate verification runs in the API process: its requests share the target origin's
+    Hunt rate (runtime/origin_pace) with the workers' senders."""
+    try:
+        from runtime import origin_pace
+    except ModuleNotFoundError:  # package import layout
+        from ..runtime import origin_pace
+    from .budget_pace import wire_requests_per_second
+    try:
+        redis_client = get_redis()
+    except Exception:  # noqa: BLE001 - without the shared store the pace is this process's own
+        redis_client = None
+    with origin_pace.activate(redis_client, wire_requests_per_second()):
+        return await _execute_hunt_candidate_verification_paced(**kwargs)
+
+
+async def _execute_hunt_candidate_verification_paced(
     *,
     run: Mapping[str, Any],
     context: Mapping[str, Any],

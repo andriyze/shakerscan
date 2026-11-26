@@ -9,6 +9,7 @@ import ipaddress
 import struct
 from typing import Any, Awaitable, Callable, Iterable
 
+from runtime import origin_pace
 from runtime.target_bound_socket import FrozenTargetSocketFactory
 
 
@@ -233,6 +234,11 @@ class PinnedSocksProxy:
         # aggregate rate. Tools that open one connection per request are paced per request.
         self._admit = admit
         self.admitted_connections = 0
+        # The Hunt's aggregate rate at the target origin (runtime/origin_pace), captured from the
+        # job that starts the proxy: every relayed request line waits for its token, and an
+        # encrypted connection, whose requests cannot be read, takes one per connection.
+        self._pace = origin_pace.current()
+        self.paced_origin = f"{self.scheme or 'http'}://{self.hostname}:{self.port}"
 
     @property
     def proxy_url(self) -> str:
@@ -424,9 +430,14 @@ class PinnedSocksProxy:
                 counter = RequestCounter(
                     on_request=self._note_request if toward_target else None,
                 )
+                paced_tls = [True]
                 first = toward_target and self.scheme is not None
                 try:
                     while chunk := await source.read(65536):
+                        if toward_target and self._pace is not None and paced_tls[0] and chunk[:1] == b"\x16":
+                            # A TLS connection's requests cannot be counted: one token for it.
+                            paced_tls[0] = False
+                            await self._pace.take(self.paced_origin, 1)
                         if first:
                             first = False
                             tls = chunk[:1] == b"\x16"
@@ -437,9 +448,12 @@ class PinnedSocksProxy:
                                 return
                         if toward_target:
                             self.bytes_to_target += len(chunk)
-                            self.http_requests_observed += counter.feed(chunk)
+                            started = counter.feed(chunk)
+                            self.http_requests_observed += started
                             if not counter.measurable:
                                 self.wire_requests_measurable = False
+                            if self._pace is not None and started:
+                                await self._pace.take(self.paced_origin, started)
                         else:
                             self.bytes_from_target += len(chunk)
                         target.write(chunk)
