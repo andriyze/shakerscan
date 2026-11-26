@@ -69,8 +69,10 @@ def _json(value: Any, default: Any) -> Any:
 
 
 def _uuid(value: Any) -> uuid.UUID | None:
+    """An evidence reference's action id: the bare id, or the ``action:<id>`` form candidates use
+    elsewhere (the engine's own sweep cites its attempts that way)."""
     try:
-        return uuid.UUID(str(value))
+        return uuid.UUID(str(value).strip().removeprefix("action:"))
     except (TypeError, ValueError):
         return None
 
