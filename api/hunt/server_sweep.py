@@ -28,7 +28,10 @@ check never runs twice):
    a bounded set of API answers their CORS and header checks. Each is a short action (seconds,
    tens of requests) run from a second queue beside the long verifiers; inputs whose name points
    at a class go first.
-6. **Product templates**: for every product discovery recognised (``products``), its own templates
+6. **API routes**: under each API root the mapped routes sit under (``/api``, ``/api/v1``, ...),
+   one GET per authored route name (``route_words``), measured against a negative control under
+   the same root; a distinct answer (405 included) enters the inventory for the next round.
+7. **Product templates**: for every product discovery recognised (``products``), its own templates
    from the pinned bundle (``templates.scan`` with ``product``; ``runtime/product_templates.py``),
    at the root and at the path the product answered under. The read-only checks run right after
    the reads; the state-changing ones (non-GET and exploit-class templates) after the default
@@ -54,6 +57,7 @@ try:
     from runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
+from .route_words import API_ROUTE_WORDS, MAX_API_PREFIXES
 
 KEY_PREFIX = "auto-sweep"
 # Engine checks at once: leaves the planner a long slot (agent_job_concurrency gives a Hunt two
@@ -108,7 +112,15 @@ _TEMPLATE_INPUT = re.compile(r"(?:^|_)(?:template|tpl|tmpl|name|message|msg|text
                              r"subject|title|preview|expr\w*|q|search|bio|comment|note|description)$", re.I)
 _XML_PATH = re.compile(r"(?:^|/|\.)(?:xml|soap|wsdl|rss|import|parse|svg)(?:/|$|\.)", re.I)
 _RESET_PATH = re.compile(r"(?:reset|forgot|recover)[-_]?(?:password|pass|pw)?|password[-_/]?reset", re.I)
+# A route whose name says it destroys, moves money or changes access is never sent the shape probe's
+# empty POST (a route that needs no input would act on it); the planner decides those.
+_DESTRUCTIVE_ROUTE = re.compile(
+    r"(?:delete|remove|destroy|drop|purge|wipe|truncate|shutdown|restart|reboot|reset|restore|revoke|"
+    r"cancel|withdraw|refund|transfer|pay(?:ment)?s?|purchase|checkout|approve|disable|deactivate|"
+    r"unsubscribe|terminate|kill|stop|logout|signout|import|deploy|install|exec|run|build)", re.I)
 _GRAPHQL_PATH = re.compile(r"(?:^|/)graph(?:i)?ql(?:/|$)", re.I)
+# An API root a route sits under: /api, /api/v1, /rest, /v2 ... (the sweep tries API_ROUTE_WORDS there).
+_API_PREFIX = re.compile(r"^(/(?:api|rest|v[0-9]{1,2})(?:/v[0-9]{1,2})?)(?=/|$)", re.I)
 # A framework's validation answer that names the inputs a route requires (FastAPI/pydantic
 # ``"loc": ["query", "id"]``, and the plain "missing parameter 'x'" wording of other stacks).
 _LOC_FIELD = re.compile(r'"loc"\s*:\s*\[\s*"(query|body|form)"\s*,\s*"([A-Za-z_][A-Za-z0-9_.-]{0,63})"')
@@ -278,6 +290,7 @@ class Sweep:
         self.request_checks_sent: set[str] = set()
         self.shape_probed: set[str] = set()
         self.signin_checked: set[str] = set()
+        self.prefixes_tried: set[str] = set()
 
     def _count(self, name: str) -> None:
         self.counts[name] = self.counts.get(name, 0) + 1
@@ -365,6 +378,7 @@ class Sweep:
                 found: list[str] = []
                 if "http.request" in allowed:
                     found += await self._read_all(fresh, slots=slots, writes=writes)
+                    found += await self._api_routes(items)
                 if "javascript.analyze" in allowed:
                     found += await self._javascript(items)
                 if "http.request" in allowed and writes:
@@ -477,6 +491,41 @@ class Sweep:
 
         await asyncio.gather(*(read(route) for route in targets))
         return links
+
+    async def _api_routes(self, items: Sequence[Mapping[str, Any]]) -> list[str]:
+        """Route names tried under each API root the mapped routes sit under (once per root)."""
+        roots: list[str] = []
+        for item in items:
+            _method, _, route = str(item.get("endpoint") or "").partition(" ")
+            match = _API_PREFIX.match(route)
+            if match and match.group(1) not in roots:
+                roots.append(match.group(1))
+        found: list[str] = []
+        gate = asyncio.Semaphore(SHORT_CONCURRENCY)
+        for root in roots:
+            if root in self.prefixes_tried or len(self.prefixes_tried) >= MAX_API_PREFIXES:
+                continue
+            self.prefixes_tried.add(root)
+            absent = f"{root}/shakerscan-absent-{hashlib.sha256(root.encode()).hexdigest()[:10]}"
+            control = _response(await self._safe("http.request", {"method": "GET", "path": absent,
+                                                                  "follow_redirects": False},
+                                                 sweep_key("route-control", root)))
+            if not isinstance(control.get("status"), int):
+                continue
+
+            async def word(name: str, root: str = root, control: Mapping[str, Any] = control) -> None:
+                path = f"{root}/{name}"
+                async with gate:
+                    answer = _response(await self._safe("http.request", {"method": "GET", "path": path,
+                                                                         "follow_redirects": False},
+                                                        sweep_key("route", path)))
+                if _distinct(answer, control):
+                    found.append(f"GET {path}")
+
+            await asyncio.gather(*(word(name) for name in API_ROUTE_WORDS))
+        self._stats(api_roots=sorted(self.prefixes_tried),
+                    api_route_hits=int((self.state.get("sweep_stats") or {}).get("api_route_hits") or 0) + len(found))
+        return found
 
     async def _javascript(self, items: Sequence[Mapping[str, Any]]) -> list[str]:
         """Routes the application's own JavaScript names (``javascript.analyze``)."""
@@ -621,7 +670,8 @@ class Sweep:
     async def _probe_shape(self, route: str, slots: Sequence[str]) -> list[str]:
         """A route that refuses GET (405): one POST with an empty JSON object, whose validation
         answer names the fields the route requires."""
-        if route in self.shape_probed or len(self.shape_probed) >= MAX_SHAPE_PROBES:
+        if (route in self.shape_probed or len(self.shape_probed) >= MAX_SHAPE_PROBES
+                or _DESTRUCTIVE_ROUTE.search("/".join(route.split("/")[-2:]))):
             return []
         self.shape_probed.add(route)
         values = {"method": "POST", "path": concrete(route), "json_body": {}, "follow_redirects": False,
@@ -795,6 +845,18 @@ def product_candidate(product: str, checks: str, match: Mapping[str, Any],
         "locus": locus,
         "evidence_refs": [f"action:{action}"],
     }
+
+
+def _distinct(answer: Mapping[str, Any], control: Mapping[str, Any]) -> bool:
+    """Whether a route probe answered unlike the root's answer for a route that cannot exist."""
+    status = answer.get("status")
+    if not isinstance(status, int) or status in {404, 410} or status >= 500 or status == 429:
+        return False
+    if status != control.get("status"):
+        return True
+    length = len(str(answer.get("body_sample") or ""))
+    control_length = len(str(control.get("body_sample") or ""))
+    return abs(length - control_length) > max(16, 0.05 * max(length, control_length))
 
 
 def _json(value: Any) -> dict[str, Any]:

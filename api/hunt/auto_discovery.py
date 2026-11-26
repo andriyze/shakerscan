@@ -15,6 +15,10 @@ call, so the engine does it itself when a web or API Hunt starts:
   APIs, AI gateways), measured against a negative control (a path that cannot exist) the way
   content discovery is. A product that answers gets its known sensitive routes probed the same way.
   Every hit enters the target's endpoint inventory; a small API description is parsed into routes.
+* **Exposure probes**: one GET per secret-bearing file a deployment commonly leaves in a web root
+  (the Scan's exposure seeds, its thorough seeds, and credential, cloud, cluster, build and AI
+  assistant files of the same kind), against the same negative control; a hit enters the
+  inventory and the sweep reads and proves it.
 * **Templates**: the Hunt's reviewed passive template pack once, when the Hunt may run it.
 
 Every step is an ordinary capability call of the Hunt (``execute_hunt_capability``), so scope,
@@ -54,7 +58,9 @@ KEY_PREFIX = "auto-discovery"
 CONTENT_WORDLISTS = ("corporate", "api", "admin")
 SIGNED_IN_WORDLISTS = ("corporate", "api")
 MAX_SIGNED_IN_CRAWLS = 2
-MAX_PROBES = 160
+# Every probe path is sent at most once (probe_paths(): about 300); this is the work budget.
+MAX_PROBES = 400
+PROBE_CONCURRENCY = 4
 # A probe answer within this share of the control's length (same status) is the control's page.
 CONTROL_LENGTH_TOLERANCE = 0.05
 # Discovery and the sweep never outlive the Hunt's own wall; a Hunt without one gets this.
@@ -70,6 +76,26 @@ HINT_PATHS: tuple[str, ...] = (
     "/.well-known/openid-configuration", "/.well-known/oauth-authorization-server",
 )
 GRAPHQL_PATHS: tuple[str, ...] = ("/graphql", "/api/graphql", "/graphql/v1", "/graphql/v2", "/graphiql")
+try:
+    from capabilities.exposure_probe import SENSITIVE_SEED_PATHS, THOROUGH_SEED_PATHS
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..capabilities.exposure_probe import SENSITIVE_SEED_PATHS, THOROUGH_SEED_PATHS
+# Secret-bearing files of the same kind as the Scan's exposure seeds: cloud, cluster, container
+# and database credentials, infrastructure state, CI and build manifests, private keys, logs and
+# the configuration files of AI coding assistants (server tokens).
+EXTRA_EXPOSURE_PATHS: tuple[str, ...] = (
+    "/.aws/config", "/credentials", "/credentials.json", "/.docker/config.json", "/.kube/config",
+    "/kubeconfig", "/.pgpass", "/.my.cnf", "/secrets.yml", "/secrets.yaml", "/config/secrets.yml",
+    "/secrets.json", "/terraform.tfvars", "/terraform.tfstate", "/.ssh/id_rsa", "/id_ed25519",
+    "/id_dsa", "/package.json", "/composer.json", "/composer.lock", "/docker-compose.yml",
+    "/Dockerfile", "/.gitlab-ci.yml", "/.travis.yml", "/.bash_history", "/error_log", "/debug.log",
+    "/logs/", "/backup/", "/backups/", "/.vscode/settings.json", "/.vscode/mcp.json", "/.mcp.json",
+    "/.cursor/mcp.json", "/.claude/settings.json", "/.claude/settings.local.json",
+    "/.claude/.credentials.json", "/sbom.json", "/bom.json", "/.env.example", "/.env.staging",
+    "/config/database.yml", "/config/master.key", "/storage/logs/laravel.log", "/wp-config.php~",
+)
+EXPOSURE_PATHS: tuple[str, ...] = tuple(dict.fromkeys(
+    (*SENSITIVE_SEED_PATHS, *THOROUGH_SEED_PATHS, *EXTRA_EXPOSURE_PATHS)))
 
 
 @dataclass(frozen=True)
@@ -210,7 +236,8 @@ def probe_paths() -> tuple[str, ...]:
     """Every path the probe phase may send (it sends at most ``MAX_PROBES`` of them)."""
     paths: list[str] = ["/"]
     for path in (*SPEC_PATHS, *HINT_PATHS, *GRAPHQL_PATHS,
-                 *(item for product in PRODUCTS for item in (*product.identity, *product.routes))):
+                 *(item for product in PRODUCTS for item in (*product.identity, *product.routes)),
+                 *EXPOSURE_PATHS):
         if path not in paths:
             paths.append(path)
     return tuple(paths)
@@ -681,6 +708,15 @@ class DiscoveryRunner:
                 answer = await probe(path)
                 if present(answer, control):
                     found.append(f"GET {path}")
+        gate = asyncio.Semaphore(PROBE_CONCURRENCY)
+
+        async def exposure(path: str) -> None:
+            async with gate:
+                answer = await probe(path)
+            if present(answer, control):
+                found.append(f"GET {path}")
+
+        await asyncio.gather(*(exposure(path) for path in EXPOSURE_PATHS))
         routes = _spec_routes(specs, origin=_origin(run))
         if specs and not routes:
             for path, _answer in specs:
