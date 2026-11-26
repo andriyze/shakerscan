@@ -96,7 +96,8 @@ unverified candidate with its evidence, and do not spend a verification call on 
 **Proving a request-level class.** SQL injection (a quick differential; `sqli.verify` runs the
 full tool), command injection, path traversal, template injection, XXE,
 SSRF, NoSQL and LDAP injection, open redirect, CRLF and host header injection, CORS, CSRF, sign-in
-rate limiting, file upload, GraphQL, JWT, security headers and directory listing are proved with
+rate limiting, file upload, GraphQL, JWT, security headers, directory listing and a self-hosted
+product's management API answering anonymously (`unauthenticated_api`) are proved with
 `request.verify` on the exact request: the `http.request` shape plus `check` and, for an input,
 the `parameter` to test. Call it as soon as a response suggests one of them; a verified result is a
 finding, anything else stays an observation. A write method or an upload needs the state-changing

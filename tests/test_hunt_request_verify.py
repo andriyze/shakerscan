@@ -248,3 +248,43 @@ def test_sql_injection_is_proved_in_a_few_requests_by_the_scan_proof_and_never_a
     assert "parameter" in admission_refusal({"check": SQL_CHECK, "method": "GET", "path": "/item"}, ACTIVE)
     assert "sign-in" in admission_refusal({"check": SQL_CHECK, "method": "POST", "path": "/login",
                                            "parameter": "username", "form_body": {"username": "a"}}, WRITES)
+
+
+def test_an_anonymous_product_management_api_is_proved_against_a_sibling_control():
+    from api.capabilities.product_api import product_api_for
+    from api.hunt.request_verification import run_check
+    from api.runtime.request_replay_executor import ReplayTransportResult
+    import urllib.parse as parse
+
+    class Jupyter:
+        async def send(self, request, **_kwargs):
+            path = parse.urlsplit(request.url).path
+            if path == "/api/kernels":
+                body = b'[{"id": "k1", "name": "python3", "execution_state": "idle", "connections": 0}]'
+                return ReplayTransportResult(status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                                             response_body=body)
+            return ReplayTransportResult(status_code=404, connected_address="192.0.2.10", final_url=request.url,
+                                         response_body=b'{"message": "Not found"}')
+
+    class CatchAll(Jupyter):
+        async def send(self, request, **_kwargs):  # every path answers like the route: proves nothing
+            return await super().send(replace_path(request, "/api/kernels"))
+
+    def replace_path(request, path):
+        from dataclasses import replace
+        parts = parse.urlsplit(request.url)
+        return replace(request, url=parse.urlunsplit((parts.scheme, parts.netloc, path, "", "")))
+
+    assert product_api_for("/api/kernels").product == "Jupyter Server" and product_api_for("/about") is None
+    result = asyncio.run(run_check("unauthenticated_api", url=ORIGIN + "/api/kernels", target=_target(),
+                                   transport=Jupyter(), policy=ACTIVE, seed="sweep-api"))
+    records = finding_records("h", "a", ORIGIN, "r", {"check": "unauthenticated_api"}, list(result.observations))
+    assert records and records[0]["cwe"] == "CWE-306" and records[0]["evidence"]["product"] == "Jupyter Server"
+    loose = asyncio.run(run_check("unauthenticated_api", url=ORIGIN + "/api/kernels", target=_target(),
+                                  transport=CatchAll(), policy=ACTIVE, seed="sweep-api-2"))
+    assert not finding_records("h", "a", ORIGIN, "r", {"check": "unauthenticated_api"}, list(loose.observations))
+    unknown = asyncio.run(run_check("unauthenticated_api", url=ORIGIN + "/about", target=_target(),
+                                    transport=Jupyter(), policy=ACTIVE, seed="sweep-api-3"))
+    assert not finding_records("h", "a", ORIGIN, "r", {"check": "unauthenticated_api"}, list(unknown.observations))
+    assert "anonymous" in admission_refusal({"check": "unauthenticated_api", "method": "GET", "path": "/api/kernels",
+                                             "as_principal": "primary"}, ACTIVE)
