@@ -98,6 +98,7 @@ def cookie_metadata(set_cookie: str) -> dict[str, Any] | None:
 # The response headers that describe a target's security posture. Fixed and public: naming them
 # here rather than accepting a caller-supplied list keeps the capability's declared input contract
 # unchanged while making the posture observable.
+_CHALLENGE_SCHEMES = frozenset({"basic", "digest", "bearer", "negotiate", "ntlm"})
 _SECURITY_POSTURE_HEADERS: tuple[str, ...] = (
     "strict-transport-security",
     "content-security-policy",
@@ -923,6 +924,14 @@ async def execute_bound_http_request(
         for name in _SECURITY_POSTURE_HEADERS
         if name in response.headers
     }
+    if response.status_code == 401:
+        # Which sign-in a 401 asks for (scheme names from a fixed set; never the realm or a value).
+        schemes = sorted({
+            scheme.lower() for value in response.headers.get_list("www-authenticate")[:8]
+            for scheme in re.findall(r"(?:^|,)\s*([A-Za-z]{4,10})(?=\s|,|$)", str(value)[:1_000])
+        } & _CHALLENGE_SCHEMES)
+        if schemes:
+            summary["challenge_schemes"] = schemes
     summary["set_cookie_metadata"] = [
         cookie for cookie in (
             cookie_metadata(value) for value in response.headers.get_list("set-cookie")[:50]

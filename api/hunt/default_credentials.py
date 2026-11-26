@@ -49,6 +49,8 @@ BINDING_KEY = "default_credential"
 PAIR_ID_PATTERN = r"^dc-[0-9]{2}$"
 _PAIR_ID_RE = re.compile(PAIR_ID_PATTERN)
 LOGIN_FIELDS = frozenset({"username", "secret"})
+# HTTP Basic: the pair as one ``Authorization: Basic`` header on a GET of a route that asks for it.
+BASIC_FIELD = "basic"
 MAX_ATTEMPTS_PER_LOGIN = 20
 MAX_LOGINS_PER_HUNT = 4
 PACE_SECONDS = 2.0
@@ -147,6 +149,9 @@ def value_of(pair_id: Any, field: Any) -> str:
     found = pair(pair_id)
     if found is None:
         raise ValueError("default_credential_unknown: not one of the built-in default credentials")
+    if field == BASIC_FIELD:
+        import base64
+        return "Basic " + base64.b64encode(f"{found[0]}:{found[1]}".encode()).decode("ascii")
     if field == "username":
         return found[0]
     if field == "secret":
@@ -163,9 +168,28 @@ def is_default_credential_request(values: Mapping[str, Any]) -> bool:
     return bool(pair_ids(values))
 
 
+def is_basic_request(values: Mapping[str, Any]) -> bool:
+    """Whether a default-credential request sends its pair as HTTP Basic."""
+    return any(isinstance(item, Mapping) and BINDING_KEY in item and item.get("credential_field") == BASIC_FIELD
+               for item in values.get("request_bindings") or ())
+
+
+def _validate_basic_shape(values: Mapping[str, Any]) -> None:
+    bindings = [item for item in values.get("request_bindings") or () if isinstance(item, Mapping)]
+    if len(bindings) != 1 or str(bindings[0].get("header") or "").lower() != "authorization" \
+            or "body_pointer" in bindings[0]:
+        raise ValueError("an HTTP Basic default-credential attempt binds one pair into the Authorization "
+                         "header and nothing else")
+    if str(values.get("method") or "") != "GET":
+        raise ValueError("an HTTP Basic default credential is sent only in a GET of the route that asked for it")
+    if any(values.get(key) for key in ("json_body", "form_body", "body", "headers")):
+        raise ValueError("an HTTP Basic default-credential attempt carries no body and no other header")
+
+
 def validate_request_shape(values: Mapping[str, Any]) -> str:
     """The one pair a default-credential request binds; ``ValueError`` when the shape is not a
-    login POST that binds one pair's fields into its body."""
+    login POST that binds one pair's fields into its body, or a GET that sends one pair as HTTP
+    Basic."""
     ids = pair_ids(values)
     if not ids:
         raise ValueError("not a default-credential request")
@@ -173,11 +197,15 @@ def validate_request_shape(values: Mapping[str, Any]) -> str:
         raise ValueError("a login attempt binds one default credential pair")
     if not _PAIR_ID_RE.fullmatch(ids[0]) or pair(ids[0]) is None:
         raise ValueError("default_credential must be one of the built-in references dc-01..dc-%02d" % len(PAIRS))
-    if str(values.get("method") or "") != "POST":
+    basic = is_basic_request(values)
+    if not basic and str(values.get("method") or "") != "POST":
         raise ValueError("a default credential is sent only in a login POST")
     if values.get("session_ref") or str(values.get("as_principal") or "anonymous").lower() not in {
             "anonymous", "anon", "none", ""}:
         raise ValueError("a default-credential attempt carries no other identity (session_ref or as_principal)")
+    if basic:
+        _validate_basic_shape(values)
+        return ids[0]
     fields: set[str] = set()
     for item in values.get("request_bindings") or ():
         if BINDING_KEY in item:
@@ -208,6 +236,9 @@ def request_shape(values: Mapping[str, Any], login_url: str) -> dict[str, Any]:
     literal fields and the two pointers the pair fills. Replayable only when nothing else was bound
     (a value captured from a page, such as a CSRF token, does not survive to a later request)."""
     bindings = [item for item in values.get("request_bindings") or () if isinstance(item, Mapping)]
+    if is_basic_request(values):
+        return {"login_url": login_url, "body_kind": BASIC_FIELD, "body": {}, "user_pointer": None,
+                "secret_pointer": None, "replayable": True}
     pointers = {str(item.get("credential_field")): str(item.get("body_pointer") or "")
                 for item in bindings if BINDING_KEY in item}
     body_kind = "json" if isinstance(values.get("json_body"), Mapping) else "form"
@@ -375,7 +406,7 @@ def _walk(value: Any, depth: int = 0) -> Sequence[tuple[str, Any]]:
 
 
 def classify_response(*, status: Any, headers: Mapping[str, Any], cookie_names: Sequence[str],
-                      body: bytes, location: Any, login_path: str) -> str:
+                      body: bytes, location: Any, login_path: str, basic: bool = False) -> str:
     """The login's answer to one attempt: accepted, rejected, rate_limited, locked or unclear.
 
     A lockout or rate-limit sign wins over everything else (the check stops on it). ``accepted``
@@ -391,6 +422,13 @@ def classify_response(*, status: Any, headers: Mapping[str, Any], cookie_names: 
         return "locked"
     if status == 429 or "retry-after" in names or (status in {403, 503} and _RATE_RE.search(text)):
         return "rate_limited"
+    if basic:
+        # HTTP Basic on a route that answered 401 without it: the challenge again (or a refusal) is
+        # a rejection, the route's own answer an acceptance. The proof's control (a random password)
+        # settles a route that stopped asking.
+        if status in {401, 403, 407}:
+            return "rejected"
+        return "accepted" if 200 <= status < 400 else "unclear"
     document: Any = None
     if text.lstrip()[:1] in {"{", "["}:
         try:
@@ -511,7 +549,10 @@ async def briefing_section(conn: Any, run: Mapping[str, Any]) -> dict[str, Any]:
             "says accepted, rejected, unclear or stopped. Send one attempt at a time; each "
             "pair is tried once per login. Record an accepted pair as a candidate of family "
             "default_credentials citing its action, then candidate.verify it: the server sends the "
-            "pair again and a random-password control on the same login. "
+            "pair again and a random-password control on the same login. On a route that answers "
+            "401 with a Basic challenge (response challenge_schemes lists basic): http.request GET of "
+            "that route with request_bindings [{\"default_credential\": \"dc-15\", "
+            "\"credential_field\": \"basic\", \"header\": \"Authorization\"}] and nothing else. "
             "Never guess passwords outside this list."),
     })
     return section
@@ -520,6 +561,7 @@ async def briefing_section(conn: Any, run: Mapping[str, Any]) -> dict[str, Any]:
 __all__ = [
     "AttemptClaim", "BINDING_KEY", "HUNT_DEFAULT_CREDENTIALS_SCHEMA_SQL", "MAX_ATTEMPTS_PER_LOGIN",
     "PAIRS", "PAIR_ID_PATTERN", "SETTING", "admit_default_credentials", "briefing_section",
-    "classify_response", "enabled", "is_default_credential_request", "public_verdict",
+    "BASIC_FIELD", "classify_response", "enabled", "is_basic_request", "is_default_credential_request",
+    "public_verdict",
     "record_attempt", "require_admitted", "settle_attempt", "validate_request_shape", "value_of",
 ]

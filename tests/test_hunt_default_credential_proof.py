@@ -99,3 +99,14 @@ def test_the_control_reference_is_never_a_pair_a_planner_can_bind():
     with pytest.raises(ValueError):
         dc.validate_request_shape({"method": "POST", "form_body": {"p": ""}, "request_bindings": [
             {"default_credential": proof.CONTROL_PAIR, "credential_field": "secret", "body_pointer": "/p"}]})
+
+
+def test_an_http_basic_step_is_a_get_with_the_pair_as_a_trusted_header():
+    import base64
+    shape = {"login_url": "http://t.test:8080/manager/html", "body_kind": "basic", "body": {},
+             "user_pointer": None, "secret_pointer": None, "replayable": True}
+    request = proof.build_request(shape, username="tomcat", secret="control-x")
+    assert request["method"] == "GET" and request["path"] == "/manager/html"
+    assert request["origin"] == "http://t.test:8080" and "form_body" not in request and "json_body" not in request
+    scheme, token = request["trusted_headers"]["Authorization"].split(" ", 1)
+    assert scheme == "Basic" and base64.b64decode(token) == b"tomcat:control-x"

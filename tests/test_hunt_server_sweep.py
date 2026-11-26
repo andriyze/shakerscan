@@ -633,3 +633,32 @@ def test_one_sign_in_under_several_mounts_gets_the_default_pairs_once():
                 .run(_run(allowed=["http.request"]), report))
     tried = {v["path"] for cap, v, _ in engine.calls if cap == "http.request" and v["method"] == "POST"}
     assert tried == {"/pma/index.php", "/crm/index.php"}
+
+
+def test_a_route_that_asks_for_http_basic_gets_the_default_pairs_once_per_first_segment():
+    class Tomcat(_Engine):
+        async def call(self, capability, values, key):
+            self.calls.append((capability, dict(values), key))
+            if capability != "http.request":
+                return {"action_id": "v", "action_result": {"status": "success", "observations": []}}
+            if values.get("request_bindings"):
+                pair = values["request_bindings"][0]["default_credential"]
+                return _answer(200 if pair == "dc-15" else 401,
+                               login_attempt="accepted" if pair == "dc-15" else "rejected", action=f"basic-{pair}")
+            return {"action_id": "r", "action_result": {"status": "success", "observations": [
+                {"response": {"status": 401, "body_sample": "", "challenge_schemes": ["basic"]}}]}}
+
+    engine = Tomcat()
+    report = {"open": [{"endpoint": f"GET {path}", "untested": ["review"], "params": []}
+                       for path in ("/manager/html", "/manager/status", "/host-manager/html")]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request", "candidate.verify"], slots=()), report))
+    attempts = [v for cap, v, _ in engine.calls if cap == "http.request" and v.get("request_bindings")]
+    assert {v["path"] for v in attempts} == {"/manager/html", "/host-manager/html"}
+    assert all(v["method"] == "GET" and v["request_bindings"] == [
+        {"default_credential": v["request_bindings"][0]["default_credential"], "credential_field": "basic",
+         "header": "Authorization"}] for v in attempts)
+    assert [c["locus"] for c in engine.candidates] == [
+        {"method": "GET", "path": "/manager/html"}, {"method": "GET", "path": "/host-manager/html"}]
+    assert all(c["family"] == "default_credentials" and c["evidence_refs"] == ["action:basic-dc-15"]
+               for c in engine.candidates)

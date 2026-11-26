@@ -9,8 +9,9 @@ check never runs twice):
 1. **Read every mapped endpoint** (one GET each, anonymously). An answer that carries a value the
    shared masking withholds as credential-shaped, a private key or a directory index becomes a
    ``data_exposure`` candidate citing that request, and ``candidate.verify`` proves it or not.
-2. **Default credentials** on each sign-in it found (an HTML sign-in form's own fields, or a JSON
-   login's ``username``/``password``): the built-in pairs through ``http.request`` bindings, under
+2. **Default credentials** on each sign-in it found (an HTML sign-in form's own fields, a JSON
+   login's ``username``/``password``, or a route that answers 401 with an HTTP Basic challenge,
+   once per first path segment): the built-in pairs through ``http.request`` bindings, under
    the default-credential module's server-side bounds (per-login attempt cap, pacing, stop at the
    first lockout or rate-limit sign). An accepted pair becomes a ``default_credentials`` candidate
    and ``candidate.verify`` proves it. Needs the Hunt's state-changing permission.
@@ -304,7 +305,11 @@ def input_checks(name: str, method: str) -> list[tuple[int, str]]:
     return checks
 
 
-def _default_credential_request(path: str, user: str, secret: str, pair: str, *, json_body: bool) -> dict[str, Any]:
+def _default_credential_request(path: str, user: str, secret: str, pair: str, *, json_body: bool,
+                                basic: bool = False) -> dict[str, Any]:
+    if basic:
+        return {"method": "GET", "path": path, "follow_redirects": False, "request_bindings": [
+            {"default_credential": pair, "credential_field": "basic", "header": "Authorization"}]}
     body = {user: "", secret: ""}
     return {
         "method": "POST", "path": path, "follow_redirects": False,
@@ -348,6 +353,8 @@ class Sweep:
         # The page each sign-in form was read on (its title) and the sign-ins already tried by
         # (path after the first segment, fields, title): one application mounted under several
         # paths gets the default pairs once, so the few logins a Hunt may try are distinct ones.
+        # Routes that asked an anonymous read for HTTP Basic, one per first path segment.
+        self.basic_logins: dict[str, str] = {}
         self.login_titles: dict[str, str] = {}
         self.login_mirrors: set[tuple[str, str, str, str]] = set()
         self.signed_in_only: set[str] = set()
@@ -619,6 +626,8 @@ class Sweep:
                                    str(html.get("title") or "")[:200])
             if _LOGIN_PATH.search(route) and response.get("status") in {405, 400} and "/api" in route:
                 self.logins.setdefault(route, (route, "username", "password", True))
+            if response.get("status") == 401 and "basic" in (response.get("challenge_schemes") or ()):
+                self.basic_logins.setdefault(path.split("/")[1] if path.count("/") else "", path)
             if response.get("status") in {401, 403} and slots:
                 self.signed_in_only.add(route)
                 for slot in slots:
@@ -695,11 +704,24 @@ class Sweep:
         return routes
 
     async def _default_credentials(self, *, request_checks: bool = False) -> None:
-        for path, (_path, user, secret, json_body) in list(self.logins.items()):
+        # Sign-in forms and Basic-protected routes in turn: the few logins a Hunt may try cover both.
+        forms = [(path, shape) for path, shape in self.logins.items()]
+        basics = [(path, (path, "", "", False)) for path in self.basic_logins.values()]
+        order: list[tuple[str, tuple[str, str, str, bool], bool]] = []
+        for index in range(max(len(forms), len(basics))):
+            if index < len(forms):
+                order.append((*forms[index], False))
+            if index < len(basics):
+                order.append((*basics[index], True))
+        for path, (_path, user, secret, json_body), basic in order:
             if path in self.logins_tried:
                 continue
             if len(self.logins_tried) >= MAX_SWEEP_LOGINS:
                 break
+            if basic:
+                self.logins_tried.add(path)
+                await self._try_default_pairs(path, user, secret, json_body, basic=True)
+                continue
             segments = path.split("/")
             title = self.login_titles.get(path, "")
             if len(segments) >= 3 and title:
@@ -714,14 +736,16 @@ class Sweep:
                 # After the default pairs: the rate-limit run's wrong passwords never lock them out.
                 await self._signin_checks(path, user, secret, json_body)
 
-    async def _try_default_pairs(self, path: str, user: str, secret: str, json_body: bool) -> None:
+    async def _try_default_pairs(self, path: str, user: str, secret: str, json_body: bool, *,
+                                 basic: bool = False) -> None:
         for index, pair in enumerate(DEFAULT_PAIR_IDS):
             if index:
                 # The default-credential module paces attempts on one login; keep to its pace.
                 await asyncio.sleep(DEFAULT_CREDENTIAL_PACE_SECONDS)
             result = await self._safe(
-                "http.request", _default_credential_request(path, user, secret, pair, json_body=json_body),
-                sweep_key("default-credentials", path, pair))
+                "http.request",
+                _default_credential_request(path, user, secret, pair, json_body=json_body, basic=basic),
+                sweep_key("default-credentials", path, pair, *(("basic",) if basic else ())))
             response = _response(result)
             verdict = str((response.get("login_attempt") or {}).get("verdict")
                           or ((result or {}).get("login_attempt") or {}).get("verdict") or "")
@@ -732,9 +756,10 @@ class Sweep:
                 await self._candidate_and_verify({
                     "family": "default_credentials",
                     "title": f"{path} accepts a built-in default credential pair",
-                    "claim": f"The sign-in at {path} accepted the built-in pair {pair} (engine sweep).",
+                    "claim": (f"The {'HTTP Basic sign-in' if basic else 'sign-in'} at {path} accepted the "
+                              f"built-in pair {pair} (engine sweep)."),
                     "severity": "critical",
-                    "locus": {"method": "POST", "path": path},
+                    "locus": {"method": "GET" if basic else "POST", "path": path},
                     "evidence_refs": [f"action:{action}"],
                 })
                 break

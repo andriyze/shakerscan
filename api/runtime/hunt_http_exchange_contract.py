@@ -61,13 +61,15 @@ HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
             "default_credential": {"type": "string", "maxLength": 5, "pattern": DEFAULT_CREDENTIAL_PATTERN,
                 "description": ("A built-in default or common credential pair, by reference (briefing "
                     "default_credentials). Only in a login POST on the Hunt's own host, with "
-                    "credential_field username or secret and a body_pointer; bounded per login, "
-                    "paced, and stopped at a lockout or rate-limit sign by the server.")},
+                    "credential_field username or secret and a body_pointer; or, on a route that "
+                    "answered 401 with a Basic challenge, in a GET with credential_field basic and "
+                    "header Authorization. Bounded per login, paced, and stopped at a lockout or "
+                    "rate-limit sign by the server.")},
             "capture_name": {"type": "string", "pattern": _NAME},
             "principal": {"type": "string", "enum": ["primary", "secondary", "service"]},
             "profile_id": {"type": "string", "maxLength": 36},
             "profile_version": {"type": "integer", "minimum": 1},
-            "credential_field": {"type": "string", "enum": ["secret", "username", "client_id"]},
+            "credential_field": {"type": "string", "enum": ["secret", "username", "client_id", "basic"]},
             "body_pointer": POINTER_SCHEMA, "header": {"type": "string", "pattern": _HEADER},
             "prefix": {"type": "string", "maxLength": 32,
                 "description": "Literal non-secret header prefix, for example Bearer followed by a space."},
@@ -150,9 +152,12 @@ def validate_exchange_input(values: Mapping[str, Any]) -> None:
         if "default_credential" in binding:
             if not re.fullmatch(DEFAULT_CREDENTIAL_PATTERN, str(binding["default_credential"])):
                 raise ValueError("default_credential must be a built-in reference such as dc-01")
-            if binding.get("credential_field") not in {"username", "secret"} or "body_pointer" not in binding \
-                    or any(k in binding for k in ("capture_name", "profile_version", "prefix")):
-                raise ValueError("a default credential binds its username or secret into the request body only")
+            basic = (binding.get("credential_field") == "basic"
+                     and str(binding.get("header") or "").lower() == "authorization")
+            body = binding.get("credential_field") in {"username", "secret"} and "body_pointer" in binding
+            if not (basic or body) or any(k in binding for k in ("capture_name", "profile_version", "prefix")):
+                raise ValueError("a default credential binds its username or secret into the request body, "
+                                 "or the pair as HTTP Basic (credential_field basic, header Authorization)")
         elif "saved_login" in binding:
             if not re.fullmatch(SAVED_LOGIN_PATTERN, str(binding["saved_login"])):
                 raise ValueError("saved_login must be a saved login's profile id")

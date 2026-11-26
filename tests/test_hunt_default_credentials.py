@@ -93,7 +93,7 @@ def test_the_exchange_contract_accepts_only_a_body_binding_of_a_reference():
     validate_exchange_input(login())
     bad = login()
     bad["request_bindings"][0] = {"default_credential": "dc-01", "credential_field": "username", "header": "X-User"}
-    with pytest.raises(ValueError, match="request body only"):
+    with pytest.raises(ValueError, match="into the request body"):
         validate_exchange_input(bad)
     bad = login()
     bad["request_bindings"][0]["default_credential"] = "admin:admin"
@@ -103,6 +103,60 @@ def test_the_exchange_contract_accepts_only_a_body_binding_of_a_reference():
     bad["request_bindings"][0]["saved_login"] = "00000000-0000-4000-8000-000000000000"
     with pytest.raises(ValueError, match="one source"):
         validate_exchange_input(bad)
+
+
+def basic(pair="dc-15", **extra):
+    return {"method": "GET", "path": "/manager/html", "follow_redirects": False, "request_bindings": [
+        {"default_credential": pair, "credential_field": "basic", "header": "Authorization"}], **extra}
+
+
+def test_http_basic_sends_one_pair_in_the_authorization_header_of_a_get():
+    import base64
+    validate_exchange_input(basic())
+    assert dc.validate_request_shape(basic()) == "dc-15" and dc.is_basic_request(basic())
+    assert not dc.is_basic_request(login())
+    assert base64.b64decode(dc.value_of("dc-15", "basic").split(" ", 1)[1]) == b"tomcat:tomcat"
+    shape = dc.request_shape(basic(), "http://t.test/manager/html")
+    assert shape == {"login_url": "http://t.test/manager/html", "body_kind": "basic", "body": {},
+                     "user_pointer": None, "secret_pointer": None, "replayable": True}
+    assert require_http_request_authority(basic(), {"active_testing": True}) is False
+
+
+@pytest.mark.parametrize("values, message", [
+    (basic(method="POST", json_body={"a": 1}), "only in a GET"),
+    (basic(headers={"X-Forwarded-For": "127.0.0.1"}), "no body and no other header"),
+    (basic(as_principal="primary"), "no other identity"),
+    ({**basic(), "request_bindings": [{"default_credential": "dc-15", "credential_field": "basic",
+                                      "header": "X-Api-Key"}]}, "Authorization header"),
+    ({**basic(), "request_bindings": basic()["request_bindings"] + [
+        {"default_credential": "dc-15", "credential_field": "basic", "header": "Authorization"}]},
+     "Authorization header"),
+])
+def test_other_http_basic_shapes_are_refused(values, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        dc.validate_request_shape(values)
+
+
+def test_the_exchange_contract_binds_http_basic_to_the_authorization_header_only():
+    bad = basic()
+    bad["request_bindings"][0]["header"] = "Cookie"
+    with pytest.raises(ValueError, match="HTTP Basic"):
+        validate_exchange_input(bad)
+    bad = basic()
+    bad["request_bindings"][0]["prefix"] = "Bearer "
+    with pytest.raises(ValueError, match="HTTP Basic"):
+        validate_exchange_input(bad)
+
+
+def test_http_basic_verdicts():
+    def answer(status, body=b"", **kw):
+        return dc.classify_response(status=status, headers=kw.get("headers") or {}, cookie_names=[],
+                                    body=body, location=None, login_path="/manager/html", basic=True)
+    assert answer(401) == "rejected" and answer(403) == "rejected"
+    assert answer(200, b"<html>Tomcat Web Application Manager</html>") == "accepted"
+    assert answer(302) == "accepted"
+    assert answer(429) == "rate_limited" and answer(200, headers={"Retry-After": "5"}) == "rate_limited"
+    assert answer(500) == "unclear" and answer(404) == "unclear"
 
 
 def test_an_attempt_is_a_login_not_a_state_changing_write():
