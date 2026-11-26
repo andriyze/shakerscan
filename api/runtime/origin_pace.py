@@ -9,7 +9,8 @@ bucket per target origin (scheme, host and port), kept in the workers' shared Re
 worker, every Hunt and every sender on that origin draw from it.
 
 * The rate is the Hunt wire rate (``hunt.budget_pace.wire_requests_per_second``, the rate the
-  Hunt budget profiles are paced on), with one burst allowance equal to that per-second rate.
+  Hunt budget profiles are paced on). Requests start at least ``1/rate`` apart, so no second at
+  the target holds more than ``rate`` of them.
 * A request is never dropped: a sender waits until its token comes due (GCRA reservation: the
   bucket hands each caller the time its request may start, computed atomically in Redis on the
   Redis clock).
@@ -81,7 +82,10 @@ class OriginPace:
 
     def _reserve(self, origin: str, requests: int) -> float:
         cost = max(1, int(requests)) / self.rate
-        burst = 1.0  # one second of the rate: a burst allowance equal to the per-second rate
+        # No burst tolerance: requests start at least 1/rate apart, so any one second at the target
+        # holds at most ``rate`` of them. (A burst allowance of one second of the rate let a burst
+        # plus that second's refill, twice the rate, into one second: measured 18/s at 10.)
+        burst = 0.0
         if self.redis is not None:
             try:
                 raw = self.redis.eval(_RESERVE, 1, KEY.format(origin=origin), repr(cost), repr(burst))
