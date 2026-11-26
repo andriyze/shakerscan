@@ -151,6 +151,42 @@ class Refused(Exception):
     """A check the server refused; it is skipped and named."""
 
 
+# Requests one engine call of each kind sends to the target, as the wire pace charges them: an
+# http.request is one; a request.verify check its usual run (baseline, repeat, control and the
+# check's probes; measured 3-20). Long verifiers and templates run at their own tool rates.
+_WIRE_COST = {"http.request": 1, "candidate.verify": 3, "authz.verify": 6}
+_CHECK_COST = {"exposure": 3, "unauthenticated_api": 3, "directory_listing": 3, "security_headers": 2,
+               "cors": 6, "host_header_injection": 6, "sql_injection": 12, "nosql_injection": 10,
+               "ldap_injection": 6, "rate_limit": 13, "graphql": 10, "command_injection": 14,
+               "path_traversal": 8, "template_injection": 6, "ssrf": 6, "xxe": 6, "open_redirect": 6,
+               "crlf_injection": 6}
+
+
+class WirePace:
+    """The engine's own calls of one Hunt (discovery probes and the sweep) start no faster than
+    ``rate`` target requests a second, whatever their concurrency: a call waits until the
+    requests it will send fit. ``rate`` is the fastest wire rate any Hunt executor is held to."""
+
+    def __init__(self, rate: float) -> None:
+        self.rate = max(1.0, float(rate))
+        self._next = 0.0
+        self._lock = asyncio.Lock()
+
+    async def take(self, requests: int) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + max(1, int(requests)) / self.rate
+        if start > now:
+            await asyncio.sleep(start - now)
+
+
+def wire_cost(capability: str, values: Mapping[str, Any]) -> int:
+    if capability == "request.verify":
+        return _CHECK_COST.get(str(values.get("check") or ""), 10)
+    return _WIRE_COST.get(capability, 0)
+
+
 def sweep_key(*parts: str) -> str:
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:20]
     return f"{KEY_PREFIX}:{parts[0]}:{digest}"
@@ -279,7 +315,8 @@ class Sweep:
     """
 
     def __init__(self, *, call: Call, create_candidate: CreateCandidate, state: dict[str, Any],
-                 live: Callable[[], Awaitable[bool]]) -> None:
+                 live: Callable[[], Awaitable[bool]], pace: WirePace | None = None) -> None:
+        self._pace = pace
         self._call = call
         self._create = create_candidate
         self.state = state
@@ -342,6 +379,8 @@ class Sweep:
             if not await self._live():
                 raise asyncio.CancelledError()
             try:
+                if self._pace is not None and wire_cost(capability, values):
+                    await self._pace.take(wire_cost(capability, values))
                 result = await self._call(capability, values, key)
             except asyncio.CancelledError:
                 raise
@@ -995,5 +1034,5 @@ def _two_principals(run: Mapping[str, Any]) -> bool:
     return {"primary", "secondary"} <= slots
 
 
-__all__ = ["KEY_PREFIX", "Refused", "Sweep", "concrete", "exposure_signal", "login_form", "product_candidate",
+__all__ = ["KEY_PREFIX", "Refused", "Sweep", "WirePace", "wire_cost", "concrete", "exposure_signal", "login_form", "product_candidate",
            "sweep_key", "template_matches"]

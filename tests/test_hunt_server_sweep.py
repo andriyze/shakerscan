@@ -10,6 +10,13 @@ from api.hunt import auto_discovery, server_sweep
 from api.hunt.server_sweep import Refused, Sweep, concrete, exposure_signal, login_form, sweep_key
 
 @pytest.fixture(autouse=True)
+def _unpaced(monkeypatch):
+    # The wire pace is tested on its own; these tests check what is sent, not how fast.
+    from api.hunt import budget_pace
+    monkeypatch.setattr(budget_pace, "wire_requests_per_second", lambda: 100_000)
+
+
+@pytest.fixture(autouse=True)
 def _no_pacing(monkeypatch):
     monkeypatch.setattr(server_sweep, "DEFAULT_CREDENTIAL_PACE_SECONDS", 0)
 
@@ -477,3 +484,22 @@ def test_one_application_under_several_mounts_is_tested_once():
                 .run(_run(), report))
     tested = sorted({v["path"].split("?")[0] for cap, v, _ in engine.calls if cap in {"sqli.verify", "xss.verify"}})
     assert tested == ["/a/app.php", "/other/app.php"]
+
+
+def test_the_wire_pace_holds_the_engines_own_calls_to_its_rate():
+    from api.hunt.server_sweep import WirePace, wire_cost
+    import time as clock
+
+    pace = WirePace(20)
+
+    async def burst():
+        started = clock.monotonic()
+        await asyncio.gather(*(pace.take(1) for _ in range(10)))
+        check = clock.monotonic() - started
+        await pace.take(wire_cost("request.verify", {"check": "sql_injection"}))  # starts at 10/20 s
+        await pace.take(1)  # after the check's twelve requests: (10 + 12) / 20 s
+        return check, clock.monotonic() - started
+
+    check, elapsed = asyncio.run(burst())
+    assert check >= 0.40 and elapsed >= 1.05
+    assert wire_cost("http.request", {}) == 1 and wire_cost("sqli.verify", {}) == 0
