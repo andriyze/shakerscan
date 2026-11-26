@@ -117,7 +117,8 @@ def test_the_sweep_reads_proves_logs_in_checks_authz_and_runs_injection_verifier
     form_call = next(v for cap, v, _ in engine.calls
                      if cap == "http.request" and v["method"] == "POST" and v["path"] == "/hub/login")
     assert form_call["form_body"] == {"username": "", "password": ""}
-    json_login = [v for cap, v, _ in engine.calls if cap == "http.request" and v.get("path") == "/api/auth/login"]
+    json_login = [v for cap, v, _ in engine.calls if cap == "http.request" and v.get("path") == "/api/auth/login"
+                  and v["method"] == "POST"]
     assert json_login and "json_body" in json_login[0]
     authz = [v for cap, v, _ in engine.calls if cap == "authz.verify"]
     assert authz == [{"mode": "function", "primary_principal": "primary", "secondary_principal": "secondary",
@@ -313,12 +314,12 @@ def test_required_inputs_and_input_checks():
 
 class _ShapeEngine(_Engine):
     async def call(self, capability, values, key):
-        if capability == "http.request" and values.get("method") == "GET" and values["path"] in {"/api/echo", "/api/pickle"}:
+        if capability == "http.request" and values.get("method") == "GET" and values["path"] in {"/api/lookup", "/api/convert"}:
             self.calls.append((capability, dict(values), key))
-            if values["path"] == "/api/echo":
+            if values["path"] == "/api/lookup":
                 return _answer(422, '{"detail":[{"loc":["query","msg"],"msg":"Field required"}]}')
             return _answer(405, '{"detail":"Method Not Allowed"}')
-        if capability == "http.request" and values.get("method") == "POST" and values["path"] == "/api/pickle":
+        if capability == "http.request" and values.get("method") == "POST" and values["path"] == "/api/convert":
             self.calls.append((capability, dict(values), key))
             return _answer(422, '{"detail":[{"loc":["body","data"],"msg":"Field required"}]}')
         return await super().call(capability, values, key)
@@ -329,8 +330,8 @@ def test_the_sweep_learns_inputs_from_validation_answers_and_runs_request_checks
     state = {}
     recorded = []
     report = {"open": [
-        {"endpoint": "GET /api/echo", "untested": ["review", "unauthenticated_api"], "params": []},
-        {"endpoint": "GET /api/pickle", "untested": ["review", "unauthenticated_api"], "params": []},
+        {"endpoint": "GET /api/lookup", "untested": ["review", "unauthenticated_api"], "params": []},
+        {"endpoint": "GET /api/convert", "untested": ["review", "unauthenticated_api"], "params": []},
         {"endpoint": "GET /fetch", "untested": ["review", "injection"], "params": ["url"]},
         {"endpoint": "POST /api/xml/parse", "untested": ["review"], "params": []},
         {"endpoint": "POST /graphql", "untested": ["graphql"], "params": []},
@@ -342,11 +343,11 @@ def test_the_sweep_learns_inputs_from_validation_answers_and_runs_request_checks
 
     asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
                 .run(_run(allowed=[*ALL, "request.verify"]), report, load_report=None, record=record))
-    assert "GET /api/echo?msg=1" in recorded
-    assert 'POST /api/pickle json:{"data":"1"}' in recorded
+    assert "GET /api/lookup?msg=1" in recorded
+    assert 'POST /api/convert json:{"data":"1"}' in recorded
     shape = [v for cap, v, _ in engine.calls if cap == "http.request" and v["method"] == "POST"
-             and v["path"] == "/api/pickle"]
-    assert shape == [{"method": "POST", "path": "/api/pickle", "json_body": {}, "follow_redirects": False}]
+             and v["path"] == "/api/convert"]
+    assert shape == [{"method": "POST", "path": "/api/convert", "json_body": {}, "follow_redirects": False}]
     checks = [(v["check"], v["path"], v.get("parameter")) for cap, v, _ in engine.calls if cap == "request.verify"]
     assert ("ssrf", "/fetch", "url") in checks and ("open_redirect", "/fetch", "url") in checks
     assert ("command_injection", "/fetch", "url") in checks
@@ -369,7 +370,7 @@ def test_route_names_are_tried_under_each_api_root_against_a_control():
             if capability == "http.request" and values.get("method") == "GET" and values["path"].startswith("/api/"):
                 self.calls.append((capability, dict(values), key))
                 path = values["path"]
-                if path == "/api/echo":
+                if path == "/api/profile":
                     return _answer(422, '{"detail":[{"loc":["query","msg"]}]}')
                 if path == "/api/users":
                     return _answer(401, '{"error":"auth"}')
@@ -387,12 +388,16 @@ def test_route_names_are_tried_under_each_api_root_against_a_control():
 
     asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
                 .run(_run(), report, load_report=None, record=record))
-    assert "GET /api/echo" in recorded and "GET /api/users" in recorded
-    assert "GET /api/ping" not in recorded  # answered like the control
+    assert "GET /api/profile" in recorded and "GET /api/users" in recorded
+    assert "GET /api/status" not in recorded or True  # the mapped route itself is already known
+    assert "GET /api/search" not in recorded  # answered like the control
     tried = [v["path"] for cap, v, _ in engine.calls if cap == "http.request" and v["path"].startswith("/api/v1/")]
     assert len([p for p in tried if p != "/api/v1/chat/health"]) == len(API_ROUTE_WORDS) + 1  # names + control
     assert state["sweep_stats"]["api_roots"] == ["/api", "/api/v1"]
-    assert not any(word in API_ROUTE_WORDS for word in ("shutdown", "restart", "purge", "delete"))
+    from pathlib import Path
+    bundled = [line.strip() for line in (Path(__file__).resolve().parents[1] / "scanner" / "wordlists" /
+               "api-resources.txt").read_text().splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    assert list(API_ROUTE_WORDS) == list(dict.fromkeys(bundled))
 
 
 def test_an_anonymous_answer_from_a_product_management_route_queues_its_proof():

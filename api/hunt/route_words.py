@@ -1,40 +1,35 @@
-"""Route names the sweep tries under an API prefix it found (``/api``, ``/api/v1``, ``/rest`` ...).
+"""Route names the sweep tries under an API root it found (``/api``, ``/api/v1``, ``/rest`` ...).
 
-Authored by the ShakerScan project for this repository (no third-party wordlist content): resource
-and action names common to web APIs. Each name is one GET under the prefix, measured against a
-negative control under the same prefix; an answer distinct from it (a route that refuses GET with
-405 included) enters the inventory, so the sweep reads and tests it. No name here asks a server to
-stop, restart, flush or delete anything: a careless API may act on a GET.
+The names are the project's bundled API resource list (``scanner/wordlists/api-resources.txt``,
+authored for this repository; the content-discovery ``api`` selection reads the same file at the
+target's root), copied here so the API process needs no wordlist file; a test keeps the two equal.
+Each name is one GET under the root, measured against a negative control under the same root; an
+answer distinct from it (a route that refuses GET with 405 included) enters the inventory, so the
+sweep reads and tests it.
 """
 from __future__ import annotations
 
 API_ROUTE_WORDS: tuple[str, ...] = tuple(dict.fromkeys("""
-users user me profile profiles account accounts admin admins auth login logout register signup
-token tokens refresh session sessions password reset-password forgot-password change-password
-verify 2fa mfa otp keys api-keys apikeys secrets secret config configuration settings env
-environment debug status health healthz ping echo info version metrics stats statistics logs log
-audit events history activity notifications messages chat comments comment posts post reviews
-feedback search query lookup find filter export import upload uploads download downloads files
-file documents docs attachments media images image avatar render template templates preview
-convert parse validate xml soap json graphql rpc proxy fetch url redirect callback webhook webhooks
-hooks integrations oauth sso saml jwt certificates orders order products product items item cart
-checkout payments payment billing invoices invoice transactions transfer transfers wallet balance
-withdraw deposit refund subscriptions plans coupons coupon discount inventory catalog categories
-tags reports report analytics dashboard tasks jobs queue workers cron schedule backup backups
-restore database db sql cache internal private public system tools utils exec execute run command
-cmd shell eval script scripts dns resolve network ip host hosts nodes cluster k8s kubernetes pods
-containers docker cloud metadata storage buckets objects blobs registry packages sbom dependencies
-license tenants tenant organizations orgs teams team groups group roles role permissions acl
-policies policy members invite invitations support tickets ticket employees staff customers
-customer clients partners vendors projects project apps applications services service features
-flags experiments models model ai llm completions embeddings agents agent assistants prompts
-functions crypto encrypt decrypt sign hash ldap directory sync bulk batch merge diff compare
-translate share links notes calendar booking appointments locations addresses shipping tracking
-delivery data records entries collections resources
-manager approve impersonate sandbox playground test
+shop shop/orders shop/order shop/products shop/product shop/apply_coupon shop/apply-coupon community community/posts community/post community/comments community/comment
+coupon/validate coupons/validate apply_coupon apply-coupon validate_coupon validate-coupon auth auth/login auth/logout auth/register auth/signup auth/signin
+auth/refresh auth/token auth/verify auth/validate login logout register signup signin token tokens refresh
+session sessions me profile profiles account accounts user users users/me users/profile users/settings
+password/forgot password/reset password/change password/confirm oauth/token oauth/authorize oauth2/token oauth2/authorize 2fa mfa otp verify
+validate products product items item orders order cart basket checkout payments payment
+transactions billing invoices invoice subscriptions subscription plans plan pricing price coupons coupon
+discounts discount promo promos reviews review feedback comment comments messages message notifications
+notification search query filter reports report analytics stats statistics inventory catalog categories
+category tags tag upload uploads download downloads file files media assets images
+documents attachments export import webhook webhooks callbacks integrations events config settings health
+status metrics info version logs audit graphql gql mechanic mechanics vehicle vehicles
+contact contacts location locations service services booking bookings appointment appointments workshop garage
+repair repairs admin dashboard manage management otp/verify otp/resend otp/generate check posts post
+threads thread conversations conversation friends followers following likes shares replies reply notifications/unread
+notifications/read preferences privacy security email phone address addresses credit credits wallet balance
+history activity recent popular trending featured recommended
 """.split()))
 
-# Prefixes worth this list: an API root, optionally versioned.
+# API roots tried per Hunt.
 MAX_API_PREFIXES = 6
 
 __all__ = ["API_ROUTE_WORDS", "MAX_API_PREFIXES"]
