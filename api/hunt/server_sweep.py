@@ -59,6 +59,13 @@ MAX_SCRIPTS = 40
 # Rounds of read-record-test; each round only tests what earlier rounds did not.
 MAX_ROUNDS = 8
 DEFAULT_CREDENTIAL_PACE_SECONDS = 2.2
+# A product-template call is a long action. While the Hunt's long-action slots are all taken (the
+# planner's scanners, the injection verifiers), admission refuses it: measured Hunts had 23 and 30
+# such refusals, one Hunt's every state-changing check among them. The call waits for a slot
+# instead: admission says retry after 60 s, and a verifier holds a slot for up to about 20 minutes.
+LONG_SLOT_RETRY_SECONDS = 30.0
+PRODUCT_SLOT_WAIT_SECONDS = 1_800.0
+_LONG_SLOTS_TAKEN = re.compile(r"long actions in flight", re.I)
 DEFAULT_PAIR_IDS = tuple(f"dc-{index:02d}" for index in range(1, 21))
 _SECRET_TEXT = re.compile(
     r"\[withheld:\d+\]|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|"
@@ -199,19 +206,29 @@ class Sweep:
         if len(notes) < 40 and text not in notes:
             notes.append(text[:300])
 
-    async def _safe(self, capability: str, values: Mapping[str, Any], key: str) -> Any:
-        if not await self._live():
-            raise asyncio.CancelledError()
-        try:
-            result = await self._call(capability, values, key)
-        except asyncio.CancelledError:
-            raise
-        except Refused as exc:
-            self._count(f"{capability}:refused")
-            self._note(f"{capability}: {exc}")
-            return None
-        self._count(capability)
-        return result
+    async def _safe(self, capability: str, values: Mapping[str, Any], key: str, *,
+                    slot_wait_seconds: float = 0) -> Any:
+        """One capability call; a refusal is counted and named. With ``slot_wait_seconds``, a
+        refusal because the Hunt's long-action slots are all taken is retried (same key) once a
+        slot may have settled, for at most that long."""
+        waited = 0.0
+        while True:
+            if not await self._live():
+                raise asyncio.CancelledError()
+            try:
+                result = await self._call(capability, values, key)
+            except asyncio.CancelledError:
+                raise
+            except Refused as exc:
+                if waited < slot_wait_seconds and _LONG_SLOTS_TAKEN.search(str(exc)):
+                    await asyncio.sleep(LONG_SLOT_RETRY_SECONDS)
+                    waited += LONG_SLOT_RETRY_SECONDS
+                    continue
+                self._count(f"{capability}:refused")
+                self._note(f"{capability}: {exc}")
+                return None
+            self._count(capability)
+            return result
 
     async def _candidate_and_verify(self, values: Mapping[str, Any], *, verify: bool = True) -> None:
         try:
@@ -420,7 +437,8 @@ class Sweep:
                     if base != "/":
                         values["path"] = base
                     result = await self._safe("templates.scan", values,
-                                              sweep_key("product", product, checks, base, str(window)))
+                                              sweep_key("product", product, checks, base, str(window)),
+                                              slot_wait_seconds=PRODUCT_SLOT_WAIT_SECONDS)
                     action = _action_id(result)
                     for match in template_matches(result):
                         candidate = product_candidate(product, checks, match, action)
