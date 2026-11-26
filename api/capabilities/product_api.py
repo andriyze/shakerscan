@@ -1,7 +1,8 @@
 """Management APIs of self-hosted products that must not answer an anonymous caller.
 
-Each entry names a product, the routes of its management or data API, and what one of its answers
-carries (JSON keys that product's API returns). ``request.verify`` check ``unauthenticated_api``
+Each entry names a product, the routes of its management or data API as that product's own API
+documentation gives them, and what one of its answers carries (JSON keys that product's API
+returns). ``request.verify`` check ``unauthenticated_api``
 proves an entry: an anonymous GET of such a route answered with the product's data twice, while a
 sibling route that cannot exist was not (``capabilities/request_verify.py``). Matching a route here
 proves nothing by itself; it only says which answer would show the product's data.
@@ -32,7 +33,7 @@ PRODUCT_APIS: tuple[ProductApi, ...] = (
          r'"(?:experiments|experiment_id|registered_models|runs|lifecycle_stage|artifact_location)"\s*:'),
     _api("ComfyUI", r"^/(?:api/)?(?:system_stats|object_info|queue|history)$",
          r'"(?:system|devices|queue_running|queue_pending|comfyui_version|python_version|input|output_node)"\s*:'),
-    _api("Ollama", r"^/(?:ollama/)?api/(?:tags|ps)$", r'"models"\s*:\s*\['),
+    _api("Ollama", r"^/api/(?:tags|ps)$", r'"models"\s*:\s*\['),
     _api("Langflow", r"^/api/v1/(?:flows/?|all|users/whoami)$",
          r'"(?:flows|is_superuser|folder_id|user_id|endpoint_name)"\s*:'),
     _api("Jenkins", r"^(?:/jenkins)?/(?:(?:asynchPeople|people|queue|computer|whoAmI)/)?api/json$",
@@ -41,7 +42,7 @@ PRODUCT_APIS: tuple[ProductApi, ...] = (
          r'"(?:Containers|ContainersRunning|KernelVersion|RepoTags|Image|ImageID)"\s*:'),
     _api("Kubelet", r"^/(?:pods|runningpods/?|configz|stats/summary|spec/?)$",
          r'"(?:kind"\s*:\s*"PodList|kubeletconfig|num_cores|machine_id|podRef)|"(?:node|pods)"\s*:\s*[\[{]'),
-    _api("Kubernetes API", r"^(?:/k8s/clusters/[^/]+)?/api/v1/(?:namespaces|secrets|pods|configmaps)/?$",
+    _api("Kubernetes API", r"^/api/v1/(?:namespaces|secrets|pods|configmaps)/?$",
          r'"kind"\s*:\s*"(?:NamespaceList|SecretList|PodList|ConfigMapList)"'),
     _api("Container registry", r"^/v2/(?:_catalog|[a-z0-9._/-]+/tags/list)$", r'"(?:repositories|tags)"\s*:\s*\['),
     _api("Spring Boot Actuator", r"^/actuator/(?:env|configprops|mappings|beans|loggers|threaddump)$",

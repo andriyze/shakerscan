@@ -81,18 +81,16 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from ..capabilities.exposure_probe import SENSITIVE_SEED_PATHS, THOROUGH_SEED_PATHS
 # Secret-bearing files of the same kind as the Scan's exposure seeds: cloud, cluster, container
-# and database credentials, infrastructure state, CI and build manifests, private keys, logs and
-# the configuration files of AI coding assistants (server tokens).
+# and database credentials, framework secrets, infrastructure state, CI and build manifests,
+# private keys, shell history and logs. Each is a commonly published exposure check (public
+# content-discovery wordlists and exposure template collections), not any one application's file.
 EXTRA_EXPOSURE_PATHS: tuple[str, ...] = (
-    "/.aws/config", "/credentials", "/credentials.json", "/.docker/config.json", "/.kube/config",
-    "/kubeconfig", "/.pgpass", "/.my.cnf", "/secrets.yml", "/secrets.yaml", "/config/secrets.yml",
-    "/secrets.json", "/terraform.tfvars", "/terraform.tfstate", "/.ssh/id_rsa", "/id_ed25519",
-    "/id_dsa", "/package.json", "/composer.json", "/composer.lock", "/docker-compose.yml",
-    "/Dockerfile", "/.gitlab-ci.yml", "/.travis.yml", "/.bash_history", "/error_log", "/debug.log",
-    "/logs/", "/backup/", "/backups/", "/.vscode/settings.json", "/.vscode/mcp.json", "/.mcp.json",
-    "/.cursor/mcp.json", "/.claude/settings.json", "/.claude/settings.local.json",
-    "/.claude/.credentials.json", "/sbom.json", "/bom.json", "/.env.example", "/.env.staging",
-    "/config/database.yml", "/config/master.key", "/storage/logs/laravel.log", "/wp-config.php~",
+    "/.aws/config", "/.docker/config.json", "/.kube/config", "/.pgpass", "/.my.cnf",
+    "/config/secrets.yml", "/config/database.yml", "/config/master.key", "/terraform.tfvars",
+    "/terraform.tfstate", "/.ssh/id_rsa", "/id_dsa", "/id_ed25519", "/package.json", "/composer.json",
+    "/composer.lock", "/docker-compose.yml", "/Dockerfile", "/.gitlab-ci.yml", "/.travis.yml",
+    "/.bash_history", "/error_log", "/debug.log", "/logs/", "/backup/", "/backups/",
+    "/.vscode/settings.json", "/.env.example", "/storage/logs/laravel.log", "/wp-config.php~",
 )
 EXPOSURE_PATHS: tuple[str, ...] = tuple(dict.fromkeys(
     (*SENSITIVE_SEED_PATHS, *THOROUGH_SEED_PATHS, *EXTRA_EXPOSURE_PATHS)))
