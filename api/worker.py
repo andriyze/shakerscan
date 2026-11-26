@@ -22728,13 +22728,36 @@ def _mark_work_started(redis_client: Any, job_data: dict[str, Any]) -> None:
         print(f"[worker] work start metadata error: {type(exc).__name__}", flush=True)
 
 
+def _record_origin_pace(redis_client: Any, job: dict[str, Any], pace: Any) -> None:
+    """Write the job's wait for its target-origin pace beside its other timings."""
+    if redis_client is None or not pace.requests:
+        return
+    try:
+        redis_client.hset(f"job:{job.get('job_id')}", mapping={
+            "origin_pace_wait_ms": str(int(pace.waited_seconds * 1000)),
+            "origin_pace_requests": str(pace.requests),
+            "origin_pace_rate": str(pace.rate),
+        })
+    except Exception:  # noqa: BLE001 - timings never fail a job
+        pass
+
+
 def _leased_work(job_data: dict[str, Any], redis_client: Any = None) -> Any:
     """The work one leased job runs. On the agent-tool worker a long action first takes one of
     the long slots, so a short call never waits behind long actions; it waits inside the leased
     execution, under the lease's heartbeat (hunt/agent_job_concurrency.py)."""
     async def work(job: dict[str, Any]) -> Any:
         _mark_work_started(redis_client, job)
-        return await process_job(job)
+        if not job.get("hunt_id"):
+            return await process_job(job)
+        # Hunt work shares one request rate per target origin with every other sender there.
+        from hunt.budget_pace import wire_requests_per_second
+        from runtime import origin_pace
+        with origin_pace.activate(redis_client, wire_requests_per_second()) as pace:
+            try:
+                return await process_job(job)
+            finally:
+                _record_origin_pace(redis_client, job, pace)
 
     if AGENT_TOOL_ONLY_WORKER:
         from hunt.agent_job_concurrency import in_lane

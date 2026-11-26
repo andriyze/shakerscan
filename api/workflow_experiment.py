@@ -15,6 +15,11 @@ except ModuleNotFoundError:  # package import layout
 
 import httpx
 
+try:
+    from runtime import origin_pace
+except ModuleNotFoundError:  # package import layout
+    from api.runtime import origin_pace
+
 from http_experiment import (
     ALLOWED_METHODS,
     FORBIDDEN_HEADERS,
@@ -1511,6 +1516,7 @@ async def execute_workflow(
                     request = client.build_request(step["method"], url, params=query, headers=headers, cookies=cookies, json=json_body, data=form_body)
                     request_count += 1
                     state_changing_request_count += step["method"] in {"POST", "PUT", "PATCH", "DELETE"}
+                    await origin_pace.take(str(request.url))  # the Hunt's aggregate rate at this origin
                     request_started = time.perf_counter()
                     http_response = await client.send(request, stream=True)
                     try:

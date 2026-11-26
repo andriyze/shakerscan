@@ -13,6 +13,7 @@ import aiohttp
 
 from .models import TargetBinding
 from .target_bound_socket import FrozenTargetSocketFactory
+from . import origin_pace
 from .request_replay_executor import (
     MAX_REPLAY_RESPONSE_BODY_BYTES,
     ReplayExecutionError,
@@ -124,6 +125,8 @@ class PinnedAiohttpReplayTransport:
     ) -> ReplayTransportResult:
         if follow_redirects:
             raise ReplayExecutionError("exact replay transport cannot follow redirects")
+        # The Hunt's aggregate rate at this origin (origin_pace; a no-op outside Hunt work).
+        await origin_pace.take(request.url)
         factory = _pinned_factory(request, target)
         attempted_addresses: list[str] = []
         connected_addresses: list[str] = []

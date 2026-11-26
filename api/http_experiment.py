@@ -13,6 +13,11 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 try:
+    from runtime import origin_pace
+except ModuleNotFoundError:  # package import layout
+    from api.runtime import origin_pace
+
+try:
     from runtime.archive_body_masking import (
         CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_masked_text,
         bounded_public_url, decode_cut, is_withheld_key, mask_before_cut, mask_body_text,
@@ -808,6 +813,7 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                     data=rendered_form if rendered_form is not None else None,
                 )
                 attempted_requests += 1
+                await origin_pace.take(str(request.url))  # the Hunt's aggregate rate at this origin
                 response = await client.send(request, stream=True)
                 try:
                     body, lookahead, ended = await read_capped_body(response)
