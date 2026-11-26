@@ -60,7 +60,7 @@ SIGNED_IN_WORDLISTS = ("corporate", "api")
 MAX_SIGNED_IN_CRAWLS = 2
 # Every probe path is sent at most once (probe_paths(): about 300); this is the work budget.
 MAX_PROBES = 400
-PROBE_CONCURRENCY = 4
+PROBE_CONCURRENCY = 8
 # A probe answer within this share of the control's length (same status) is the control's page.
 CONTROL_LENGTH_TOLERANCE = 0.05
 # Discovery and the sweep never outlive the Hunt's own wall; a Hunt without one gets this.
@@ -397,7 +397,8 @@ def present(answer: Mapping[str, Any] | None, control: Mapping[str, Any] | None)
     if not answer:
         return False
     status = int(answer["status"])
-    if status in {404, 410} or status >= 500 or status == 400 and not answer.get("text"):
+    # A rate-limit answer (429) says nothing about the path.
+    if status in {404, 410, 429} or status >= 500 or status == 400 and not answer.get("text"):
         return False
     if 300 <= status < 400:
         # A redirect to a sign-in or the same place every absent path goes is not a route.
@@ -679,6 +680,18 @@ class DiscoveryRunner:
                 answers[path] = None
             return answers[path]
 
+        gate = asyncio.Semaphore(PROBE_CONCURRENCY)
+
+        async def prefetch(paths: Sequence[str]) -> None:
+            # Each engine call waits about two seconds end to end, so probes go several at once;
+            # the loops below then read the answers in order.
+            async def one(path: str) -> None:
+                async with gate:
+                    await probe(path)
+            await asyncio.gather(*(one(path) for path in dict.fromkeys(paths) if path not in answers))
+
+        await prefetch([*SPEC_PATHS, *HINT_PATHS, *GRAPHQL_PATHS,
+                        *(path for product in PRODUCTS for path in product.identity)])
         for path in (*SPEC_PATHS, *HINT_PATHS):
             answer = await probe(path)
             if present(answer, control):
@@ -701,12 +714,12 @@ class DiscoveryRunner:
                     hit = True
             if hit and product.key not in products:
                 products.append(product.key)
+        await prefetch([path for key in products for path in _PRODUCT_BY_KEY[key].routes])
         for key in products:
             for path in _PRODUCT_BY_KEY[key].routes:
                 answer = await probe(path)
                 if present(answer, control):
                     found.append(f"GET {path}")
-        gate = asyncio.Semaphore(PROBE_CONCURRENCY)
 
         async def exposure(path: str) -> None:
             async with gate:

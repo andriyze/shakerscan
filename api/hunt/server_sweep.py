@@ -68,14 +68,16 @@ KEY_PREFIX = "auto-sweep"
 # Engine checks at once: leaves the planner a long slot (agent_job_concurrency gives a Hunt two
 # long slots per agent-tool worker).
 LONG_CONCURRENCY = 2
-SHORT_CONCURRENCY = 3
+# Each engine call waits about two seconds end to end (measured: 80 calls a minute at three at
+# once), so short calls go several at once.
+SHORT_CONCURRENCY = 8
 MAX_READS = 800
 MAX_INJECTION_TARGETS = 400
 MAX_FIELDS_PER_BODY = 4
 MAX_AUTHZ_ROUTES = 50
 # request.verify calls one sweep may queue (measured: about 3-40 requests and 1-20 s each).
 MAX_REQUEST_CHECKS = 1_200
-REQUEST_CONCURRENCY = 2
+REQUEST_CONCURRENCY = 4
 # CORS is usually one policy per origin: the root and a few API answers show it.
 MAX_HEADER_CHECK_ROUTES = 5
 # Routes that refuse GET (405) the sweep sends one empty JSON POST to learn their inputs.
