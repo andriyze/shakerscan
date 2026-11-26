@@ -359,3 +359,37 @@ def test_the_sweep_learns_inputs_from_validation_answers_and_runs_request_checks
     assert not any(path == "/hub/login" and check not in {"rate_limit", "ldap_injection", "nosql_injection"}
                    for check, path, _ in checks)
     assert state["sweep_stats"]["request_checks_done"] == state["sweep_stats"]["request_checks_queued"] == len(checks)
+
+
+def test_route_names_are_tried_under_each_api_root_against_a_control():
+    from api.hunt.route_words import API_ROUTE_WORDS
+
+    class Api(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and values.get("method") == "GET" and values["path"].startswith("/api/"):
+                self.calls.append((capability, dict(values), key))
+                path = values["path"]
+                if path == "/api/echo":
+                    return _answer(422, '{"detail":[{"loc":["query","msg"]}]}')
+                if path == "/api/users":
+                    return _answer(401, '{"error":"auth"}')
+                return _answer(404, '{"detail":"Not Found"}')
+            return await super().call(capability, values, key)
+
+    engine = Api()
+    state = {}
+    recorded = []
+    report = {"open": [{"endpoint": "GET /api/status", "untested": ["review"], "params": []},
+                       {"endpoint": "GET /api/v1/chat/health", "untested": ["review"], "params": []}]}
+
+    async def record(worklist):
+        recorded.extend(worklist)
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(), report, load_report=None, record=record))
+    assert "GET /api/echo" in recorded and "GET /api/users" in recorded
+    assert "GET /api/ping" not in recorded  # answered like the control
+    tried = [v["path"] for cap, v, _ in engine.calls if cap == "http.request" and v["path"].startswith("/api/v1/")]
+    assert len([p for p in tried if p != "/api/v1/chat/health"]) == len(API_ROUTE_WORDS) + 1  # names + control
+    assert state["sweep_stats"]["api_roots"] == ["/api", "/api/v1"]
+    assert not any(word in API_ROUTE_WORDS for word in ("shutdown", "restart", "purge", "delete"))
