@@ -48,7 +48,7 @@ from typing import Any
 import hashlib
 import uuid
 
-from .server_sweep import Refused, Sweep
+from .server_sweep import Refused, Sweep, WirePace
 
 # Web and API Hunts map their target; other kinds have no HTTP surface to map.
 COVERAGE_TARGET_KINDS = frozenset({"web", "api"})
@@ -525,6 +525,10 @@ class DiscoveryRunner:
                                   else _DEFAULTS.get("create_candidate"))
         self._finish = finish if finish is not None else _DEFAULTS.get("finish")
         self.state = _STATE.setdefault(self.hunt_id, {})
+        # One pace for discovery and the sweep: together they never start target requests faster
+        # than the fastest wire rate a Hunt executor is held to (budget_pace).
+        from .budget_pace import wire_requests_per_second
+        self.pace = WirePace(wire_requests_per_second())
 
     async def _call(self, capability: str, values: Mapping[str, Any], key: str) -> Any:
         try:
@@ -584,7 +588,7 @@ class DiscoveryRunner:
 
         create = self._create_candidate
         sweep = Sweep(call=call, create_candidate=lambda values: create(self.hunt_id, values),
-                      state=self.state, live=live)
+                      state=self.state, live=live, pace=self.pace)
         target_id = str(run.get("target_id") or "")
 
         async def reload() -> Mapping[str, Any] | None:
@@ -641,6 +645,7 @@ class DiscoveryRunner:
         # Content discovery and the crawl settle into the target's endpoint inventory themselves.
 
     async def _probe(self, path: str) -> dict[str, Any] | None:
+        await self.pace.take(1)
         result = await self._call("http.request", {"method": "GET", "path": path, "follow_redirects": False},
                                   _probe_key(path))
         return answer_of(result)

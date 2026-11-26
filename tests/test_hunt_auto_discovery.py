@@ -23,6 +23,13 @@ ALL = ["web.crawl", "web.content_discover", "templates.scan", "http.request", "s
 
 
 @pytest.fixture(autouse=True)
+def _unpaced(monkeypatch):
+    # The wire pace is tested on its own; these tests check what is sent, not how fast.
+    from api.hunt import budget_pace
+    monkeypatch.setattr(budget_pace, "wire_requests_per_second", lambda: 100_000)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_state():
     auto_discovery._STATE.clear()
     yield
