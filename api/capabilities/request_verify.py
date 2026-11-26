@@ -32,6 +32,10 @@ random values and a control that must stay silent:
   value and for the escaped wildcard;
 * ``jwt``: the principal's bearer token accepted with its signature altered, under ``alg: none``,
   or reproduced with a well-known secret (``jwt_forgery``);
+* ``exposure``: an anonymous GET classified by the Scan's exposure classifier
+  (``exposure_probe.classify_exposure``) into a class that proves a sensitive exposure (secret
+  material, a server autoindex, a metrics endpoint, a debug interface ...), twice, while a sibling
+  path that cannot exist is not classified the same;
 * ``unauthenticated_api``: a self-hosted product's management route (``product_api``) answered an
   anonymous GET with that product's data, twice, while a sibling route that cannot exist did not.
 
@@ -65,7 +69,7 @@ except ModuleNotFoundError:
 
 try:
     from capabilities import graphql_probe, jwt_forgery
-    from capabilities.exposure_probe import _LISTING_RE, directory_listing_links
+    from capabilities.exposure_probe import _LISTING_RE, classify_exposure, directory_listing_links
     from capabilities.sqli_proof import SQLiProofError, _mutate
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from hunt.default_credentials import classify_response
@@ -75,7 +79,7 @@ try:
     from scan.posture_findings import header_value_issues
 except ModuleNotFoundError:
     from . import graphql_probe, jwt_forgery
-    from .exposure_probe import _LISTING_RE, directory_listing_links
+    from .exposure_probe import _LISTING_RE, classify_exposure, directory_listing_links
     from .sqli_proof import SQLiProofError, _mutate
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..hunt.default_credentials import classify_response
@@ -95,7 +99,7 @@ REQUEST_VERIFY_PARSER_VERSION = "request-verify/v1"
 REQUEST_CHECKS = (
     "open_redirect", "crlf_injection", "host_header_injection", "cors", "security_headers",
     "directory_listing", "graphql", "file_upload", "rate_limit", "csrf", "ldap_injection", "jwt",
-    "unauthenticated_api",
+    "unauthenticated_api", "exposure",
 )
 # Checks that mutate one named input (``parameter``).
 FIELD_CHECKS = frozenset({
@@ -124,6 +128,7 @@ PROOF_CONTRACTS = {
     "jwt": jwt_forgery.JWT_FORGERY_CONTRACT,
     "unauthenticated_api": "request_anonymous_product_api_repeated/v1",
 }
+# ``exposure`` carries the Scan exposure class's own proof contract (exposure_signature_contract).
 MINIMUM_REQUESTS = 4
 # Reserved (RFC 6761) names: a host under one never resolves, so it can only have come from the
 # request, and following it reaches nobody.
@@ -539,6 +544,39 @@ class RequestVerifier:
             )
         return self.observation()
 
+    async def _exposure(self, baseline: ReplayTransportResult) -> dict[str, Any]:
+        parsed = urllib.parse.urlsplit(self.request.url)
+        if self.request.method != "GET":
+            return self.observation(inconclusive_reason="exposure is read with GET")
+        if self.request.auth_type != "none" or self.request.has_sensitive_material:
+            return self.observation(inconclusive_reason="the request carries an identity")
+
+        def classify(result: ReplayTransportResult) -> Any:
+            if result.error_code or result.status_code is None:
+                return None
+            return classify_exposure(path=parsed.path or "/", status=int(result.status_code),
+                                     headers=dict(result.response_headers or {}), body=result.response_body)
+
+        first = classify(baseline)
+        if first is None or not first.proves_sensitive_exposure or not first.proof_contract or self.left() < 2:
+            return self.observation(**({"exposure_class": first.exposure_class} if first else {}))
+        repeat = await self.send(self.request)
+        parent = (parsed.path or "/").rstrip("/").rsplit("/", 1)[0]
+        missing = f"{parent}/{_marker(self.seed, 'exposure:missing')}" + ("/" if parsed.path.endswith("/") else "")
+        control = await self.send(replace(self.request, url=urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, missing, "", ""))))
+        second, mirrored = classify(repeat), classify(control)
+        if (second is not None and second.exposure_class == first.exposure_class
+                and (mirrored is None or mirrored.exposure_class != first.exposure_class)):
+            return self.observation(
+                first.exposure_class, proof_contract=first.proof_contract,
+                technique="exposure_class_repeated_with_sibling_control", exposure_class=first.exposure_class,
+                matched_pattern=first.matched_pattern, exposure_severity=first.severity,
+                secret_keys=[item.get("key") for item in first.secret_evidence()][:20],
+                response_pairs=[_pair(control, baseline), _pair(control, repeat)],
+            )
+        return self.observation(exposure_class=first.exposure_class)
+
     async def _unauthenticated_api(self, baseline: ReplayTransportResult) -> dict[str, Any]:
         parsed = urllib.parse.urlsplit(self.request.url)
         api = product_api_for(parsed.path or "/")
@@ -881,7 +919,9 @@ class RequestVerifyAdapter:
             attempted += 1  # counted before it is sent: a request cut off in flight still arrived
             result = await self.transport.send(
                 request, target=self.target,
-                timeout_seconds=max(0.5, min(15.0, wall_left / max(1, budget - attempted + 1))),
+                # A check sends a handful of requests, not its whole hold: dividing the wall by the
+                # hold (48) gave each request about a second, and slow answers timed out.
+                timeout_seconds=max(0.5, min(15.0, wall_left / max(1, min(8, budget - attempted + 1)))),
                 follow_redirects=False,
             )
             results.append(result)

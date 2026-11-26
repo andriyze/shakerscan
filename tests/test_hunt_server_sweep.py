@@ -426,6 +426,7 @@ def test_a_directory_index_read_anonymously_queues_the_listing_proof():
                 .run(_run(allowed=[*ALL, "request.verify"]), REPORT))
     checks = [(v["check"], v["path"]) for cap, v, _ in engine.calls if cap == "request.verify"]
     assert ("directory_listing", "/backup/") in checks and ("directory_listing", "/.env") not in checks
+    assert ("exposure", "/.env") in checks and ("exposure", "/backup/") in checks
 
 
 def test_the_sql_tool_follows_only_where_the_quick_sql_proof_saw_the_query_break():
