@@ -121,7 +121,8 @@ def public_verification_families() -> dict[str, Any]:
         "other_families": (
             "Any other family may be recorded as a candidate with its evidence, but candidate.verify "
             "does not prove it: do not call candidate.verify for it. SQL injection and XSS in a URL "
-            "parameter or body field are proved by sqli.verify and xss.verify. An injection behind a "
+            "parameter or body field are proved by sqli.verify and xss.verify: the injection families "
+            "do have verifiers. An injection behind a "
             "sign-in, XXE, LDAP, CRLF and host header injection, open redirect, CORS, CSRF, rate "
             "limiting, file upload, GraphQL, JWT, security headers and directory listing are proved "
             "with the request.verify capability on the exact request. AI/LLM families (prompt "

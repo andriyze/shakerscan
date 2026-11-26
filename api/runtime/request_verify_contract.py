@@ -21,18 +21,15 @@ CHECKS: tuple[str, ...] = (
 HOLD: Mapping[str, int] = {"http_requests": 48, "tool_wall_seconds": 60}
 
 DESCRIPTION = (
-    "Prove one vulnerability class on one exact request with a deterministic differential: a "
-    "repeat with fresh random values and a negative control that must stay silent. A verified "
-    "result becomes a finding; anything else stays an observation. Name the request as for "
-    "http.request (method, path, query, json_body/form_body/xml_body, headers, identity) plus "
-    "check and, for an input check, parameter. Checks: command_injection, path_traversal (GET), "
-    "template_injection, xxe (xml_body), ssrf (GET, in-band loopback), nosql_injection, "
-    "ldap_injection, crlf_injection, open_redirect take parameter; host_header_injection, cors, "
-    "security_headers, directory_listing, graphql (the endpoint), jwt (as a principal with a "
-    "bearer token), csrf (a signed-in write; token_field), rate_limit (a sign-in POST; parameter "
-    "= password field) and file_upload (parameter = file field; retrieve_path with {filename}) "
-    "test the request. Needs active testing; a write method or an upload needs state-changing "
-    "permission (held as verifier writes)."
+    "Prove one vulnerability class on one exact request: a repeat with fresh random values and a "
+    "negative control that must stay silent; a verified result becomes a finding. Name the request "
+    "as for http.request plus check (and parameter for an input check). Input checks: "
+    "command_injection, path_traversal (GET), template_injection, xxe (xml_body), ssrf (GET), "
+    "nosql_injection, ldap_injection, crlf_injection, open_redirect. Request checks: "
+    "host_header_injection, cors, security_headers, directory_listing, graphql, jwt (bearer "
+    "principal), csrf (signed-in write; token_field), rate_limit (sign-in POST; parameter = "
+    "password field), file_upload (parameter = file field; retrieve_path with {filename}). Needs "
+    "active testing; writes and uploads need state-changing permission."
 )
 
 _FIELD = {"type": "string", "minLength": 1, "maxLength": 200,
