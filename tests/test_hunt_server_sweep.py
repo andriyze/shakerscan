@@ -414,6 +414,15 @@ def test_an_anonymous_answer_from_a_product_management_route_queues_its_proof():
     assert not any(check == "unauthenticated_api" and path == "/about" for check, path in checks)
 
 
+def test_a_directory_index_read_anonymously_queues_the_listing_proof():
+    engine = _Engine()
+    state = {}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(allowed=[*ALL, "request.verify"]), REPORT))
+    checks = [(v["check"], v["path"]) for cap, v, _ in engine.calls if cap == "request.verify"]
+    assert ("directory_listing", "/backup/") in checks and ("directory_listing", "/.env") not in checks
+
+
 def test_the_sql_tool_follows_only_where_the_quick_sql_proof_saw_the_query_break():
     from api.hunt.server_sweep import sql_screen_escalates
 

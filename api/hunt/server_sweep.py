@@ -477,6 +477,9 @@ class Sweep:
                     and product_api_for(path) is not None):
                 # A self-hosted product's management route answered an anonymous caller.
                 self._queue_request_check({"check": "unauthenticated_api", "method": "GET", "path": path})
+            if self.request_verify and principal is None and signal == "a directory index":
+                # The listing proof: served twice, and not for a sibling directory that does not exist.
+                self._queue_request_check({"check": "directory_listing", "method": "GET", "path": path})
             if signal and action and not (principal and signal == "account records"):
                 who = f"the {principal} principal" if principal else "an anonymous caller"
                 await self._candidate_and_verify({
