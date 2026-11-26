@@ -16,9 +16,11 @@ check never runs twice):
    and ``candidate.verify`` proves it. Needs the Hunt's state-changing permission.
 3. **Function-level authorization** (``authz.verify`` mode ``function``) on administrative routes,
    when the Hunt has a primary and a secondary principal.
-4. **Injection verifiers**: ``sqli.verify`` then ``xss.verify`` on every endpoint parameter (query
+4. **Injection verifiers**: ``xss.verify`` then ``sqli.verify`` on every endpoint parameter (query
    parameters; body fields when state-changing HTTP is allowed). They record proven findings
-   themselves.
+   themselves. They are long calls (an SQL injection verification takes minutes at its pace), so
+   they run from a queue beside the rounds: a round queues them and goes on reading and verifying
+   what the next round maps; the sweep ends when the rounds are done and the queue is drained.
 
 Only checks a deterministic verifier settles run here; everything else stays on the coverage
 report for the planner. A check the Hunt may not run (not in its capabilities, refused by the
@@ -170,6 +172,11 @@ class Sweep:
         self.seen: set[str] = set()
         self.js_done: set[str] = set()
         self.started = time.monotonic()
+        # The long-verifier queue: jobs run LONG_CONCURRENCY at a time beside the rounds.
+        self._long_gate = asyncio.Semaphore(LONG_CONCURRENCY)
+        self._long_jobs: set[asyncio.Task] = set()
+        self.injection_queued = 0
+        self.injection_done = 0
 
     def _count(self, name: str) -> None:
         self.counts[name] = self.counts.get(name, 0) + 1
@@ -178,7 +185,8 @@ class Sweep:
     def _stats(self, **extra: Any) -> None:
         stats = dict(self.state.get("sweep_stats") or {})
         stats.update(extra, seconds=int(time.monotonic() - self.started), pairs_tested=len(self.tested),
-                     endpoints_seen=len(self.seen))
+                     endpoints_seen=len(self.seen), injection_queued=self.injection_queued,
+                     injection_done=self.injection_done)
         self.state["sweep_stats"] = stats
 
     def _note(self, text: str) -> None:
@@ -266,9 +274,15 @@ class Sweep:
                 self._stats()
                 if load_report is None:
                     break
+            # The rounds found nothing new; the queued long verifiers finish before the sweep does.
+            self.state["sweep"] = "draining" if self._long_jobs else "running"
+            while self._long_jobs:
+                await asyncio.gather(*list(self._long_jobs))
             self.state["sweep"] = "done"
         except asyncio.CancelledError:
             self.state["sweep"] = "stopped"
+            for job in list(self._long_jobs):
+                job.cancel()
             raise
         finally:
             self._stats(rounds=rounds)
@@ -415,15 +429,27 @@ class Sweep:
                         values = {"path": concrete(route), "method": method, "body_field_names": params[:20],
                                   "injection_field": field, **identity}
                         jobs.append((capability, values, sweep_key(klass, method, route, field)))
-        # SQL injection first on every target, then XSS: the slower verifier never starves the other.
-        jobs.sort(key=lambda job: 0 if job[0] == "sqli.verify" else 1)
-        gate = asyncio.Semaphore(LONG_CONCURRENCY)
+        # XSS first on every target (about 20 s a call), then SQL injection (minutes a call): the
+        # slower verifier never holds back the faster one.
+        jobs.sort(key=lambda job: 0 if job[0] == "xss.verify" else 1)
+        for job in jobs:
+            self._queue_long(job)
 
-        async def one(job: tuple[str, dict[str, Any], str]) -> None:
-            async with gate:
-                await self._safe(*job)
+    def _queue_long(self, job: tuple[str, dict[str, Any], str]) -> None:
+        """Run one long verifier call from the queue (LONG_CONCURRENCY at a time); never awaited
+        by the round that queued it."""
+        async def one() -> None:
+            async with self._long_gate:
+                try:
+                    await self._safe(*job)
+                finally:
+                    self.injection_done += 1
+                    self._stats()
 
-        await asyncio.gather(*(one(job) for job in jobs))
+        task = asyncio.get_running_loop().create_task(one())
+        self._long_jobs.add(task)
+        task.add_done_callback(self._long_jobs.discard)
+        self.injection_queued += 1
 
 
 def _json(value: Any) -> dict[str, Any]:
