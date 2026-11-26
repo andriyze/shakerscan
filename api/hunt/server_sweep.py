@@ -528,6 +528,8 @@ class Sweep:
             form = login_form(response)
             if form:
                 self.logins.setdefault(form[0], (form[0], form[1], form[2], False))
+            links.extend(form_entries(response, path))
+            links.extend(hint_entries(response, path))
             signal = exposure_signal(response)
             action = _action_id(result)
             status = response.get("status")
@@ -956,6 +958,53 @@ def product_candidate(product: str, checks: str, match: Mapping[str, Any],
         "locus": locus,
         "evidence_refs": [f"action:{action}"],
     }
+
+
+_ROBOTS_LINE = re.compile(r"(?im)^\s*(?:dis)?allow\s*:\s*(/[^\s*$#?]*)")
+_SITEMAP_LOC = re.compile(r"(?i)<loc>\s*([^<\s]+)\s*</loc>")
+
+
+def form_entries(response: Mapping[str, Any], page: str) -> list[str]:
+    """Inventory entries for the forms an HTML answer carries: the form's own action and method
+    with its named fields as inputs (a search box, a comment form, a settings page ...)."""
+    html = response.get("html") if isinstance(response.get("html"), Mapping) else {}
+    entries: list[str] = []
+    for form in html.get("forms") or ():
+        if not isinstance(form, Mapping):
+            continue
+        action = str(form.get("action") or "").split("#", 1)[0] or page.split("?", 1)[0]
+        if not action.startswith("/") or action.startswith("//"):
+            continue
+        names = [str(field.get("name")) for field in form.get("fields") or ()
+                 if isinstance(field, Mapping) and field.get("name")
+                 and str(field.get("type") or "text").lower() not in {"submit", "button", "image", "reset", "file"}]
+        names = list(dict.fromkeys(name for name in names if re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,64}", name)))[:20]
+        if not names:
+            continue
+        path = action.split("?", 1)[0]
+        method = str(form.get("method") or "GET").upper()
+        query = "&".join(f"{urllib.parse.quote(name)}=1" for name in names)
+        entries.append(f"POST {path} form:{query}" if method == "POST" else f"GET {path}?{query}")
+    return entries
+
+
+def hint_entries(response: Mapping[str, Any], page: str) -> list[str]:
+    """Routes a robots.txt (Allow/Disallow lines) or a sitemap (<loc>) names, same origin only."""
+    status = response.get("status")
+    if not isinstance(status, int) or status >= 300:
+        return []
+    text = str(response.get("body_sample") or "")
+    name = page.split("?", 1)[0].rsplit("/", 1)[-1].lower()
+    found: list[str] = []
+    if name == "robots.txt":
+        found = [path for path in _ROBOTS_LINE.findall(text) if path != "/"]
+    elif name.startswith("sitemap") and name.endswith(".xml"):
+        for loc in _SITEMAP_LOC.findall(text):
+            parts = urllib.parse.urlsplit(loc)
+            path = parts.path if parts.scheme else loc
+            if path.startswith("/") and not path.startswith("//"):
+                found.append(path + (f"?{parts.query}" if parts.scheme and parts.query else ""))
+    return [f"GET {path}" for path in dict.fromkeys(found)][:200]
 
 
 def _tool_job(capability: str, klass: str, method: str, route: str, params: Sequence[str], field: str | None,

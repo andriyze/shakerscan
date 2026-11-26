@@ -503,3 +503,17 @@ def test_the_wire_pace_holds_the_engines_own_calls_to_its_rate():
     check, elapsed = asyncio.run(burst())
     assert check >= 0.40 and elapsed >= 1.05
     assert wire_cost("http.request", {}) == 1 and wire_cost("sqli.verify", {}) == 0
+
+
+def test_forms_robots_and_sitemaps_add_their_routes_and_inputs():
+    from api.hunt.server_sweep import form_entries, hint_entries
+    page = {"status": 200, "html": {"forms": [
+        {"method": "GET", "action": "/search", "fields": [{"name": "q", "type": "text"}, {"name": "go", "type": "submit"}]},
+        {"method": "POST", "action": "/comments", "fields": [{"name": "author"}, {"name": "body", "type": "textarea"}]},
+        {"method": "POST", "action": "https://elsewhere.test/x", "fields": [{"name": "a"}]}]}}
+    assert form_entries(page, "/blog") == ["GET /search?q=1", "POST /comments form:author=1&body=1"]
+    robots = {"status": 200, "body_sample": "User-agent: *\nDisallow: /admin/\nAllow: /public/page\nDisallow: /\n"}
+    assert hint_entries(robots, "/robots.txt") == ["GET /admin/", "GET /public/page"]
+    sitemap = {"status": 200, "body_sample": "<urlset><url><loc>http://t.test/a?x=1</loc></url><url><loc>/b</loc></url></urlset>"}
+    assert hint_entries(sitemap, "/sitemap.xml") == ["GET /a?x=1", "GET /b"]
+    assert hint_entries({"status": 404, "body_sample": "Disallow: /x"}, "/robots.txt") == []
