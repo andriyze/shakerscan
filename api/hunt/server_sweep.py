@@ -59,12 +59,13 @@ MAX_SCRIPTS = 40
 # Rounds of read-record-test; each round only tests what earlier rounds did not.
 MAX_ROUNDS = 8
 DEFAULT_CREDENTIAL_PACE_SECONDS = 2.2
-# A product-template call is a long action. While the Hunt's long-action slots are all taken (the
-# planner's scanners, the injection verifiers), admission refuses it: measured Hunts had 23 and 30
-# such refusals, one Hunt's every state-changing check among them. The call waits for a slot
-# instead: admission says retry after 60 s, and a verifier holds a slot for up to about 20 minutes.
+# Product-template and injection-verifier calls are long actions. While the Hunt's long-action
+# slots are all taken (the planner's scanners, the sweep's own verifiers), admission refuses them:
+# measured Hunts had 23 and 30 template refusals (one Hunt's every state-changing check among
+# them) and 17-18 verifier refusals. Such a call waits for a slot instead: admission says retry
+# after 60 s, and a verifier holds a slot for up to about 20 minutes.
 LONG_SLOT_RETRY_SECONDS = 30.0
-PRODUCT_SLOT_WAIT_SECONDS = 1_800.0
+LONG_SLOT_WAIT_SECONDS = 1_800.0
 _LONG_SLOTS_TAKEN = re.compile(r"long actions in flight", re.I)
 DEFAULT_PAIR_IDS = tuple(f"dc-{index:02d}" for index in range(1, 21))
 _SECRET_TEXT = re.compile(
@@ -438,7 +439,7 @@ class Sweep:
                         values["path"] = base
                     result = await self._safe("templates.scan", values,
                                               sweep_key("product", product, checks, base, str(window)),
-                                              slot_wait_seconds=PRODUCT_SLOT_WAIT_SECONDS)
+                                              slot_wait_seconds=LONG_SLOT_WAIT_SECONDS)
                     action = _action_id(result)
                     for match in template_matches(result):
                         candidate = product_candidate(product, checks, match, action)
@@ -493,7 +494,8 @@ class Sweep:
 
         async def one(job: tuple[str, dict[str, Any], str]) -> None:
             async with gate:
-                await self._safe(*job)
+                # A verifier is a long action: it waits for a slot the planner's calls hold.
+                await self._safe(*job, slot_wait_seconds=LONG_SLOT_WAIT_SECONDS)
 
         await asyncio.gather(*(one(job) for job in jobs))
 
