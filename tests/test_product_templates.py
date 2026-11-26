@@ -401,7 +401,7 @@ def test_a_product_check_waits_for_a_long_action_slot(monkeypatch):
 
 def test_a_product_check_stops_waiting_after_its_budget(monkeypatch):
     monkeypatch.setattr(server_sweep, "LONG_SLOT_RETRY_SECONDS", 0)
-    monkeypatch.setattr(server_sweep, "PRODUCT_SLOT_WAIT_SECONDS", 0)
+    monkeypatch.setattr(server_sweep, "LONG_SLOT_WAIT_SECONDS", 0)
     engine = _Engine()
 
     async def always_busy(capability, values, key):
@@ -411,3 +411,29 @@ def test_a_product_check_stops_waiting_after_its_budget(monkeypatch):
     sweep = _sweep(engine, {"products": ["jenkins"]})
     asyncio.run(sweep.run(_sweep_run(writes=False), {"open": []}))
     assert sweep.counts["templates.scan:refused"] == 1 and not engine.candidates
+
+
+def test_an_injection_verifier_waits_for_a_long_action_slot(monkeypatch):
+    monkeypatch.setattr(server_sweep, "LONG_SLOT_RETRY_SECONDS", 0)
+    engine = _Engine()
+    refusals = {"sqli.verify": 2, "xss.verify": 1}
+    call = engine.call
+
+    async def busy(capability, values, key):
+        if refusals.get(capability):
+            refusals[capability] -= 1
+            raise server_sweep.Refused("This Hunt already has 2 long actions in flight (templates.scan)")
+        return await call(capability, values, key)
+
+    engine.call = busy
+    run = _sweep_run(writes=False)
+    policy = json.loads(run["policy_json"])
+    policy["allowed_capabilities"] = ["sqli.verify", "xss.verify"]
+    run["policy_json"] = json.dumps(policy)
+    sweep = _sweep(engine, {})
+    asyncio.run(sweep.run(run, {"open": [
+        {"endpoint": "GET /search", "untested": ["sqli", "xss"], "params": ["q"]}]}))
+    sent = [capability for capability, _values, _key in engine.calls]
+    assert sent.count("sqli.verify") == 1 and sent.count("xss.verify") == 1
+    assert refusals == {"sqli.verify": 0, "xss.verify": 0}
+    assert "sqli.verify:refused" not in sweep.counts and "xss.verify:refused" not in sweep.counts
