@@ -517,3 +517,29 @@ def test_forms_robots_and_sitemaps_add_their_routes_and_inputs():
     sitemap = {"status": 200, "body_sample": "<urlset><url><loc>http://t.test/a?x=1</loc></url><url><loc>/b</loc></url></urlset>"}
     assert hint_entries(sitemap, "/sitemap.xml") == ["GET /a?x=1", "GET /b"]
     assert hint_entries({"status": 404, "body_sample": "Disallow: /x"}, "/robots.txt") == []
+
+
+def test_html_pages_the_reads_found_are_analyzed_for_routes_too():
+    class Pages(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and values.get("path") == "/chat":
+                self.calls.append((capability, dict(values), key))
+                return {"action_id": "c", "action_result": {"observations": [{"response": {
+                    "status": 200, "body_sample": "<html>", "html": {"title": "Chat", "links": []}}}]}}
+            if capability == "javascript.analyze":
+                self.calls.append((capability, dict(values), key))
+                return {"action_id": "j", "action_result": {"observations": [
+                    {"kind": "javascript_analysis", "routes": ["/api/chat/send"]}]}}
+            return await super().call(capability, values, key)
+
+    engine = Pages()
+    recorded = []
+
+    async def record(worklist):
+        recorded.extend(worklist)
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(), {"open": [{"endpoint": "GET /chat", "untested": ["review"], "params": []}]},
+                     load_report=None, record=record))
+    analyzed = [v["path"] for cap, v, _ in engine.calls if cap == "javascript.analyze"]
+    assert analyzed == ["/chat"] and "GET /api/chat/send" in recorded
