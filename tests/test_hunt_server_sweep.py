@@ -412,3 +412,36 @@ def test_an_anonymous_answer_from_a_product_management_route_queues_its_proof():
     checks = [(v["check"], v["path"]) for cap, v, _ in engine.calls if cap == "request.verify"]
     assert ("unauthenticated_api", "/api/kernels") in checks
     assert not any(check == "unauthenticated_api" and path == "/about" for check, path in checks)
+
+
+def test_the_sql_tool_follows_only_where_the_quick_sql_proof_saw_the_query_break():
+    from api.hunt.server_sweep import sql_screen_escalates
+
+    class Screen(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "request.verify" and values.get("check") == "sql_injection":
+                self.calls.append((capability, dict(values), key))
+                broke = values["path"] == "/search"
+                pair = {"control_status": 200, "payload_status": 500 if broke else 200}
+                return {"action_id": "rv", "action_result": {"status": "success", "observations": [
+                    {"kind": "sqli_proof", "proof_state": "not_proven", "finding_verdict": "not_proven",
+                     "response_pairs": [pair, pair], "database_error_signatures": []}]}}
+            return await super().call(capability, values, key)
+
+    engine = Screen()
+    state = {}
+    report = {"open": [
+        {"endpoint": "GET /search", "untested": ["sqli", "xss"], "params": ["q"]},
+        {"endpoint": "GET /orders/{id}", "untested": ["sqli"], "params": ["sort"]},
+        {"endpoint": "POST /hub/login", "untested": ["sqli", "default_credentials"], "params": ["username", "password"]},
+    ]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(allowed=[*ALL, "request.verify"]), report))
+    tool = [v.get("path") + (f" {v['injection_field']}" if v.get("injection_field") else "")
+            for cap, v, _ in engine.calls if cap == "sqli.verify"]
+    assert "/search?q=1" in tool and not any(item.startswith("/orders") for item in tool)
+    assert any(item.startswith("/hub/login") for item in tool)  # a sign-in goes straight to the tool
+    assert tool.count("/search?q=1") == 1
+    assert sql_screen_escalates(None) is True
+    assert sql_screen_escalates({"action_result": {"status": "success", "observations": [
+        {"kind": "sqli_proof", "proof_state": "verified", "finding_verdict": "verified"}]}}) is False

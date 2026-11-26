@@ -296,6 +296,8 @@ class Sweep:
         self.signin_checked: set[str] = set()
         self.prefixes_tried: set[str] = set()
         self.request_verify = False
+        self.sqli_tool = False
+        self._long_keys: set[str] = set()
 
     def _count(self, name: str) -> None:
         self.counts[name] = self.counts.get(name, 0) + 1
@@ -362,6 +364,7 @@ class Sweep:
         writes = bool(policy.get("allow_state_changing_http"))
         slots = _signed_in_slots(run)
         self.request_verify = "request.verify" in allowed
+        self.sqli_tool = "sqli.verify" in allowed
         templates = ("templates.scan" in allowed and bool(policy.get("active_testing"))
                      and bool(policy.get("approval_receipt_id")))
         self.state["sweep"] = "running"
@@ -645,18 +648,18 @@ class Sweep:
                 continue
             # A route that refuses anonymous callers is tested signed in, as the first principal.
             identity = {"as_principal": slots[0]} if route in self.signed_in_only and slots else {}
+            # With request.verify the SQL injection proof screens each input first and the full tool
+            # follows only where the screen saw the query break (``_queue_request_check``); a sign-in,
+            # which the screen never probes, goes straight to the tool.
+            screened = self.request_verify and not _LOGIN_PATH.search(route)
             for capability, klass in (("sqli.verify", "sqli"), ("xss.verify", "xss")):
-                if capability not in allowed or klass not in untested:
+                if capability not in allowed or klass not in untested or (capability == "sqli.verify" and screened):
                     continue
                 if method == "GET":
-                    query = "&".join(f"{name}=1" for name in params[:10])
-                    path = f"{concrete(route)}?{query}"
-                    jobs.append((capability, {"path": path, **identity}, sweep_key(klass, path)))
+                    jobs.append(_tool_job(capability, klass, method, route, params, None, identity))
                 elif writes and method in {"POST", "PUT", "PATCH"}:
                     for field in params[:MAX_FIELDS_PER_BODY]:
-                        values = {"path": concrete(route), "method": method, "body_field_names": params[:20],
-                                  "injection_field": field, **identity}
-                        jobs.append((capability, values, sweep_key(klass, method, route, field)))
+                        jobs.append(_tool_job(capability, klass, method, route, params, field, identity))
         # XSS first on every target (about 20 s a call), then SQL injection (minutes a call): the
         # slower verifier never holds back the faster one.
         jobs.sort(key=lambda job: 0 if job[0] == "xss.verify" else 1)
@@ -697,11 +700,11 @@ class Sweep:
     def _request_checks(self, items: Sequence[Mapping[str, Any]], *, writes: bool, slots: Sequence[str],
                         first: bool = False) -> None:
         """Queue request.verify on every input and endpoint the checks fit (short actions)."""
-        jobs: list[tuple[int, dict[str, Any]]] = []
+        jobs: list[tuple[int, dict[str, Any], tuple[str, dict[str, Any], str] | None]] = []
         if first:
-            jobs += [(1, {"check": "cors", "method": "GET", "path": "/"}),
-                     (1, {"check": "security_headers", "method": "GET", "path": "/"}),
-                     (2, {"check": "host_header_injection", "method": "GET", "path": "/"})]
+            jobs += [(1, {"check": "cors", "method": "GET", "path": "/"}, None),
+                     (1, {"check": "security_headers", "method": "GET", "path": "/"}, None),
+                     (2, {"check": "host_header_injection", "method": "GET", "path": "/"}, None)]
         for item in items:
             method, _, route = str(item.get("endpoint") or "").partition(" ")
             if not route.startswith("/") or method not in {"GET", "POST", "PUT", "PATCH"}:
@@ -713,14 +716,14 @@ class Sweep:
             path = concrete(route)
             identity = {"as_principal": slots[0]} if route in self.signed_in_only and slots else {}
             if _GRAPHQL_PATH.search(route):
-                jobs.append((0, {"check": "graphql", "method": "POST" if writes else "GET", "path": path, **identity}))
+                jobs.append((0, {"check": "graphql", "method": "POST" if writes else "GET", "path": path, **identity}, None))
                 continue
             if method == "GET" and "unauthenticated_api" in untested and \
-                    sum(1 for _rank, job in jobs if job["check"] == "cors") < MAX_HEADER_CHECK_ROUTES:
-                jobs.append((2, {"check": "cors", "method": "GET", "path": path, **identity}))
+                    sum(1 for _rank, job, _f in jobs if job["check"] == "cors") < MAX_HEADER_CHECK_ROUTES:
+                jobs.append((2, {"check": "cors", "method": "GET", "path": path, **identity}, None))
             if method != "GET" and _XML_PATH.search(route):
                 jobs.append((0, {"check": "xxe", "method": method, "path": path, **identity,
-                                 "xml_body": '<?xml version="1.0"?><data><value>1</value></data>'}))
+                                 "xml_body": '<?xml version="1.0"?><data><value>1</value></data>'}, None))
             if not params or _LOGIN_PATH.search(route):
                 # A sign-in gets its own checks (_signin_checks); injection probes are never sent to one.
                 continue
@@ -733,13 +736,17 @@ class Sweep:
                 base = {"method": method, "path": path, body_key: {name: "1" for name in params[:20]}}
                 names = params[:MAX_FIELDS_PER_BODY]
                 if _RESET_PATH.search(route):
-                    jobs.append((1, {**base, **identity, "check": "host_header_injection"}))
+                    jobs.append((1, {**base, **identity, "check": "host_header_injection"}, None))
             for name in names:
                 for rank, check in input_checks(name, method):
-                    jobs.append((rank, {**base, **identity, "check": check, "parameter": name}))
+                    follow = None
+                    if check == "sql_injection" and self.sqli_tool:
+                        follow = _tool_job("sqli.verify", "sqli", method, route, params,
+                                           None if method == "GET" else name, identity)
+                    jobs.append((rank, {**base, **identity, "check": check, "parameter": name}, follow))
         jobs.sort(key=lambda job: job[0])
-        for _rank, values in jobs:
-            self._queue_request_check(values)
+        for _rank, values, follow in jobs:
+            self._queue_request_check(values, follow_up=follow)
 
     async def _signin_checks(self, path: str, user: str, secret: str, json_body: bool) -> None:
         """A sign-in's own request checks: rate limiting, LDAP and NoSQL wildcards (request.verify)."""
@@ -753,8 +760,10 @@ class Sweep:
         if json_body:
             self._queue_request_check({**base, "check": "nosql_injection", "parameter": user})
 
-    def _queue_request_check(self, values: Mapping[str, Any]) -> None:
-        """Run one request.verify call from the short queue (REQUEST_CONCURRENCY at a time)."""
+    def _queue_request_check(self, values: Mapping[str, Any], *,
+                             follow_up: tuple[str, dict[str, Any], str] | None = None) -> None:
+        """Run one request.verify call from the short queue (REQUEST_CONCURRENCY at a time); a
+        ``follow_up`` long verifier is queued when the check's answer says the tool should look."""
         identity = json.dumps(
             [values.get("check"), values.get("method"), values.get("path"), values.get("parameter"),
              values.get("as_principal")], sort_keys=True)
@@ -765,10 +774,12 @@ class Sweep:
         async def one() -> None:
             async with self._request_gate:
                 try:
-                    await self._safe("request.verify", values, sweep_key("request", identity))
+                    result = await self._safe("request.verify", values, sweep_key("request", identity))
                 finally:
                     self.request_checks_done += 1
                     self._stats()
+            if follow_up is not None and sql_screen_escalates(result):
+                self._queue_long(follow_up)
 
         task = asyncio.get_running_loop().create_task(one())
         self._long_jobs.add(task)
@@ -777,7 +788,10 @@ class Sweep:
 
     def _queue_long(self, job: tuple[str, dict[str, Any], str]) -> None:
         """Run one long verifier call from the queue (LONG_CONCURRENCY at a time); never awaited
-        by the round that queued it."""
+        by the round that queued it; a job already queued is not queued again."""
+        if job[2] in self._long_keys:
+            return
+        self._long_keys.add(job[2])
         async def one() -> None:
             async with self._long_gate:
                 try:
@@ -856,6 +870,36 @@ def product_candidate(product: str, checks: str, match: Mapping[str, Any],
         "locus": locus,
         "evidence_refs": [f"action:{action}"],
     }
+
+
+def _tool_job(capability: str, klass: str, method: str, route: str, params: Sequence[str], field: str | None,
+              identity: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]:
+    """One sqli.verify or xss.verify call on a route's query (GET) or one body field."""
+    if method == "GET":
+        path = f"{concrete(route)}?" + "&".join(f"{name}=1" for name in params[:10])
+        return capability, {"path": path, **identity}, sweep_key(klass, path)
+    values = {"path": concrete(route), "method": method, "body_field_names": list(params[:20]),
+              "injection_field": field, **identity}
+    return capability, values, sweep_key(klass, method, route, str(field))
+
+
+def sql_screen_escalates(result: Any) -> bool:
+    """Whether the SQL injection proof's answer calls for the full tool: it could not run, or a quote
+    changed the answer (status) or raised a database error without a repeatable proof."""
+    if not isinstance(result, Mapping):
+        return True
+    action = result.get("action_result") if isinstance(result.get("action_result"), Mapping) else {}
+    proofs = [item for item in action.get("observations") or ()
+              if isinstance(item, Mapping) and item.get("kind") == "sqli_proof"]
+    if not proofs:
+        return str(action.get("status") or "") not in {"success", "completed"}
+    proof = proofs[0]
+    if proof.get("proof_state") == "verified" or proof.get("finding_verdict") == "inconclusive":
+        return False
+    if proof.get("database_error_signatures"):
+        return True
+    return any(isinstance(pair, Mapping) and pair.get("control_status") != pair.get("payload_status")
+               for pair in proof.get("response_pairs") or ())
 
 
 def _distinct(answer: Mapping[str, Any], control: Mapping[str, Any]) -> bool:
