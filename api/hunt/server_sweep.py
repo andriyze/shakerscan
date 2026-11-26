@@ -75,7 +75,8 @@ MAX_AUTHZ_ROUTES = 50
 # request.verify calls one sweep may queue (measured: about 3-40 requests and 1-20 s each).
 MAX_REQUEST_CHECKS = 1_200
 REQUEST_CONCURRENCY = 2
-MAX_HEADER_CHECK_ROUTES = 40
+# CORS is usually one policy per origin: the root and a few API answers show it.
+MAX_HEADER_CHECK_ROUTES = 5
 # Routes that refuse GET (405) the sweep sends one empty JSON POST to learn their inputs.
 MAX_SHAPE_PROBES = 200
 MAX_SCRIPTS = 40
@@ -392,7 +393,6 @@ class Sweep:
                 found: list[str] = []
                 if "http.request" in allowed:
                     found += await self._read_all(fresh, slots=slots, writes=writes)
-                    found += await self._api_routes(items)
                 if "javascript.analyze" in allowed:
                     found += await self._javascript(items)
                 if "http.request" in allowed and writes:
@@ -404,6 +404,10 @@ class Sweep:
                 if "authz.verify" in allowed and {"primary", "secondary"} <= set(slots):
                     await self._function_authz(fresh)
                 await self._injection(fresh, allowed=allowed, writes=writes, slots=slots)
+                if "http.request" in allowed:
+                    # Last in the round: the checks queued above run while route names are tried
+                    # (one engine call each, about a second apiece at the Hunt's call rate).
+                    found += await self._api_routes(items)
                 handled = {"review", "exposure", "unauthenticated_api", "default_credentials"}
                 if {"primary", "secondary"} <= set(slots):
                     handled.add("function_authz")
@@ -519,12 +523,14 @@ class Sweep:
 
     async def _api_routes(self, items: Sequence[Mapping[str, Any]]) -> list[str]:
         """Route names tried under each API root the mapped routes sit under (once per root)."""
-        roots: list[str] = []
+        counts: dict[str, int] = {}
         for item in items:
             _method, _, route = str(item.get("endpoint") or "").partition(" ")
             match = _API_PREFIX.match(route)
-            if match and match.group(1) not in roots:
-                roots.append(match.group(1))
+            if match:
+                counts[match.group(1)] = counts.get(match.group(1), 0) + 1
+        # The roots most mapped routes sit under first.
+        roots = sorted(counts, key=lambda root: (-counts[root], root))
         found: list[str] = []
         gate = asyncio.Semaphore(SHORT_CONCURRENCY)
         for root in roots:
