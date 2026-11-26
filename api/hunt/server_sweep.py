@@ -112,8 +112,9 @@ MAX_FOLLOW_ROUNDS = 60
 FOLLOW_POLL_SECONDS = 15.0
 FOLLOW_POLL_MAX_SECONDS = 120.0
 DEFAULT_CREDENTIAL_PACE_SECONDS = 2.2
-# Sign-ins the sweep tries the default pairs on (the default-credential module's own bound per Hunt).
-MAX_SWEEP_LOGINS = 4
+# Sign-ins the sweep tries the default pairs on; the rest of the default-credential module's bound
+# per Hunt (12) is left to the planner's own attempts.
+MAX_SWEEP_LOGINS = 8
 # Product-template and injection-verifier calls are long actions. While the Hunt's long-action
 # slots are all taken (the planner's scanners, the sweep's own verifiers), admission refuses them:
 # measured Hunts had 23 and 30 template refusals (one Hunt's every state-changing check among

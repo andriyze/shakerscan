@@ -52,7 +52,9 @@ LOGIN_FIELDS = frozenset({"username", "secret"})
 # HTTP Basic: the pair as one ``Authorization: Basic`` header on a GET of a route that asks for it.
 BASIC_FIELD = "basic"
 MAX_ATTEMPTS_PER_LOGIN = 20
-MAX_LOGINS_PER_HUNT = 4
+# A work budget, not the safety bound: each login keeps its own attempt cap, pacing and lockout
+# stop. Four was fewer than the distinct sign-ins of one measured target (owner, 2026-11-26).
+MAX_LOGINS_PER_HUNT = 12
 PACE_SECONDS = 2.0
 WINDOW = timedelta(hours=1)
 WINDOW_MAX = 20
