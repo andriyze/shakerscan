@@ -662,3 +662,21 @@ def test_a_route_that_asks_for_http_basic_gets_the_default_pairs_once_per_first_
         {"method": "GET", "path": "/manager/html"}, {"method": "GET", "path": "/host-manager/html"}]
     assert all(c["family"] == "default_credentials" and c["evidence_refs"] == ["action:basic-dc-15"]
                for c in engine.candidates)
+
+
+def test_each_principals_bearer_token_gets_the_jwt_check_once():
+    class SignedIn(_Engine):
+        async def call(self, capability, values, key):
+            self.calls.append((capability, dict(values), key))
+            if capability == "http.request":
+                return _answer(200 if values.get("as_principal") else 401, "{}")
+            return {"action_id": "v", "action_result": {"status": "success", "observations": []}}
+
+    engine = SignedIn()
+    report = {"open": [{"endpoint": f"GET /api/{name}", "untested": ["review"], "params": []}
+                       for name in ("me", "orders")]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request", "request.verify"]), report))
+    jwt = [v for cap, v, _ in engine.calls if cap == "request.verify" and v["check"] == "jwt"]
+    assert sorted(v["as_principal"] for v in jwt) == ["primary", "secondary"]
+    assert all(v["method"] == "GET" and v["path"].startswith("/api/") for v in jwt)

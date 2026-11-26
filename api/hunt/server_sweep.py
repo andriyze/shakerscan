@@ -26,7 +26,8 @@ check never runs twice):
    a deterministic differential proves (SQL, command, template, path traversal; SSRF, open redirect
    and CRLF for an input named like a URL or a redirect target), a GraphQL endpoint its GraphQL
    check, an XML endpoint XXE, a sign-in its rate-limit, LDAP and NoSQL checks, and the root and
-   a bounded set of API answers their CORS and header checks. Each is a short action (seconds,
+   a bounded set of API answers their CORS and header checks, and each principal's bearer token
+   its JWT check on the first route it reads. Each is a short action (seconds,
    tens of requests) run from a second queue beside the long verifiers; inputs whose name points
    at a class go first.
 6. **API routes**: under each API root the mapped routes sit under (``/api``, ``/api/v1``, ...),
@@ -168,7 +169,7 @@ class Refused(Exception):
 _WIRE_COST = {"http.request": 1, "candidate.verify": 3, "authz.verify": 6}
 _CHECK_COST = {"exposure": 3, "unauthenticated_api": 3, "directory_listing": 3, "security_headers": 2,
                "cors": 6, "host_header_injection": 6, "sql_injection": 12, "nosql_injection": 10,
-               "ldap_injection": 6, "rate_limit": 13, "graphql": 10, "command_injection": 14,
+               "ldap_injection": 6, "rate_limit": 13, "graphql": 10, "jwt": 8, "command_injection": 14,
                "path_traversal": 8, "template_injection": 6, "ssrf": 6, "xxe": 6, "open_redirect": 6,
                "crlf_injection": 6}
 
@@ -373,6 +374,7 @@ class Sweep:
         self.request_checks_sent: set[str] = set()
         self.shape_probed: set[str] = set()
         self.signin_checked: set[str] = set()
+        self.jwt_checked: set[str] = set()
         # The anonymous answer each read route gave (status, sample length, title), and the
         # mounts already queued for testing per route tail: one application served under several
         # mounts (/a/app.php, /b/app.php answering alike) is tested once.
@@ -594,6 +596,13 @@ class Sweep:
             signal = exposure_signal(response)
             action = _action_id(result)
             status = response.get("status")
+            if (self.request_verify and principal and principal not in self.jwt_checked
+                    and isinstance(status, int) and 200 <= status < 300):
+                # The first route a principal reads: its bearer token is tested once (an altered
+                # signature, alg none, a well-known secret). A principal without a bearer JWT
+                # costs one request.
+                self.jwt_checked.add(principal)
+                self._queue_request_check({"check": "jwt", "method": "GET", "path": path, "as_principal": principal})
             if (self.request_verify and principal is None and isinstance(status, int) and 200 <= status < 300
                     and product_api_for(path) is not None):
                 # A self-hosted product's management route answered an anonymous caller.
