@@ -629,11 +629,8 @@ CAPABILITY_CALL_EXAMPLE = (
 CAPABILITY_INPUT_DESCRIPTION = (
     "The capability's own arguments, as an object. Do not send {} for a capability that has "
     "required fields. Examples: http.request {\"method\": \"GET\", \"path\": \"/login\"}; "
-    "artifact.inspect {\"path\": \"/.env\"}; candidate.verify {\"candidate_id\": \"<uuid>\"}; "
-    "request.verify {\"check\": \"command_injection\", \"method\": \"GET\", \"path\": \"/ping\", "
-    "\"query\": {\"host\": \"x\"}, \"parameter\": \"host\"}. "
-    "Each capability's fields are in shakerscan_hunt_get (capabilities[].input) and its full "
-    "schema in shakerscan_hunt_get with capability=<name>."
+    "candidate.verify {\"candidate_id\": \"<uuid>\"}; request.verify {\"check\": \"cors\", "
+    "\"path\": \"/api\"}. Full schema: shakerscan_hunt_get with capability=<name>."
 )
 
 
