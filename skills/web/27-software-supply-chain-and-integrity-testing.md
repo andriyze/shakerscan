@@ -16,8 +16,8 @@ target_kinds:
 capabilities: []
 optional_capabilities:
 - templates.scan
-missing_capabilities:
 - artifact.inspect
+missing_capabilities:
 - dependency.analyze
 server_enforced:
 - policy.evaluate
@@ -131,9 +131,9 @@ request copied approval receipts, or impose the example budgets as additional ru
 
 This is reference guidance. It does not register an executable capability or a second planner.
 
-Optional techniques may use `templates.scan` when available.
+Optional techniques may use `templates.scan` and `artifact.inspect` when available.
 
-Declared implementation gaps: `artifact.inspect`, `dependency.analyze`. These are not callable
+Declared implementation gaps: `dependency.analyze`. These are not callable
 operations. Continue the compatible techniques and report the specific untested portion.
 
 Check `withheld_capabilities`, `missing_capabilities`, and `deferred_techniques` in the returned

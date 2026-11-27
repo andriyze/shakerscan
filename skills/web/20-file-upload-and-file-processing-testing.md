@@ -16,9 +16,10 @@ capabilities:
 - http.request
 - browser.navigate
 - candidate.verify
-optional_capabilities: []
-missing_capabilities:
+optional_capabilities:
 - artifact.inspect
+- request.verify
+missing_capabilities:
 - file.generate_canary
 - file.upload
 server_enforced:
@@ -137,7 +138,9 @@ request copied approval receipts, or impose the example budgets as additional ru
 
 Declared capability names: `http.request`, `browser.navigate`, `candidate.verify`.
 
-Declared implementation gaps: `artifact.inspect`, `file.generate_canary`, `file.upload`. These are not callable
+Optional techniques may use `artifact.inspect` and `request.verify` when available.
+
+Declared implementation gaps: `file.generate_canary`, `file.upload` (an upload whose served copy runs as HTML is proven by `request.verify` check `file_upload`). These are not callable
 operations. Continue the compatible techniques and report the specific untested portion.
 
 Check `withheld_capabilities`, `missing_capabilities`, and `deferred_techniques` in the returned

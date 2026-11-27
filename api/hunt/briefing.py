@@ -244,6 +244,17 @@ def bound_briefing(briefing: dict[str, Any], limit: int = MAX_BRIEFING_BYTES) ->
         return briefing
     result = json.loads(json.dumps(briefing, default=str))
     trimmed = result.setdefault("trimmed", [])
+    # The matched methodologies' evidence lines, then the second methodology, give way first: the
+    # read call in each entry returns the whole text.
+    methodology = result.get("methodology") if isinstance(result.get("methodology"), dict) else {}
+    for entry in methodology.get("methodologies") or []:
+        if _size(result) > limit and isinstance(entry, dict) and entry.get("evidence"):
+            entry["evidence"] = []
+            if "methodology.methodologies[].evidence removed to fit the size limit" not in trimmed:
+                trimmed.append("methodology.methodologies[].evidence removed to fit the size limit")
+    if _size(result) > limit and len(methodology.get("methodologies") or []) > 1:
+        methodology["methodologies"] = methodology["methodologies"][:1]
+        trimmed.append("methodology.methodologies cut to one to fit the size limit")
     # Interpretation headlines (agent-written titles) give way first; their counts stay.
     interpretations = result.get("interpretations") if isinstance(result.get("interpretations"), dict) else {}
     changed = result.get("changed_since_last_hunt") if isinstance(result.get("changed_since_last_hunt"), dict) else {}
@@ -426,6 +437,11 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
         from .knowledge_continue import briefing_continuation
         return await briefing_continuation(conn, item)
 
+    async def methodology() -> dict[str, Any]:
+        from .methodology_briefing import briefing_section as methodology_section
+        return await methodology_section(conn, item)
+
+    await section("methodology", methodology)
     await section("knowledge", knowledge)
     await section("changed_since_last_hunt", changes)
     await section("continue_after_release", continuation)
@@ -460,6 +476,7 @@ async def with_live_briefing(conn: Any, result: dict[str, Any], row: Mapping[str
     briefing["saved_logins"] = live.get("saved_logins")
     briefing["principals"] = live.get("principals")
     briefing["default_credentials"] = live.get("default_credentials")
+    briefing["methodology"] = live.get("methodology")
     delegation = live.get("delegation")
     if isinstance(delegation, dict) and "available" not in delegation:
         authority = dict(briefing.get("authority") or {})

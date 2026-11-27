@@ -510,3 +510,20 @@ def test_the_public_projection_carries_target_identity_and_completion():
 def test_a_signal_that_names_a_skill_ranks_that_skill_first(library, signals, expected):
     suggestions = library.suggest(goal="", target_kind="web", signals=signals)
     assert suggestions[0]["skill_id"] == expected
+
+
+def test_no_methodology_declares_a_capability_the_registry_has_as_missing(library):
+    """Skills 20 and 27 listed artifact.inspect as missing long after it shipped, so planners skipped
+    a technique the Hunt could run. A declared gap must be a capability the registry does not have."""
+    from api.runtime.capability_registry import CAPABILITY_REGISTRY
+
+    def registered(name):
+        try:
+            CAPABILITY_REGISTRY.require(name)
+            return True
+        except Exception:  # noqa: BLE001 - not registered
+            return False
+
+    stale = {(spec.skill_id, name) for spec in library.list() for name in spec.missing_capabilities
+             if registered(name)}
+    assert stale == set()
