@@ -8,7 +8,7 @@ driven DVWA Hunt sent ``admin``/``password`` and got the sign-in page back.
 
 ``http.request`` with ``form_prefetch: true`` (a POST with ``form_body``) GETs ``form_page`` (or
 the POST's own path) first, then sends the form that posts to the request's path with its hidden
-fields added and the page's cookies set. A field the request already names is never replaced,
+fields and its submit button added and the page's cookies set. A field the request already names is never replaced,
 and nothing the page holds is shown: the values only travel in that one POST.
 """
 from __future__ import annotations
@@ -50,7 +50,7 @@ def _path_of(url: str) -> str:
 
 
 def hidden_fields(html: str, *, page_url: str, post_url: str) -> dict[str, str]:
-    """The hidden inputs of the POST form on ``page_url`` that submits to ``post_url``'s path; when
+    """The hidden inputs (and the first named submit button) of the POST form on ``page_url`` that submits to ``post_url``'s path; when
     no form names that action, the page's one POST form with a password input. Empty otherwise."""
     parser = _FormParser()
     try:
@@ -67,9 +67,13 @@ def hidden_fields(html: str, *, page_url: str, post_url: str) -> dict[str, str]:
     if len(chosen) != 1:
         return {}
     fields: dict[str, str] = {}
-    for item in chosen[0]["inputs"]:
+    # A browser sends the submit button it clicked; some applications act only when that field
+    # arrives (DVWA processes its sign-in only when ``Login`` is posted).
+    submit = next((item for item in chosen[0]["inputs"]
+                   if item["type"] == "submit" and _FIELD_NAME.match(item["name"])), None)
+    for item in [*chosen[0]["inputs"], *([submit] if submit else [])]:
         name = item["name"]
-        if item["type"] != "hidden" or not _FIELD_NAME.match(name) or name in fields:
+        if item is not submit and (item["type"] != "hidden") or not _FIELD_NAME.match(name) or name in fields:
             continue
         value = item["value"]
         if len(value) > MAX_FIELD_VALUE_CHARS or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
