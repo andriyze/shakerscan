@@ -1,4 +1,0 @@
-interface:
-  display_name: "Review Skills"
-  short_description: "Audit ShakerScan skills, commands, and agents"
-  default_prompt: "Use $review-skills to audit every in-scope ShakerScan skill, command, and agent and return severity-ordered findings."

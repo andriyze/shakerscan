@@ -1,1 +1,0 @@
-"""Interactive testing session domain."""

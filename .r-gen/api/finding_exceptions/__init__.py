@@ -1,1 +1,0 @@
-"""Finding exception (waiver) domain."""

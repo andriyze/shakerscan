@@ -1,1 +1,0 @@
-"""Recurring scan schedule domain."""

@@ -1,4 +1,0 @@
-interface:
-  display_name: "JS Analyze"
-  short_description: "Map frontend routes, APIs, libraries, and JS secrets"
-  default_prompt: "Use $js-analyze to map evidence-backed frontend routes, APIs, libraries, secret candidates, and ShakerScan custom_endpoints."

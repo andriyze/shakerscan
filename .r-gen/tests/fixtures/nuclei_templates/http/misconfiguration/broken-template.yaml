@@ -1,8 +1,0 @@
-id: broken-template
-info:
-  name: Broken
-  severity: high
-  tags: exposure, misconfig
-http:
-  - method: POST
-    this is: [not valid yaml: because: of: colons

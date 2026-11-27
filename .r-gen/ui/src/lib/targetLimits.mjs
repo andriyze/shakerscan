@@ -1,1 +1,0 @@
-export const MAX_SCAN_TARGET_CHARS = 2048
