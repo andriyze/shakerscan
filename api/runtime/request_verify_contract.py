@@ -12,7 +12,7 @@ CHECKS: tuple[str, ...] = (
     "sql_injection", "template_injection", "path_traversal", "command_injection", "xxe", "ssrf", "nosql_injection",
     "open_redirect", "crlf_injection", "host_header_injection", "cors", "security_headers",
     "directory_listing", "graphql", "file_upload", "rate_limit", "csrf", "ldap_injection", "jwt",
-    "unauthenticated_api", "exposure",
+    "unauthenticated_api", "exposure", "mass_assignment",
 )
 # What one call holds: the longest check (blind command injection: a baseline, seven echo
 # probes, the substitution probes, two Windows probes and a seven-request timing confirmation; a
@@ -29,7 +29,9 @@ DESCRIPTION = (
     "ssrf (GET), nosql_injection, ldap_injection, crlf_injection, open_redirect. Request checks: "
     "host_header_injection, cors, security_headers, directory_listing, exposure and "
     "unauthenticated_api (anonymous GETs), graphql, jwt (bearer principal), csrf (signed-in write; token_field), rate_limit "
-    "(sign-in POST; parameter = password field), file_upload (parameter = file field; retrieve_path with {filename}). Needs "
+    "(sign-in POST; parameter = password field), file_upload (parameter = file field; retrieve_path with {filename}), mass_assignment (the sign-up POST with its "
+    "fields; parameter = the privileged field, privilege_value, login_path, profile_path with {username}; makes three "
+    "accounts, needs allow_account_creation). Needs "
     "active testing; writes and uploads need state-changing permission."
 )
 
@@ -56,6 +58,12 @@ def input_properties(origin: Mapping[str, Any], as_principal: Mapping[str, Any],
                           "description": "file_upload: where an uploaded file is served, with {filename}."},
         "token_field": {"type": "string", "minLength": 1, "maxLength": 200,
                         "description": "csrf: the anti-CSRF form or JSON field, emptied in the forged request."},
+        "privilege_value": {"type": "string", "maxLength": 80,
+                            "description": "mass_assignment: the value sent in parameter, as JSON (true, \"admin\", 1)."},
+        "login_path": {"type": "string", "minLength": 2, "maxLength": 2_048, "pattern": r"^/(?!/)[^\r\n]*$",
+                       "description": "mass_assignment: where each new account signs in (same body kind as the sign-up)."},
+        "profile_path": {"type": "string", "minLength": 2, "maxLength": 2_048, "pattern": r"^/(?!/)[^\r\n]*$",
+                         "description": "mass_assignment: the account's own profile, read signed in ({username} or {email})."},
         "as_principal": as_principal,
         "session_ref": {
             "type": "string",
