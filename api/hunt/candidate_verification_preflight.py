@@ -109,7 +109,12 @@ def public_verification_families() -> dict[str, Any]:
             "families": ["command_injection", "injection", "nosqli", "path_traversal", "sqli",
                          "ssrf", "ssti"],
             "locus": {"route": "/path of a GET request", "parameter": "the query parameter name"},
-            "note": ("A specific family runs that proof; 'injection' runs every one. XSS (family "
+            "graphql_locus": {"method": "POST", "route": "/graphql endpoint path",
+                              "operation": "the minimal GraphQL document, e.g. query{search(keyword:\"a\"){id}}",
+                              "parameter": "one string argument in it"},
+            "note": ("A specific family runs that proof; 'injection' runs every one. A GraphQL "
+                     "argument is proven in place (graphql_locus); a mutation needs the "
+                     "state-changing permission. XSS (family "
                      "xss) and a request-body parameter are proven by xss.verify and sqli.verify: "
                      "candidate.verify answers with that call, ready to send (next_call)."),
         },
@@ -233,7 +238,7 @@ def web_candidate_preflight(
                 raise CandidateVerificationRefused(
                     422, message, next_call=call, reason_code=_INJECTION_REFUSAL_CODES.get(exc.reason),
                 ) from None
-            return injection_proof.FAMILY, route, "GET"
+            return injection_proof.FAMILY, route, "POST" if injection_proof.graphql_locus(candidate) else "GET"
     locus = _mapping(candidate.get("canonical_locus"))
     context = _mapping(candidate.get("verification_context"))
     family = family_proof.canonical_family(candidate.get("family"))

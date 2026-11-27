@@ -167,6 +167,8 @@ evidence, not authority. See the [scope guide](core/00-engagement-scope-policy.m
 - Do not request cloud metadata credentials, internal admin data, or scan internal ports.
 - Use loopback/private/link-local targets only when explicitly approved and preferably an owner-provided canary.
 - DNS rebinding and redirect chains require specific high-risk approval and tight egress controls.
+- Never point a fetch at the target's own address or port. A single-worker application that fetches
+  itself waits on itself and stops answering every user; one such probe hung a lab app for good.
 
 ## Agent workflow
 

@@ -9,6 +9,10 @@ import time
 from typing import Any, Mapping, Sequence
 import urllib.parse
 try:
+    from capabilities import graphql_argument
+except ModuleNotFoundError:  # package import layout
+    from . import graphql_argument
+try:
     from capabilities.secret_material import keyed_body_digest
 except ModuleNotFoundError:  # package import layout
     from api.capabilities.secret_material import keyed_body_digest
@@ -238,6 +242,8 @@ def replace_private_request_field(
 ) -> tuple[ReplayRequest, str]:
     """Replace one authorized scalar field while preserving the exact request encoding."""
     content_type = _content_type(request)
+    if graphql_argument.is_field(field_path):
+        return _replace_graphql_argument(request, field_path, replacement, content_type), "json"
     if content_type == "application/json" or content_type.endswith("+json"):
         try:
             document = json.loads(request.body.decode("utf-8"))
@@ -282,6 +288,41 @@ def replace_private_request_field(
     raise RequestMutationVerificationError(
         "private request body is not JSON or URL-encoded form data"
     )
+
+
+def graphql_document(request: ReplayRequest) -> tuple[dict[str, Any], str]:
+    """The JSON body of a GraphQL request and its ``query`` document."""
+    content_type = _content_type(request)
+    if content_type != "application/json" and not content_type.endswith("+json"):
+        raise RequestMutationVerificationError("a GraphQL argument is tested in a JSON request body")
+    try:
+        body = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RequestMutationVerificationError("private JSON request body is invalid") from exc
+    if not isinstance(body, dict) or not isinstance(body.get("query"), str):
+        raise RequestMutationVerificationError("the JSON body carries no GraphQL query document")
+    return body, body["query"]
+
+
+def graphql_field_value(request: ReplayRequest, field_path: str) -> str:
+    _body, document = graphql_document(request)
+    try:
+        return graphql_argument.argument_value(document, field_path)
+    except graphql_argument.GraphQLArgumentError as exc:
+        raise RequestMutationVerificationError(str(exc)) from exc
+
+
+def _replace_graphql_argument(
+    request: ReplayRequest, field_path: str, replacement: str, content_type: str,
+) -> ReplayRequest:
+    body, document = graphql_document(request)
+    try:
+        body["query"] = graphql_argument.with_argument(document, field_path, replacement)
+    except graphql_argument.GraphQLArgumentError as exc:
+        raise RequestMutationVerificationError(str(exc)) from exc
+    return replace(request, body=json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8"))
 
 
 def _body_sha256(result: ReplayTransportResult) -> str:

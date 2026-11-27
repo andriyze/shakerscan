@@ -244,11 +244,17 @@ export const HUNT_START_CONTRACT = {
           "ssrf",
           "ssti"
         ],
+        "graphql_locus": {
+          "method": "POST",
+          "operation": "the minimal GraphQL document, e.g. query{search(keyword:\"a\"){id}}",
+          "parameter": "one string argument in it",
+          "route": "/graphql endpoint path"
+        },
         "locus": {
           "parameter": "the query parameter name",
           "route": "/path of a GET request"
         },
-        "note": "A specific family runs that proof; 'injection' runs every one. XSS (family xss) and a request-body parameter are proven by xss.verify and sqli.verify: candidate.verify answers with that call, ready to send (next_call)."
+        "note": "A specific family runs that proof; 'injection' runs every one. A GraphQL argument is proven in place (graphql_locus); a mutation needs the state-changing permission. XSS (family xss) and a request-body parameter are proven by xss.verify and sqli.verify: candidate.verify answers with that call, ready to send (next_call)."
       },
       "injection_verifiers": {
         "sqli.verify": "SQL injection in a URL parameter (path with its query) or a body field (method, body_field_names, injection_field)",

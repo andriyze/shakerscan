@@ -236,13 +236,13 @@ e2cb25807e6d242f40668a8f49573874112a7bea018ea0d93a3ef7869400796d  skills/web/08-
 00b8a3f49b5a623103f3c7ffc2d21fe1b7eb6f969dcd22ffeea2df73e896a8e0  skills/web/09-authorization-idor-bola-bfla-and-property-level-testing.md
 0654f62c67b36750d03a64485df7fd850ea5ba8343a1a15f2b840e93f8b6e463  skills/web/10-business-logic-and-insecure-design-testing.md
 3ec10304154083b0289ecdeb08e6151091c4e69f52d4a6e560b5951461a41440  skills/web/11-api-inventory-openapi-and-contract-testing.md
-f72a0d7f715888db819f96cc1e2f2c10ddd862dbb34696f0e92b8cfad54cf0c6  skills/web/12-graphql-security-testing.md
+90831fb5569ada0a95efb4dca2cfea61755eecce2b5eaa6abe7b510bf322effd  skills/web/12-graphql-security-testing.md
 556c8c53d8990fe4e4f394f12e3073511d9b3416931bc65094cbc41ca1d851b4  skills/web/13-websocket-sse-and-realtime-security-testing.md
 d06d9d4ed7b7e2b93ade9ecdd8e976d13ff384bd62ba6b3023a3fb9bbcf930a1  skills/web/14-sql-nosql-orm-and-ldap-injection-testing.md
 b4b506645417c5d16b6c692ca16a46d523691f0e5b0d060b06e9f16048908400  skills/web/15-command-ssti-expression-and-deserialization-testing.md
 e2d8b33e8c8bd0c7e6affd26bf42bb6525ba23f74bcb04be871689ed40111c15  skills/web/16-xss-dom-and-client-side-injection-testing.md
 3e809c86a1092a83f44157d53bdce1d3f2d83860defd1033ff0f690a554ab049  skills/web/17-csrf-cors-clickjacking-and-cross-origin-testing.md
-aa154ec08dc590a5d01d4d58c01b1c48d51ee97334dcf15ec6fd1b9a7208bdb4  skills/web/18-ssrf-url-fetch-and-cloud-metadata-testing.md
+234cd3cae6ea0e37251906219eb0b33ba09cc7283d5bd86af3b01385c92bb34a  skills/web/18-ssrf-url-fetch-and-cloud-metadata-testing.md
 a6f4a14fe08cbc6ef6e2ea0d7bb6a0c1f06c132e0b4777f5e00341679936445c  skills/web/19-path-traversal-file-inclusion-and-xxe-testing.md
 76dade79f45ddca7590b06ce42c5f5e527bc4d836b6b292fd03cafd9c77d3594  skills/web/20-file-upload-and-file-processing-testing.md
 106cabf3e30c94b01af1b7f0947c2300098cec937078b7eb8c072892eae58a19  skills/web/21-oauth-oidc-saml-and-sso-testing.md
