@@ -60,6 +60,11 @@ except ModuleNotFoundError:  # package layout in host-side tests
     from scanner.redaction import redact_text as _shared_redact_text
 
 
+try:
+    from capabilities.diagnostic_signatures import DIAGNOSTIC_SEED_PATHS, html_signature, json_signature, text_signature
+except ModuleNotFoundError:  # package import layout
+    from .diagnostic_signatures import DIAGNOSTIC_SEED_PATHS, html_signature, json_signature, text_signature
+
 EXPOSURE_PROBE_PARSER_VERSION = "exposure-probe/v4"
 
 # Common discovery locations across frameworks and hosting stacks. Location
@@ -118,6 +123,7 @@ SENSITIVE_SEED_PATHS: tuple[str, ...] = (
     "/backup.sql",
     "/database.sql",
     "/dump.sql",
+    *DIAGNOSTIC_SEED_PATHS,
 )
 # Read besides the list above on the profiles that plan their work to completion (thorough and
 # deep): fast and balanced plans, and what they send, are unchanged. Secret-bearing files
@@ -758,6 +764,8 @@ def _json_signature(path: str, text: str, document: Any) -> ExposureSignature | 
     records = _credential_record_signature(document)
     if records is not None:
         return records
+    if (diagnostic := json_signature(document)) is not None:
+        return _sig(*diagnostic)
     actuator = _actuator_pairs(document)
     if actuator is not None:
         secrets = _secrets(text, actuator, server_side=True)
@@ -1092,6 +1100,8 @@ def _structured_text(path: str, text: str, content_type: str = "") -> ExposureSi
     markdown = _markdown_env_blocks(path, content_type, text)
     if markdown is not None:
         return markdown
+    if (diagnostic := text_signature(path, text)) is not None:
+        return _sig(*diagnostic)
     document = _json_document(text)
     if document is not None:
         return _json_signature(path, text, document)
@@ -1131,6 +1141,8 @@ def _structured_html(text: str, path: str = "") -> ExposureSignature | None:
         return _sig("debug_interface_exposure", "werkzeug_debugger_console", severity="high")
     if _PPROF_RE.search(text):
         return _sig("debug_interface_exposure", "go_pprof_index")
+    if (diagnostic := html_signature(text)) is not None:
+        return _sig(*diagnostic)
     # Only at an IDE location: a documentation page showing the same setup code is not an IDE.
     ide = graphql_ide_page(text) if graphql_ide_location(path) else None
     if ide is not None:
