@@ -94,6 +94,31 @@ def proof_request(
         )
         header_items += (("Content-Type", media_type),)
         payload = body.encode("utf-8")
+    elif parameter.startswith("#") and "*" in parsed.path:
+        # sqlmap names the path segment the planner marked with ``*`` as ``#1*``: the Scan's path
+        # proof tests exactly that segment.
+        segments = parsed.path.split("/")
+        marked = [index for index, segment in enumerate(segments) if segment.endswith("*")]
+        if len(marked) != 1 or marked[0] < 1 or not segments[marked[0]][:-1]:
+            return None
+        index = marked[0]
+        value = urllib.parse.unquote(segments[index][:-1])
+        template = ("{int}" if value.isdigit() else
+                    "{uuid}" if len(value) == 36 and value.count("-") == 4 else "{segment}")
+        canonical = "/".join(template if position == index else segment
+                             for position, segment in enumerate(segments))
+        candidate_id = hashlib.sha256(f"{action_id}:sqli:path_{index}".encode()).hexdigest()[:32]
+        request = ReplayRequest(
+            request_id=f"hunt-sqli:{candidate_id}", ordinal=0, name="Hunt sqli.verify proof", folder="",
+            method="GET", url=urllib.parse.urlunsplit((*parsed[:4], "")), headers=header_items,
+            body=b"", body_mode="none",
+            auth_type="broker_session" if headers else "none", has_sensitive_material=bool(headers),
+        )
+        return request, {
+            "candidate_id": candidate_id, "method": "GET", "field_path": f"path_{index}",
+            "parameter_name": f"path_{index}", "parameter_location": "path",
+            "path_segment_index": index, "canonical_path": canonical, "request_class": "safe_read",
+        }
     else:
         names = [name for name, _value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)]
         if names.count(parameter) != 1:
