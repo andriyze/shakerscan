@@ -416,7 +416,7 @@ def input_checks(name: str, method: str) -> list[tuple[int, str]]:
 
 
 def _default_credential_request(path: str, user: str, secret: str, pair: str, *, json_body: bool,
-                                basic: bool = False) -> dict[str, Any]:
+                                basic: bool = False, form_page: str | None = None) -> dict[str, Any]:
     if basic:
         return {"method": "GET", "path": path, "follow_redirects": False, "request_bindings": [
             {"default_credential": pair, "credential_field": "basic", "header": "Authorization"}]}
@@ -424,6 +424,12 @@ def _default_credential_request(path: str, user: str, secret: str, pair: str, *,
     return {
         "method": "POST", "path": path, "follow_redirects": False,
         ("json_body" if json_body else "form_body"): body,
+        # An HTML sign-in form is posted as a browser posts it: from its own page, with the
+        # page's hidden fields (an anti-CSRF token) and cookies (runtime/form_prefetch).
+        **({} if json_body else {"form_prefetch": True, **({"form_page": form_page} if form_page else {}),
+                                 # An accepted form sign-in answers with its session cookie: kept so
+                                 # the sweep can test the application signed in (adopt_login).
+                                 "capture": [{"name": "session", "header": "Set-Cookie"}]}),
         "request_bindings": [
             {"default_credential": pair, "credential_field": "username", "body_pointer": f"/{user}"},
             {"default_credential": pair, "credential_field": "secret", "body_pointer": f"/{secret}"},
@@ -493,6 +499,7 @@ class Sweep(EngineLogins):
         # keep the wait under one call's time; SHAKERSCAN_SWEEP_CALLS_IN_FLIGHT raises it for a
         # larger worker pool.
         self._in_flight = asyncio.Semaphore(MAX_CALLS_IN_FLIGHT)
+        self.login_pages: dict[str, str] = {}  # a form login's action -> the page that showed it
         self.graphql_seen: list[tuple[str, str]] = []
         self.graphql_done: set[str] = set()
         self._init_engine_logins()
@@ -785,6 +792,7 @@ class Sweep(EngineLogins):
             form = login_form(response)
             if form:
                 self.logins.setdefault(form[0], (form[0], form[1], form[2], False))
+                self.login_pages.setdefault(form[0], path.split("?", 1)[0])
                 self.login_titles.setdefault(form[0], str((response.get("html") or {}).get("title") or "")[:200])
             links.extend(form_entries(response, path))
             links.extend(hint_entries(response, path))
@@ -951,7 +959,8 @@ class Sweep(EngineLogins):
                 await asyncio.sleep(DEFAULT_CREDENTIAL_PACE_SECONDS)
             result = await self._safe(
                 "http.request",
-                _default_credential_request(path, user, secret, pair, json_body=json_body, basic=basic),
+                _default_credential_request(path, user, secret, pair, json_body=json_body, basic=basic,
+                                            form_page=self.login_pages.get(path)),
                 sweep_key("default-credentials", path, pair, *(("basic",) if basic else ())))
             response = _response(result)
             verdict = str((response.get("login_attempt") or {}).get("verdict")
@@ -960,11 +969,13 @@ class Sweep(EngineLogins):
                 break
             action = _action_id(result)
             if verdict == "accepted" and action and not basic:
-                # Chaining: the accepted pair's session is a login the sweep uses like its own accounts.
+                # Chaining: the accepted pair's session (a bearer token, else the form's session
+                # cookie) is a login the sweep uses like its own accounts.
                 token = engine_accounts.token_ref(response)
-                if token:
-                    self.adopt_login(f"default {pair} ({path})", engine_accounts.bindings_for(
-                        token=token, cookie_action=None), refs=engine_accounts.own_refs(response))
+                bindings = engine_accounts.bindings_for(
+                    token=token, cookie_action=None if token or json_body else action)
+                if bindings:
+                    self.adopt_login(f"default {pair} ({path})", bindings, refs=engine_accounts.own_refs(response))
             if verdict == "accepted" and action:
                 await self._candidate_and_verify({
                     "family": "default_credentials",

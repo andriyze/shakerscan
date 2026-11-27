@@ -632,6 +632,32 @@ async def execute_bound_http_request(
         if isinstance(args.get("form_body"), dict) else None
     )
     url = urllib.parse.urljoin(request_origin + "/", path.lstrip("/"))
+    prefetch_view: dict[str, Any] | None = None
+    if args.get("form_prefetch") is True and method == "POST" and form_body is not None:
+        # The form's own page first (runtime/form_prefetch): its hidden fields (an anti-CSRF
+        # token) and the page's cookies go with this POST; the request's own fields win.
+        from runtime import form_prefetch
+        page_path = agent_tools.validate_same_origin_path(args.get("form_page") or path)
+        seen: dict[str, Any] = {}
+
+        def keep(private: WorkerPrivateHTTPResponse) -> None:
+            seen["body"], seen["cookies"] = private.body(), dict(private.cookies() or {})
+
+        page = await execute_bound_http_request(
+            base_url, {"method": "GET", "path": page_path, "follow_redirects": False,
+                       **({"origin": args["origin"]} if args.get("origin") else {})},
+            target=target, trusted_headers=trusted_headers, allow_identity_headers=allow_identity_headers,
+            direct_origin_addresses=direct_origin_addresses, transaction_recorder=transaction_recorder,
+            cookies=cookies, principal_slot=principal_slot, timeout_seconds=timeout_seconds,
+            private_response_sink=keep, response_body_limit=MAX_PRIVATE_BODY_BYTES)
+        page_url = urllib.parse.urljoin(request_origin + "/", page_path.lstrip("/"))
+        hidden = form_prefetch.hidden_fields(
+            bytes(seen.get("body") or b"").decode("utf-8", "replace"), page_url=page_url, post_url=url)
+        added = {name: value for name, value in hidden.items() if name not in form_body}
+        form_body = {**form_body, **added}
+        cookies = {**dict(seen.get("cookies") or {}), **dict(cookies or {})}
+        prefetch_view = {"page": page_path, "status": (page.get("response") or {}).get("status"),
+                         "hidden_fields": sorted(added), "cookies": sorted(dict(seen.get("cookies") or {}))}
     request_view = {
         "method": method,
         "origin": request_origin,
@@ -970,6 +996,9 @@ async def execute_bound_http_request(
     if follow_redirects:
         result["redirect_chain"] = redirect_chain
         result["hops_followed"] = hops_followed
+    if prefetch_view is not None:
+        result["form_prefetch"] = prefetch_view
+        result["prefetch_requests"] = 1
     if active_withheld_values() is not None:
         # Inside a Hunt worker the result is the planner's view: every public URL field's secret
         # parameters become references (N56), for a plain GET as for a bound workflow request.

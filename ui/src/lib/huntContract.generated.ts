@@ -1730,6 +1730,8 @@ export const HUNT_START_CONTRACT = {
           "query",
           "headers",
           "follow_redirects",
+          "form_prefetch",
+          "form_page",
           "session_ref",
           "via_address",
           "as_principal",

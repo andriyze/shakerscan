@@ -127,8 +127,13 @@ def build_request(shape: Mapping[str, Any], *, username: str | None, secret: str
     if shape.get("user_pointer") and username is not None:
         pointer_set(body, str(shape["user_pointer"]), username)
     pointer_set(body, str(shape["secret_pointer"]), secret)
-    return {"method": "POST", "origin": origin, "path": url.path or "/", body_kind: body,
-            "follow_redirects": False}
+    request = {"method": "POST", "origin": origin, "path": url.path or "/", body_kind: body,
+               "follow_redirects": False}
+    if shape.get("form_prefetch") is True and body_kind == "form_body":
+        request["form_prefetch"] = True
+        if shape.get("form_page"):
+            request["form_page"] = str(shape["form_page"])
+    return request
 
 
 async def _admit(conn: Any, *, run: Mapping[str, Any], login_key: str, pair_id: str, reserve: int) -> None:

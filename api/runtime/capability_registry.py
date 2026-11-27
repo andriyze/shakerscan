@@ -1529,6 +1529,12 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
                 "follow_redirects": {"type": "boolean"},
+                "form_prefetch": {"type": "boolean", "description": (
+                    "A form POST (form_body) that first GETs its page (form_page, else its own path) "
+                    "and sends that form's hidden fields (an anti-CSRF token) and the page's cookies "
+                    "with it; the request's own fields win. Two requests.")},
+                "form_page": {"type": "string", "maxLength": 2048,
+                              "description": "The page holding the form, for form_prefetch."},
                 "session_ref": {
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",

@@ -255,6 +255,11 @@ def request_shape(values: Mapping[str, Any], login_url: str) -> dict[str, Any]:
         "secret_pointer": pointers.get("secret") or None,
         "replayable": all(BINDING_KEY in item for item in bindings) and bool(pointers.get("secret")),
     }
+    if values.get("form_prefetch") is True and body_kind == "form":
+        # The page's hidden fields (a CSRF token) are read again on each replay (form_prefetch).
+        shape["form_prefetch"] = True
+        if isinstance(values.get("form_page"), str) and values["form_page"].startswith("/"):
+            shape["form_page"] = values["form_page"][:2048]
     if len(json.dumps(shape, default=str)) > MAX_SHAPE_BYTES:
         shape = {**shape, "body": {}, "replayable": False}
     return shape
