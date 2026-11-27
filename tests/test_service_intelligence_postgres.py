@@ -153,3 +153,27 @@ async def test_intel_bundle_high_water_mark_only_rises_and_repairs_the_mark_file
     finally:
         await conn.execute("DROP TABLE IF EXISTS intel_bundle_high_water")
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_reading_the_optional_source_choice_never_aborts_the_callers_transaction():
+    """The choice is read inside the caller's read-only snapshot transaction. When the settings
+    table cannot be read, the sources are off and the caller's transaction is still usable."""
+    import asyncpg
+    from api.exposure.intel_sources import load_intel_sources
+
+    off = {"curated_briefings": False, "vendor_declared_ranges": False}
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("SET search_path TO pg_temp")       # no app_settings visible at all
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            assert await load_intel_sources(conn) == off
+            assert await conn.fetchval("SELECT 1") == 1          # not InFailedSQLTransaction
+        assert await load_intel_sources(conn) == off             # and outside a transaction
+        await conn.execute("CREATE TEMP TABLE app_settings (key text PRIMARY KEY, value text)")
+        await conn.execute("INSERT INTO app_settings VALUES ('intel_curated_briefings_enabled','true'),"
+                           "('intel_vendor_declared_ranges_enabled','false')")
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            assert await load_intel_sources(conn) == {"curated_briefings": True, "vendor_declared_ranges": False}
+    finally:
+        await conn.close()
