@@ -40,9 +40,12 @@ def name_sources(evidence: Mapping[str, Iterable[Any]] | None, name: str) -> lis
 
 def name_provenance(
     name: str, *, evidence: Mapping[str, Iterable[Any]] | None, dns_status: str,
-    discovery_id: str | None, observed_at: str | None,
+    discovery_id: str | None, observed_at: str | None, wildcard_match: bool = False,
 ) -> dict[str, Any]:
-    """The provenance stored on a newly recorded target (``metadata_json.discovery``)."""
+    """The provenance stored on a newly recorded target (``metadata_json.discovery``).
+
+    ``wildcard_match``: the name's DNS answer is its parent zone's wildcard answer; it was kept
+    because a passive source named it or it is a ``www`` name (``discovery_wildcards``)."""
     sources = name_sources(evidence, name)
     certificate = has_certificate_evidence(sources)
     return {
@@ -56,6 +59,7 @@ def name_provenance(
         "discovery_id": discovery_id,
         "first_observed_at": observed_at,
         "last_observed_at": observed_at,
+        **({"wildcard_match": True} if wildcard_match else {}),
     }
 
 

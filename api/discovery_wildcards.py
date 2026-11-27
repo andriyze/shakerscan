@@ -10,9 +10,20 @@ Before discovered names under an apex are inserted, the planner resolves a few r
 number. A parent whose random labels resolve publishes a wildcard; its answer set (addresses, and the
 first CNAME hop the random labels alias) is recorded. A discovered name is then suppressed when
 its own answer is exactly that answer -- the same first CNAME hop, or, without a CNAME, the same
-address set -- under its immediate, judged parent, and nothing but DNS speaks for it. A name a
-certificate names (Certificate Transparency via Gungnir, crt.sh, or a CT-backed subfinder source)
-is kept: someone requested a certificate for it, which a wildcard echo never does.
+address set -- under its immediate, judged parent (a *wildcard match*).
+
+A wildcard match is dropped only when discovery guessed the name itself (``GUESSED_SOURCES``: the
+Scan's own DNS enumeration), or when no source is recorded for it. Behind a CDN every proxied name
+resolves to the wildcard's anycast addresses, so the address set cannot tell a real site from an
+echo: matching by address alone dropped ``www`` and every other real name of such a zone. So a
+wildcard match is kept, marked ``wildcard_match``, when:
+
+* a passive source named it (Certificate Transparency via Gungnir or crt.sh, or any subfinder
+  feed): someone saw the name in use, which no echo of a guess ever is; or
+* it is a ``www`` name, which a zone publishes for its site far more often than not.
+
+Kept matches are listed after the other names, so a target limit is filled with names that have
+their own DNS answer first.
 
 This module only decides; the lookups are made by ``target_resolution`` with its resolver,
 concurrency, per-lookup timeout and overall deadline. Probes are DNS questions for names under
@@ -38,6 +49,11 @@ _RECORDED_ANSWERS = 10
 CERTIFICATE_SOURCES = frozenset({
     "gungnir", "gungnir-monitor", "crtsh", "certspotter", "censys", "digitorus", "facebook",
 })
+
+
+# Sources whose names discovery made up itself and then resolved: under a wildcard every guess
+# resolves, so a guess that only matches the wildcard's answer says nothing about the name.
+GUESSED_SOURCES = frozenset({"dns_enumeration"})
 
 
 def _source_name(value: Any) -> str:
@@ -148,6 +164,39 @@ def is_wildcard_echo(
     return not cnames and bool(answered) and answered == set(wildcard.get("addresses") or ())
 
 
+def keeps_wildcard_match(name: str, sources: Iterable[Any] | None) -> bool:
+    """Whether a name whose answer matches its parent's wildcard is still kept (and marked).
+
+    Kept: a ``www`` name, and a name any passive source reported. Dropped: a name only discovery's
+    own guessing produced, or one with no recorded source.
+    """
+    if str(name).split(".", 1)[0] == "www":
+        return True
+    return any(
+        str(source or "").strip() and _source_name(source) not in GUESSED_SOURCES
+        for source in sources or ()
+    )
+
+
+def wildcard_matches(
+    root: str,
+    judged_names: Iterable[tuple[str, str, list[str], str | None]],
+    *,
+    wildcards: Mapping[str, Mapping[str, Any]],
+    judged_parents: set[str],
+    resolves: str,
+) -> dict[str, str]:
+    """``{name: wildcard parent}`` for every resolving name whose answer is its parent's wildcard."""
+    matched: dict[str, str] = {}
+    for name, status, addresses, first_hop in judged_names:
+        if status != resolves:
+            continue
+        wildcard = nearest_wildcard(name, root, judged_parents, wildcards)
+        if is_wildcard_echo(addresses, first_hop, wildcard):
+            matched[name] = str(wildcard["parent"])
+    return matched
+
+
 def suppress_echoes(
     root: str,
     judged_names: Iterable[tuple[str, str, list[str], str | None]],
@@ -157,19 +206,20 @@ def suppress_echoes(
     evidence: Mapping[str, Iterable[Any]] | None,
     resolves: str,
 ) -> tuple[set[str], dict[str, int]]:
-    """Names to drop as wildcard echoes, and how many each wildcard parent suppressed."""
+    """Names to drop as wildcard echoes, and how many each wildcard parent suppressed.
+
+    Only a wildcard match that ``keeps_wildcard_match`` does not keep is dropped.
+    """
     suppressed: set[str] = set()
     per_parent: Counter[str] = Counter()
-    for name, status, addresses, first_hop in judged_names:
-        if status != resolves:
-            continue
-        wildcard = nearest_wildcard(name, root, judged_parents, wildcards)
-        if not is_wildcard_echo(addresses, first_hop, wildcard):
-            continue
-        if has_certificate_evidence((evidence or {}).get(name)):
+    matched = wildcard_matches(
+        root, judged_names, wildcards=wildcards, judged_parents=judged_parents, resolves=resolves,
+    )
+    for name, parent in matched.items():
+        if keeps_wildcard_match(name, (evidence or {}).get(name)):
             continue
         suppressed.add(name)
-        per_parent[str(wildcard["parent"])] += 1
+        per_parent[parent] += 1
     return suppressed, dict(per_parent)
 
 
@@ -203,7 +253,7 @@ def name_sources(by_source: Mapping[str, Iterable[str]]) -> dict[str, list[str]]
 
 
 __all__ = [
-    "CERTIFICATE_SOURCES", "PARENT_LIMIT", "PROBES_PER_PARENT", "has_certificate_evidence",
-    "is_wildcard_echo", "name_sources", "nearest_wildcard", "probe_names", "probe_parents",
+    "CERTIFICATE_SOURCES", "GUESSED_SOURCES", "PARENT_LIMIT", "PROBES_PER_PARENT",
+    "has_certificate_evidence", "is_wildcard_echo", "keeps_wildcard_match", "wildcard_matches", "name_sources", "nearest_wildcard", "probe_names", "probe_parents",
     "suppress_echoes", "wildcard_answers", "wildcard_summary",
 ]

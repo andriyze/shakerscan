@@ -488,13 +488,23 @@ async def plan_discovered_targets(
         root or "", judged, wildcards=wildcards, judged_parents=judged_parents,
         evidence=evidence, resolves=RESOLVES,
     ) if wildcards else (set(), {})
+    # Matches kept because a passive source named them (or they are www): scannable, marked, and
+    # listed after the names with their own answer so a target limit takes those first.
+    kept_matches = set(discovery_wildcards.wildcard_matches(
+        root or "", judged, wildcards=wildcards, judged_parents=judged_parents, resolves=RESOLVES,
+    )) - suppressed if wildcards else set()
     records, notes = discovery_wildcards.wildcard_summary(wildcards, per_parent)
     classified = [(name, status) for name, status, *_rest in judged]
+    scannable = [
+        name for name, status in classified
+        if status != NO_ADDRESS and name not in suppressed
+    ]
     return {
-        "scannable": [
-            name for name, status in classified
-            if status != NO_ADDRESS and name not in suppressed
-        ],
+        "scannable": (
+            [name for name in scannable if name not in kept_matches]
+            + [name for name in scannable if name in kept_matches]
+        ),
+        "wildcard_match": [name for name in scannable if name in kept_matches],
         "unresolved": [name for name, status in classified if status == NO_ADDRESS],
         "unknown": [name for name, status in classified if status == UNKNOWN],
         "not_checked": [name for name, status in classified if status == NOT_CHECKED],
@@ -541,6 +551,7 @@ async def store_discovered_targets(
     outside_root = int(plan.get("outside_root_count") or 0) + len(planned) - len(scannable)
     unresolved = list(plan.get("unresolved") or [])
     suppressed = list(plan.get("wildcard_suppressed") or [])
+    wildcard_matched = set(plan.get("wildcard_match") or ())
     added = 0
     failed = 0
     already_known: list[str] = []
@@ -548,6 +559,7 @@ async def store_discovered_targets(
         provenance = discovery_provenance.name_provenance(
             name, evidence=evidence, dns_status=discovery_provenance.dns_status_of(name, plan),
             discovery_id=discovery_id, observed_at=observed_at,
+            wildcard_match=name in wildcard_matched,
         )
         try:
             tag = await conn.execute(
@@ -591,6 +603,8 @@ async def store_discovered_targets(
         "outside_root_count": outside_root,
         "wildcard_suppressed_count": len(suppressed),
         "wildcard_suppressed": suppressed[:_REPORTED_NAME_LIMIT],
+        "wildcard_match_kept_count": len(wildcard_matched),
+        "wildcard_match_kept": sorted(wildcard_matched)[:_REPORTED_NAME_LIMIT],
         "wildcards": list(plan.get("wildcards") or []),
         "notes": list(plan.get("wildcard_notes") or []),
     }

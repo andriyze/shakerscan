@@ -210,6 +210,11 @@ async def enumerate_dns_names(
             root, names, wildcards=wildcards, judged_parents=judged_parents,
             evidence=None, resolves=target_resolution.RESOLVES,
         ) if wildcards else (set(), {})
+        # A kept match (a ``www`` guess) is reported, marked: its answer is the wildcard's.
+        matched = set(discovery_wildcards.wildcard_matches(
+            root, names, wildcards=wildcards, judged_parents=judged_parents,
+            resolves=target_resolution.RESOLVES,
+        )) if wildcards else set()
         records, _notes = discovery_wildcards.wildcard_summary(wildcards, per_parent)
         # Every enumerated name sits directly under the root, so the root's probes judge them
         # all. When those probes could not be judged (a resolver fault, the deadline), a
@@ -228,6 +233,7 @@ async def enumerate_dns_names(
                 "kind": "subdomain", "host": name, "root_domain": root,
                 "source": "dns_enumeration", "dns_status": "resolves",
                 "address_count": len(addresses), "alias": bool(first_hop),
+                **({"wildcard_match": True} if name in matched else {}),
             })
         statuses = [row[1] for row in names]
         summaries.append({
