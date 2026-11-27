@@ -418,7 +418,11 @@ def test_route_names_are_tried_under_each_api_root_against_a_control():
     assert "GET /api/status" not in recorded or True  # the mapped route itself is already known
     assert "GET /api/search" not in recorded  # answered like the control
     tried = [v["path"] for cap, v, _ in engine.calls if cap == "http.request" and v["path"].startswith("/api/v1/")]
-    assert len([p for p in tried if p != "/api/v1/chat/health"]) == len(API_ROUTE_WORDS) + 1  # names + control
+    from api.hunt.server_sweep import destructive_route
+    names = [word for word in API_ROUTE_WORDS if not destructive_route(f"/api/v1/{word}")]
+    assert len(names) < len(API_ROUTE_WORDS)  # auth/logout and its kind are never guessed
+    assert len([p for p in tried if p != "/api/v1/chat/health"]) == len(names) + 1  # names + control
+    assert not any(destructive_route(p) for p in tried)
     assert state["sweep_stats"]["api_roots"] == ["/api", "/api/v1"]
     from pathlib import Path
     bundled = [line.strip() for line in (Path(__file__).resolve().parents[1] / "scanner" / "wordlists" /
@@ -829,3 +833,16 @@ def test_the_xss_tool_runs_only_where_the_reflection_screen_saw_the_marker():
                 .run(_run(allowed=["http.request", "xss.verify"]), report))
     xss = [v["path"] for cap, v, _ in engine.calls if cap == "xss.verify"]
     assert xss == ["/echo?q=1"]
+
+
+def test_the_engine_never_sends_its_own_request_to_a_destructive_route():
+    """On VAmPI the engine read GET /createdb (mapped from the spec) 66 times; each recreated the
+    application's database. A route naming a destructive operation is never the engine's target."""
+    from api.hunt.server_sweep import destructive_route
+
+    for path in ("/createdb", "/api/reset", "/admin/db_reset?x=1", "/users/logout", "/cache/flush",
+                 "/api/v1/users/7/delete", "/setup", "/install.php"):
+        assert destructive_route(path), path
+    for path in ("/users/v1/{id}", "/books/v1", "/api/products?q=reset", "/resetting-guide",
+                 "/deleted-items", "/api/settings", "/runtime/status", "/install-guide/intro"):
+        assert not destructive_route(path), path

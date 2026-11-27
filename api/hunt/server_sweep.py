@@ -169,6 +169,25 @@ _EXPOSURE_ROUTE = re.compile(
     r"env|environment|trace|logs?|console|actuator(?:/[a-z]+)?|heapdump|dump|backups?|config|"
     r"configuration|settings|ftp|well-known)$)", re.I)
 # An API root a route sits under: /api, /api/v1, /rest, /v2 ... (the sweep tries API_ROUTE_WORDS there).
+# A path segment that names an operation which destroys, resets or ends something: a GET to it is a
+# write on many applications (VAmPI's GET /createdb recreates its database; a GET /logout ends the
+# session every later check runs in). The engine's own requests never go there.
+_DESTRUCTIVE_SEGMENT = re.compile(
+    r"^(?:create-?db|init-?db|drop-?db|reset-?db|db-?reset|reset|reset-?all|factory-?reset|init|initiali[sz]e|"
+    r"setup|install|seed|populate|migrate|drop|purge|wipe|truncate|destroy|delete|remove|erase|clear|flush|"
+    r"shutdown|restart|reboot|kill|log-?out|log-?off|sign-?out|deactivate|disable|unsubscribe)$", re.I)
+
+
+def destructive_route(path: str) -> bool:
+    """Whether a path has a segment naming a destructive operation (``/createdb``, ``/api/reset``)."""
+    route = path.split("?", 1)[0].split("#", 1)[0].lower()
+    for segment in route.split("/"):
+        for part in {segment, *re.split(r"[._]", segment)}:
+            if part and _DESTRUCTIVE_SEGMENT.match(part):
+                return True
+    return False
+
+
 _API_PREFIX = re.compile(r"^(/(?:api|rest|v[0-9]{1,2})(?:/v[0-9]{1,2})?)(?=/|$)", re.I)
 # A framework's validation answer that names the inputs a route requires (FastAPI/pydantic
 # ``"loc": ["query", "id"]``, and the plain "missing parameter 'x'" wording of other stacks).
@@ -486,7 +505,12 @@ class Sweep(EngineLogins):
                     slot_wait_seconds: float = 0) -> Any:
         """One capability call; a refusal is counted and named. With ``slot_wait_seconds``, a
         refusal because the Hunt's long-action slots are all taken is retried (same key) once a
-        slot may have settled, for at most that long."""
+        slot may have settled, for at most that long. The engine never sends its own request to a
+        route that names a destructive operation (``destructive_route``), whatever the method."""
+        paths = [values.get("path"), *(values.get("routes") or ())] if isinstance(values, Mapping) else []
+        if any(destructive_route(str(path or "")) for path in paths):
+            self._count(f"{capability}:destructive_route_skipped")
+            return None
         waited = 0.0
         while True:
             if not await self._live():
