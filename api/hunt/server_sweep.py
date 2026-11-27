@@ -987,10 +987,7 @@ class Sweep(EngineLogins):
         """Whether ``route`` belongs to a product discovery recognised: under one of its mounts, one
         of its own identity or route paths, or a management route of a known product API."""
         if self._product_prefixes is None:
-            try:
-                from .auto_discovery import PRODUCTS
-            except ImportError:  # pragma: no cover - the module is always present
-                PRODUCTS = ()
+            from .products import PRODUCTS
             recognised = {str(key) for key in self.state.get("products") or ()}
             prefixes: set[str] = set()
             for product in PRODUCTS:

@@ -850,7 +850,7 @@ def test_capability_tool_describes_each_capabilitys_input_fields():
     described = tool["inputSchema"]["properties"]["input"]["description"]
     assert "\nhttp.request: method, path (optional: " in described
     assert "\nartifact.inspect: path" in described and "\ncandidate.verify: candidate_id" in described
-    assert "no required fields ({} is valid)" in described
+    assert "none required ({} is valid)" in described
     assert tool["inputSchema"]["properties"]["input"]["type"] == "object"
     # An engine whose contract predates the field still gets the examples.
     older = next(item for item in ManifestHuntClient().list_tools() if item["name"] == "shakerscan_hunt_capability")

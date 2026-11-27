@@ -1927,7 +1927,7 @@ def _capability_inputs_text(contract: Mapping[str, Any]) -> str:
             continue
         required = [str(item) for item in call["input"].get("required") or ()]
         optional = [str(item) for item in call["input"].get("fields") or () if str(item) not in required]
-        text = ", ".join(required) if required else "no required fields ({} is valid)"
+        text = ", ".join(required) if required else "none required ({} is valid)"
         if optional:
             text += f" (optional: {', '.join(optional)})"
         lines.append(f"{call['name']}: {text}")

@@ -492,9 +492,9 @@ _ARTIFACT_REQUEST_BINDINGS: Mapping[str, Any] = {
         "required": ["header"],
         "oneOf": [{"required": ["source_action_id", "capture_name"]}, {"required": ["withheld_ref"]}],
         "properties": {
-            # A value this Hunt withheld from an answer (withheld_values[].ref), e.g. a sign-in's token.
-            "withheld_ref": {"type": "string", "maxLength": 80,
-                "pattern": "^withheld://hunt/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[0-9]{1,4}$"},
+            # A value this Hunt withheld from an answer (withheld_values[].ref), e.g. a sign-in's token;
+            # its form (withheld://hunt/<action id>/<n>) is checked where it is resolved.
+            "withheld_ref": {"type": "string", "maxLength": 80},
             "source_action_id": {"type": "string", "maxLength": 36,
                 "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
             "capture_name": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$"},

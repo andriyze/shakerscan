@@ -60,11 +60,10 @@ HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
                     "value; it is never shown. An unattached one raises a login.use request.")},
             "default_credential": {"type": "string", "maxLength": 5, "pattern": DEFAULT_CREDENTIAL_PATTERN,
                 "description": ("A built-in default or common credential pair, by reference (briefing "
-                    "default_credentials). Only in a login POST on the Hunt's own host, with "
-                    "credential_field username or secret and a body_pointer; or, on a route that "
-                    "answered 401 with a Basic challenge, in a GET with credential_field basic and "
-                    "header Authorization. Bounded per login, paced, and stopped at a lockout or "
-                    "rate-limit sign by the server.")},
+                    "default_credentials). In a login POST on the Hunt's own host (credential_field "
+                    "username or secret, body_pointer), or a GET of a route that asked for HTTP Basic "
+                    "(credential_field basic, header Authorization). Bounded, paced, stopped at a "
+                    "lockout sign.")},
             "capture_name": {"type": "string", "pattern": _NAME},
             "principal": {"type": "string", "enum": ["primary", "secondary", "service"]},
             "profile_id": {"type": "string", "maxLength": 36},
