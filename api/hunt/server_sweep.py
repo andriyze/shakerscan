@@ -960,10 +960,16 @@ class Sweep(EngineLogins):
             for capability, klass in (("sqli.verify", "sqli"), ("xss.verify", "xss")):
                 if capability not in allowed or klass not in untested or (capability == "sqli.verify" and screened):
                     continue
+                # The XSS tool (seconds to minutes and tens of requests an input) runs where one
+                # request with a marker in every input saw the marker come back unencoded, on every
+                # route: measured Hunts spent the whole tool-time budget on inputs that reflect
+                # nothing. A request with no answer falls back to the tool.
+                if capability == "xss.verify" and "http.request" in allowed and (method == "GET" or writes):
+                    self._count("xss.verify:reflection_screened")
+                    self._queue_reflection(method, route, params, identity)
+                    continue
                 if product:
                     self._count(f"{capability}:product_flag_needed")
-                    if capability == "xss.verify" and (method == "GET" or writes):
-                        self._queue_reflection(method, route, params, identity)
                     continue
                 if method == "GET":
                     jobs.append(_tool_job(capability, klass, method, route, params, None, identity))
@@ -1010,9 +1016,10 @@ class Sweep(EngineLogins):
 
     def _queue_reflection(self, method: str, route: str, params: Sequence[str],
                           identity: Mapping[str, Any]) -> None:
-        """One request with a marker in every input of a product route; xss.verify follows for each
-        input that comes back with the marker's angle bracket unencoded."""
-        key = f"{method} {route}"
+        """One request with a marker in every input of a route; xss.verify follows for each input
+        that comes back with the marker's angle bracket unencoded."""
+        # Keyed by the inputs too: a route that gains an input (a later request named it) is screened again.
+        key = f"{method} {route} " + ",".join(sorted(params)) + " " + json.dumps(dict(identity), sort_keys=True)
         if key in self.reflection_probed:
             return
         self.reflection_probed.add(key)
@@ -1027,8 +1034,14 @@ class Sweep(EngineLogins):
                 values["path"] = f"{concrete(route)}?" + urllib.parse.urlencode(marks)
             else:
                 values["form_body"] = dict(marks)
-            result = await self._safe("http.request", values, sweep_key("reflect", method, route))
-            text = str(_response(result).get("body_sample") or "")
+            result = await self._safe("http.request", values, sweep_key("reflect", key))
+            answer = _response(result)
+            if not isinstance(answer.get("status"), int):
+                # The screen got no answer (refused, a transport error): the tool decides instead.
+                self._queue_long(_tool_job("xss.verify", "xss", method, route, params,
+                                           None if method == "GET" else (names[0] if names else None), identity))
+                return
+            text = str(answer.get("body_sample") or "")
             for name, mark in marks.items():
                 if mark in text:
                     self._count("reflection_flagged")

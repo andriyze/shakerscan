@@ -67,11 +67,17 @@ class _Engine:
             raise Refused("not in this Hunt's capabilities")
         if capability != "http.request":
             return {"action_id": f"x{len(self.calls)}", "action_result": {"status": "success", "observations": []}}
+        if values["method"] == "POST" and not values.get("request_bindings"):
+            # An application that echoes what it is sent (the XSS screen's marker comes back).
+            return _answer(200, " ".join(str(v) for v in (values.get("form_body") or values.get("json_body") or {}).values()))
         if values["method"] == "POST":
             pair = values["request_bindings"][0]["default_credential"]
             return _answer(303, login_attempt="accepted" if pair == self.accept_pair else "rejected",
                            action=f"login-{pair}")
         path = values["path"]
+        if "zsk" in path:  # the XSS screen's marker request: this application reflects its query
+            import urllib.parse as _parse
+            return _answer(200, _parse.unquote_plus(path.split("?", 1)[1]))
         if path == "/.env":
             return _answer(200, "DB_PASSWORD=[withheld:1]", action="env")
         if path == "/backup/":
@@ -149,7 +155,8 @@ def test_the_sweep_reads_proves_logs_in_checks_authz_and_runs_injection_verifier
     assert ("sqli.verify", {"path": "/api/comment", "method": "POST", "body_field_names": ["body", "author"],
                             "injection_field": "body"}) in injections
     order = [cap for cap, _ in injections]
-    assert order.index("sqli.verify") >= order.count("xss.verify") - 1  # XSS (fast) first
+    # XSS runs after its reflection screen, so it is no longer ahead of SQL injection in the queue.
+    assert "xss.verify" in order and "sqli.verify" in order
     keys = [key for _cap, _v, key in engine.calls]
     assert len(keys) == len(set(keys)) and all(key.startswith("auto-sweep:") for key in keys)
     assert state["sweep"] == "done" and state["sweep_counts"]["sqli.verify"] >= 3
@@ -805,3 +812,20 @@ def test_signed_in_routes_with_nothing_open_and_template_artifacts():
     assert basket and all(v["request_bindings"] == login for v in basket)
     assert {"jwt", "sql_injection"} <= {v["check"] for v in basket}
     assert not any("{{" in v["path"] for v in checks)  # an unrendered template is not a route
+
+
+def test_the_xss_tool_runs_only_where_the_reflection_screen_saw_the_marker():
+    class Mixed(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and "zsk" in values.get("path", "") and values["path"].startswith("/plain"):
+                self.calls.append((capability, dict(values), key))
+                return _answer(200, "results for &lt;encoded&gt;")  # encodes what it is sent
+            return await super().call(capability, values, key)
+
+    engine = Mixed()
+    report = {"open": [{"endpoint": "GET /echo", "untested": ["xss"], "params": ["q"]},
+                       {"endpoint": "GET /plain", "untested": ["xss"], "params": ["q"]}]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request", "xss.verify"]), report))
+    xss = [v["path"] for cap, v, _ in engine.calls if cap == "xss.verify"]
+    assert xss == ["/echo?q=1"]
