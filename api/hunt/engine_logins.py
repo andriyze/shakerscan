@@ -78,30 +78,36 @@ class EngineLogins:
 
     async def _sign_in(self, account: Mapping[str, str]) -> dict[str, Any] | None:
         for path, (_path, user, secret, json_body) in list(self.logins.items())[:4]:
-            body = {user: account["email"] if "mail" in user.lower() else account["username"],
-                    secret: account["password"]}
-            if json_body:
-                # A JSON sign-in may name its account by email or by user name: send both.
-                body.setdefault("email", account["email"])
-                body.setdefault("username", account["username"])
-            values = {"method": "POST", "path": path, ("json_body" if json_body else "form_body"): body,
-                      "follow_redirects": False}
-            result = await self._safe("http.request", values, self._key("signin", path, account["email"]))
-            response = self._response_of(result)
-            status = response.get("status")
-            if not isinstance(status, int) or status >= 400:
-                continue
-            token = ea.token_ref(response)
-            if token:
-                return {"bindings": ea.bindings_for(token=token, cookie_action=None), "refs": ea.own_refs(response)}
-            if response.get("set_cookie_metadata"):
-                # A cookie session: sign in again, capturing it (a captured answer shows no body).
-                captured = await self._safe("http.request", {**values, "capture": [
-                    {"name": "session", "header": "Set-Cookie"}]}, self._key("signin-capture", path, account["email"]))
-                action = self._action_of(captured)
-                if action and isinstance(self._response_of(captured).get("status"), int):
-                    return {"bindings": ea.bindings_for(token=None, cookie_action=action),
-                            "refs": ea.own_refs(response)}
+            # One account field per request (the field the form names; a JSON sign-in may sign in by
+            # email instead): authz.verify tells two accounts apart by it.
+            fields = [user] + (["email"] if json_body and "mail" not in user.lower() else [])
+            for field in fields:
+                found = await self._sign_in_once(path, field, secret, json_body, account)
+                if found:
+                    return found
+        return None
+
+    async def _sign_in_once(self, path: str, user: str, secret: str, json_body: bool,
+                            account: Mapping[str, str]) -> dict[str, Any] | None:
+        body = {user: account["email"] if "mail" in user.lower() else account["username"],
+                secret: account["password"]}
+        values = {"method": "POST", "path": path, ("json_body" if json_body else "form_body"): body,
+                  "follow_redirects": False}
+        result = await self._safe("http.request", values, self._key("signin", path, user, account["email"]))
+        response = self._response_of(result)
+        status = response.get("status")
+        if not isinstance(status, int) or status >= 400:
+            return None
+        token = ea.token_ref(response)
+        if token:
+            return {"bindings": ea.bindings_for(token=token, cookie_action=None), "refs": ea.own_refs(response)}
+        if response.get("set_cookie_metadata"):
+            # A cookie session: sign in again, capturing it (a captured answer shows no body).
+            captured = await self._safe("http.request", {**values, "capture": [
+                {"name": "session", "header": "Set-Cookie"}]}, self._key("signin-capture", path, user, account["email"]))
+            action = self._action_of(captured)
+            if action and isinstance(self._response_of(captured).get("status"), int):
+                return {"bindings": ea.bindings_for(token=None, cookie_action=action), "refs": ea.own_refs(response)}
         return None
 
     async def _use_as_logins(self, items: Sequence[Mapping[str, Any]], *, writes: bool,
@@ -117,6 +123,9 @@ class EngineLogins:
                     route in self.signed_in_only or "{" in route or self._api_route(route)):
                 reads.append(route)
         writes_list = ea.feature_writes(items) if writes else []
+        # Writes only as accounts the engine made (never as a default-credential login, which may be
+        # a real user's), and only to the account's own objects.
+        writers = [login for login in self.engine_logins if login["label"].startswith("account")][:2]
 
         async def read(login: Mapping[str, Any], route: str) -> None:
             key = (login["label"], route)
@@ -135,16 +144,19 @@ class EngineLogins:
             if key in self.feature_writes_done:
                 return
             self.feature_writes_done.add(key)
+            path = ea.own_path(route, login["refs"])
+            if path is None:
+                return  # a templated write to an object that is not this account's own
             body = {name: ea.field_value(name, login["account"], login["refs"]) for name in list(params)[:20]}
             async with gate:
-                await self._safe("http.request", {"method": method, "path": ea.concrete_for(route, login["refs"]),
+                await self._safe("http.request", {"method": method, "path": path,
                                                   "json_body": body, "follow_redirects": False,
                                                   "request_bindings": login["bindings"]},
                                  self._key("feature", login["label"], method, route))
 
         jobs = [read(login, route) for login in self.engine_logins for route in reads]
         # Writes as the first two logins: the state each account holds (a basket item, a review).
-        jobs += [write(login, *entry) for login in self.engine_logins[:2] for entry in writes_list]
+        jobs += [write(login, *entry) for login in writers for entry in writes_list]
         await asyncio.gather(*jobs)
         if "authz.verify" in allowed:
             await self._compare_logins(items)

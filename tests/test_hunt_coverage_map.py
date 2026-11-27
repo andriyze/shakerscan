@@ -303,3 +303,28 @@ def test_every_answer_names_ready_calls_and_an_early_forced_finish_gets_them_bac
     assert finish_guard(_run(), nothing, force=True, force_reason="nothing left to do", now=NOW) is None
     # The unforced refusal hands the same calls over.
     assert "Send next (ready to send)" in finish_guard(_run(), report, force=False, force_reason=None, now=NOW)
+
+
+def test_next_calls_name_only_capabilities_the_hunt_may_run():
+    endpoints = [_endpoint("/search", params="q"), _endpoint("/.env")]
+    narrow = build_coverage(actions=[], endpoints=endpoints, allowed=["http.request"])
+    assert narrow["allowed"] == ["http.request"]
+    assert all(call["capability"] == "http.request" for call in coverage_map.next_calls(narrow))
+    # Nothing it may run is open: a forced finish is not held early.
+    none = build_coverage(actions=[], endpoints=endpoints, allowed=["web.crawl"])
+    assert coverage_map.next_calls(none) == []
+    assert finish_guard(_run(), none, force=True, force_reason="nothing I may run is left", now=NOW) is None
+
+
+def test_default_credential_calls_are_not_offered_when_the_check_is_off(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_HUNT_DEFAULT_CREDENTIALS", "false")
+    report = build_coverage(actions=[], endpoints=[_endpoint("/api/login", method="POST")])
+    assert not any("default credentials" in call["why"] for call in coverage_map.next_calls(report))
+
+
+def test_a_request_check_never_closes_a_class_it_does_not_prove():
+    endpoints = [_endpoint("/convert", params="file")]
+    report = build_coverage(endpoints=endpoints, actions=[
+        _action("request.verify", check="crlf_injection", method="GET", path="/convert", parameter="file")])
+    left = {k for item in report["open"] for k in item["untested"]}
+    assert {"sqli", "xss"} <= left  # only sql_injection (sqli) and xss.verify (xss) settle those

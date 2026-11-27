@@ -1227,7 +1227,7 @@ class Sweep(EngineLogins):
             rank = -1
         identity = json.dumps(
             [values.get("check"), values.get("method"), values.get("path"), values.get("parameter"),
-             values.get("as_principal"), *(["captured-login"] if values.get("request_bindings") else [])],
+             values.get("as_principal"), values.get("request_bindings") or None],
             sort_keys=True)
         if identity in self.request_checks_sent or len(self.request_checks_sent) >= MAX_REQUEST_CHECKS:
             return

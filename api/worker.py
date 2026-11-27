@@ -21828,10 +21828,16 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             captured_distinction = None
             if uses_captured_logins:
                 # Two logins this Hunt made itself; refused unless they are provably two accounts.
+                # A captured cookie goes only to the origin that set it, so every route is on one
+                # origin, and that origin is the one each binding is resolved (and checked) for.
+                if len(set(selected_route_origins)) != 1:
+                    raise AuthSessionStoreError(
+                        "authz.verify with captured logins compares routes of one origin; send one call per origin")
                 from hunt.authz_captured import resolve_captured_principals
                 primary_headers, secondary_headers, captured_distinction = await resolve_captured_principals(
                     pool=db_pool, run=run, hunt_id=hunt_id, context=context, target=target, policy=policy,
-                    hunt_policy=hunt_policy, target_url=authz_base, values=capability_input,
+                    hunt_policy=hunt_policy, target_url=selected_route_origins[0],
+                    values={**capability_input, "origin": selected_route_origins[0]},
                     stack=credential_stack, session_store=session_store)
                 primary_profile_id, secondary_profile_id = "captured:primary", "captured:secondary"
             elif not uses_managed_principals and primary_ref == secondary_ref:

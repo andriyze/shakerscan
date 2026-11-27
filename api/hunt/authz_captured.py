@@ -32,7 +32,9 @@ except ModuleNotFoundError:  # package import layout
 from .artifact_identity import resolve_artifact_identity
 
 CREDENTIAL_SOURCE = "captured_logins"
-_SUBJECT_CLAIMS = ("sub", "id", "user_id", "userId", "uid", "email", "username", "preferred_username", "login")
+# Identity claims in priority order: the first one both tokens carry decides (a per-session id that
+# differs must never make one account look like two, so the account-level claims come first).
+_SUBJECT_CLAIMS = ("sub", "user_id", "userId", "uid", "email", "username", "preferred_username", "login", "id")
 _ACCOUNT_FIELDS = ("email", "username", "user", "login", "user_name", "userName", "account", "name")
 _NOT_DISTINCT = (
     "authz.verify compares two different accounts, and these two captured logins could not be told "
@@ -70,8 +72,10 @@ def token_subjects(values: Sequence[str]) -> dict[str, str]:
     return found
 
 
-def account_name(login_input: Any) -> str | None:
-    """The account name one sign-in request of this Hunt carried in its body, if it shows one."""
+def account_name(login_input: Any) -> tuple[str, str] | None:
+    """``(field, account)`` one sign-in request of this Hunt names, when its body carries exactly one
+    account field: the application must sign in by that field. A body with several (an email and a
+    user name) is refused here, since the server cannot tell which one the application reads."""
     if isinstance(login_input, str):
         try:
             login_input = json.loads(login_input)
@@ -79,6 +83,7 @@ def account_name(login_input: Any) -> str | None:
             return None
     if not isinstance(login_input, Mapping) or str(login_input.get("method") or "").upper() != "POST":
         return None
+    found: list[tuple[str, str]] = []
     for key in ("json_body", "form_body"):
         body = login_input.get(key)
         if not isinstance(body, Mapping):
@@ -86,20 +91,28 @@ def account_name(login_input: Any) -> str | None:
         for name in _ACCOUNT_FIELDS:
             value = body.get(name)
             if isinstance(value, str) and value.strip() and "[withheld" not in value and set(value) != {"*"}:
-                return value.strip().lower()
-    return None
+                found.append((name, value.strip().lower()))
+    return found[0] if len(found) == 1 else None
 
 
 def distinction(primary_subjects: Mapping[str, str], secondary_subjects: Mapping[str, str],
-                primary_account: str | None, secondary_account: str | None) -> str | None:
+                primary_account: tuple[str, str] | None, secondary_account: tuple[str, str] | None) -> str | None:
     """Why the two logins are different accounts (``token_subject`` or ``sign_in_account``), or None."""
-    shared = [name for name in primary_subjects if name in secondary_subjects]
-    if shared:
-        # Tokens that name their subject settle it either way: the same subject is one account.
-        return "token_subject" if any(primary_subjects[n] != secondary_subjects[n] for n in shared) else None
-    if primary_account and secondary_account and primary_account != secondary_account:
+    shared = next((name for name in _SUBJECT_CLAIMS if name in primary_subjects and name in secondary_subjects), None)
+    if shared is not None:
+        # The highest-priority subject both tokens name settles it either way.
+        return "token_subject" if primary_subjects[shared] != secondary_subjects[shared] else None
+    if (primary_account and secondary_account and primary_account[0] == secondary_account[0]
+            and primary_account[1] != secondary_account[1]):
         return "sign_in_account"
     return None
+
+
+def _uuid(value: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(str(value))
+    except ValueError:
+        raise CredentialReferenceError("a captured login names an action of this Hunt by its id") from None
 
 
 def _source_action(binding: Mapping[str, Any]) -> str:
@@ -137,8 +150,10 @@ async def resolve_captured_principals(
             rows = await conn.fetch(
                 """SELECT input_summary->'input' AS input FROM hunt_actions
                    WHERE hunt_run_id=$1 AND id = ANY($2::uuid[]) AND capability_name='http.request'""",
-                uuid.UUID(str(hunt_id)), [uuid.UUID(item) for item in sorted(sources)])
-            accounts[side] = next((name for name in (account_name(row["input"]) for row in rows) if name), None)
+                uuid.UUID(str(hunt_id)), [_uuid(item) for item in sorted(sources)])
+            # Every sign-in request behind this login must name the same one account.
+            named = {account_name(row["input"]) for row in rows}
+            accounts[side] = named.pop() if len(named) == 1 else None
     reason = distinction(token_subjects(primary_bound), token_subjects(secondary_bound),
                          accounts["primary"], accounts["secondary"])
     if reason is None:

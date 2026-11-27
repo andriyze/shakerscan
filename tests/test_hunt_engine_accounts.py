@@ -122,7 +122,8 @@ def test_the_engine_signs_up_twice_signs_in_uses_the_app_as_each_and_compares_th
     baskets = sorted(v["path"] for v in as_login if v["path"].startswith("/rest/basket/"))
     assert baskets == ["/rest/basket/11", "/rest/basket/12"]  # each account reads its own basket
     items = [v for v in as_login if v["path"] == "/api/BasketItems"]
-    assert len(items) == 2 and items[0]["json_body"]["BasketId"] == 11 and items[0]["json_body"]["quantity"] == 1
+    assert len(items) == 2 and {v["json_body"]["BasketId"] for v in items} == {11, 12}
+    assert all(v["json_body"]["quantity"] == 1 for v in items)
     authz = [v for cap, v, _ in shop.calls if cap == "authz.verify"]
     assert len(authz) == 1 and authz[0]["routes"] == ["/rest/basket/11"]
     assert authz[0]["primary_bindings"] != authz[0]["secondary_bindings"]
@@ -163,3 +164,37 @@ def test_an_accepted_default_pair_becomes_a_login_the_sweep_uses():
     reads = [v for cap, v, _ in admin.calls if v.get("path") == "/api/admin/users" and v.get("request_bindings")]
     assert reads and reads[0]["request_bindings"] == [
         {"withheld_ref": "withheld://hunt/accepted/1", "header": "Authorization", "prefix": "Bearer "}]
+
+
+def test_writes_go_only_to_the_accounts_own_objects_and_never_touch_secrets_or_roles():
+    assert ea.own_path("/api/BasketItems", {}) == "/api/BasketItems"
+    assert ea.own_path("/rest/basket/{id}", {"bid": "6"}) == "/rest/basket/6"
+    assert ea.own_path("/api/Products/{id}", {"bid": "6"}) is None  # not this account's object
+    items = [{"endpoint": "PUT /api/users/{id}", "params": ["email", "password"]},
+             {"endpoint": "PATCH /api/profile", "params": ["role"]},
+             {"endpoint": "POST /api/Feedbacks", "params": ["comment", "rating"]}]
+    assert ea.feature_writes(items) == [("POST", "/api/Feedbacks", ["comment", "rating"])]
+
+
+def test_a_default_credential_login_reads_but_never_writes():
+    class Admin(_Shop):
+        async def call(self, capability, values, key):
+            bindings = values.get("request_bindings") or []
+            if capability == "http.request" and bindings and bindings[0].get("default_credential"):
+                self.calls.append((capability, json.loads(json.dumps(values)), key))
+                ok = bindings[0]["default_credential"] == "dc-01"
+                return {"action_id": "acc" if ok else "rej", "action_result": {"status": "success", "observations": [{"response": {
+                    "status": 200 if ok else 401, "body_sample": '{"token":"[withheld:1]"}' if ok else "",
+                    "withheld_values": [{"marker": "[withheld:1]", "ref": "withheld://hunt/acc/1"}] if ok else [],
+                    "login_attempt": {"verdict": "accepted" if ok else "rejected"}}}]}}
+            return await super().call(capability, values, key)
+
+    admin = Admin()
+    report = {"open": [{"endpoint": "POST /api/login", "untested": ["default_credentials"], "params": []},
+                       {"endpoint": "POST /api/Feedbacks", "untested": ["sqli"], "params": ["comment"]},
+                       {"endpoint": "GET /api/admin/users", "untested": ["function_authz"], "params": []}]}
+    asyncio.run(Sweep(call=admin.call, create_candidate=admin.create, state={}, live=admin.live)
+                .run(_run(["http.request"]), report))
+    as_admin = [v for _, v, _ in admin.calls if v.get("request_bindings") and
+                v["request_bindings"][0].get("withheld_ref") == "withheld://hunt/acc/1"]
+    assert as_admin and all(v["method"] == "GET" for v in as_admin)

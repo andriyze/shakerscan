@@ -26,8 +26,10 @@ def jwt(claims):
 def test_token_subjects_and_sign_in_account_names():
     assert token_subjects([jwt({"data": {"id": 22, "email": "A@x.test"}})]) == {"id": "22", "email": "a@x.test"}
     assert token_subjects(["opaque-session-cookie-value", "not.a.jwt"]) == {}
-    assert account_name({"method": "POST", "json_body": {"email": "Bob@x.test", "password": "[withheld:1]"}}) == "bob@x.test"
-    assert account_name(json.dumps({"method": "POST", "form_body": {"username": "alice", "password": "***"}})) == "alice"
+    assert account_name({"method": "POST", "json_body": {"email": "Bob@x.test", "password": "[withheld:1]"}}) == ("email", "bob@x.test")
+    assert account_name(json.dumps({"method": "POST", "form_body": {"username": "alice", "password": "***"}})) == ("username", "alice")
+    # Two account fields: the server cannot tell which the application signs in by.
+    assert account_name({"method": "POST", "json_body": {"username": "alice", "email": "a@x.test"}}) is None
     assert account_name({"method": "GET", "json_body": {"email": "bob@x.test"}}) is None
     assert account_name({"method": "POST", "json_body": {"email": "[withheld:2]"}}) is None
 
@@ -35,11 +37,15 @@ def test_token_subjects_and_sign_in_account_names():
 @pytest.mark.parametrize("primary, secondary, accounts, expected", [
     ({"sub": "1"}, {"sub": "2"}, (None, None), "token_subject"),
     # Tokens that name the same subject are one account, whatever the sign-in requests said.
-    ({"sub": "1"}, {"sub": "1"}, ("a", "b"), None),
-    ({}, {}, ("alice", "bob"), "sign_in_account"),
-    ({}, {}, ("alice", "alice"), None),
-    ({}, {}, ("alice", None), None),
+    ({"sub": "1"}, {"sub": "1"}, (("email", "a"), ("email", "b")), None),
+    ({}, {}, (("username", "alice"), ("username", "bob")), "sign_in_account"),
+    ({}, {}, (("username", "alice"), ("username", "alice")), None),
+    ({}, {}, (("username", "alice"), None), None),
+    # Different fields (alice by user name, b@x by email) may be one account.
+    ({}, {}, (("username", "alice"), ("email", "b@x.test")), None),
     ({"sub": "1"}, {}, (None, None), None),
+    # A per-session id never outranks the subject.
+    ({"sub": "7", "id": "s1"}, {"sub": "7", "id": "s2"}, (None, None), None),
 ])
 def test_two_logins_are_distinct_only_on_server_side_evidence(primary, secondary, accounts, expected):
     assert distinction(primary, secondary, *accounts) == expected
@@ -86,8 +92,8 @@ def test_two_accounts_resolve_to_two_header_sets(monkeypatch):
     assert primary != secondary and reason == "token_subject"
     # Opaque sessions: the two sign-in requests this Hunt sent named different accounts.
     opaque = {A: "s" * 32, B: "t" * 32}
-    inputs = {A: {"method": "POST", "form_body": {"username": "alice"}},
-              B: {"method": "POST", "form_body": {"username": "bob"}}}
+    inputs = {A: {"method": "POST", "form_body": {"username": "alice", "password": "x"}},
+              B: {"method": "POST", "form_body": {"username": "bob", "password": "y"}}}
     assert _resolve(monkeypatch, opaque, inputs)[2] == "sign_in_account"
 
 
@@ -122,3 +128,12 @@ def test_the_contract_takes_one_identity_mode():
                  "primary_principal": "primary", "secondary_principal": "secondary"}):
         with pytest.raises(CapabilityInputContractError):
             CAPABILITY_REGISTRY.validate_hunt_input("authz.verify", bad)
+
+
+def test_one_account_named_differently_in_ignored_fields_is_refused(monkeypatch):
+    # The app signs in by username; the planner varies an email it ignores.
+    opaque = {A: "s" * 32, B: "t" * 32}
+    inputs = {A: {"method": "POST", "json_body": {"username": "alice", "email": "a@x.test", "password": "p"}},
+              B: {"method": "POST", "json_body": {"username": "alice", "email": "b@x.test", "password": "p"}}}
+    with pytest.raises(CredentialReferenceError, match="could not be told apart"):
+        _resolve(monkeypatch, opaque, inputs)

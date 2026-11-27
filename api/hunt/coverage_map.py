@@ -251,10 +251,10 @@ _VERIFIER_CLASS = {
 _REQUEST_CHECK_CLASS: Mapping[str, tuple[str, ...]] = {
     "sql_injection": ("sqli",), "exposure": ("exposure",), "directory_listing": ("exposure",),
     "unauthenticated_api": ("unauthenticated_api",), "graphql": ("graphql",),
-    **{check: ("injection",) for check in (
-        "command_injection", "path_traversal", "template_injection", "ssrf", "xxe", "open_redirect",
-        "crlf_injection", "nosql_injection", "ldap_injection")},
 }
+# "injection" bundles the classes no single check proves: it closes on a route once both checks
+# every input of it gets (command and template injection) have run there.
+_INJECTION_CHECKS = frozenset({"command_injection", "template_injection"})
 _FAMILY_CLASSES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"sql", re.I), ("sqli",)),
     (re.compile(r"xss|cross.?site.?script", re.I), ("xss",)),
@@ -381,6 +381,7 @@ def build_coverage(
     ledger = _Ledger()
     known: dict[tuple[str, str], dict[str, Any]] = {}
     ran: dict[str, str] = {}
+    ran_checks: dict[str, set[str]] = {}
     # The signed-in identity this Hunt's own request last reached each route with (2xx answer).
     identities: dict[str, list[dict[str, str]]] = {}
 
@@ -442,7 +443,11 @@ def build_coverage(
             if name in _VERIFIER_CLASS:
                 ledger.close(route, _VERIFIER_CLASS[name])
             if name == "request.verify":
-                ledger.close(route, _REQUEST_CHECK_CLASS.get(str(values.get("check") or ""), ()))
+                check = str(values.get("check") or "")
+                ledger.close(route, _REQUEST_CHECK_CLASS.get(check, ()))
+                ran_checks.setdefault(route, set()).add(check)
+                if _INJECTION_CHECKS <= ran_checks[route]:
+                    ledger.close(route, ("injection",))
             if name == "http.request" and _uses_default_credential(values):
                 ledger.close(route, ("default_credentials",))
         found = _discovered_from_action(row)
@@ -549,6 +554,7 @@ def build_coverage(
                       **({"notes": state["notes"]} if state.get("notes") else {})},
         "open": items,
         **({"signed_in": signed_in} if signed_in else {}),
+        **({"allowed": sorted(allowed_names)} if allowed_names is not None else {}),
         "class_guide": {name: CLASS_GUIDE[name] for name in by_class},
     }
 
@@ -641,8 +647,30 @@ def _concrete(route: str) -> str:
     return re.sub(r"\{[^/{}]*\}", "1", route)
 
 
-def next_call(item: Mapping[str, Any]) -> dict[str, Any] | None:
-    """One ready-to-send call that closes the first open class of an endpoint, or None."""
+def next_call(item: Mapping[str, Any], allowed: Iterable[str] | None = None) -> dict[str, Any] | None:
+    """One ready-to-send call that closes the first open class of an endpoint, or None. With
+    ``allowed`` (the Hunt's capability manifest), only a call the Hunt may make."""
+    permitted = None if allowed is None else {str(name) for name in allowed}
+    for call in _next_call_options(item):
+        if permitted is not None and call["capability"] not in permitted:
+            continue
+        if call.get("default_credential") and not _default_credentials_on():
+            continue
+        call.pop("default_credential", None)
+        return call
+    return None
+
+
+def _default_credentials_on() -> bool:
+    try:
+        from .default_credentials import enabled
+    except ImportError:  # pragma: no cover - the module is part of the package
+        return False
+    return enabled()
+
+
+def _next_call_options(item: Mapping[str, Any]):
+    """Every ready call that would close an open class of the endpoint, best first."""
     method, _, route = str(item.get("endpoint") or "").partition(" ")
     if not route.startswith("/"):
         return None
@@ -654,32 +682,34 @@ def next_call(item: Mapping[str, Any]) -> dict[str, Any] | None:
             check = "sql_injection" if klass == "sqli" else "command_injection"
             base = ({"query": {name: "1" for name in params[:10]}} if method == "GET"
                     else {"json_body": {name: "1" for name in params[:20]}})
-            return {"capability": "request.verify", "why": f"{klass} on {method} {route} ({params[0]})",
+            yield {"capability": "request.verify", "why": f"{klass} on {method} {route} ({params[0]})",
                     "input": {"check": check, "method": method, "path": path, "parameter": params[0], **base, **identity}}
         if klass == "xss" and params and method == "GET":
-            return {"capability": "xss.verify", "why": f"xss on GET {route}",
+            yield {"capability": "xss.verify", "why": f"xss on GET {route}",
                     "input": {"path": f"{path}?" + "&".join(f"{name}=1" for name in params[:10])}}
         if klass in {"exposure", "unauthenticated_api"} and method == "GET" and not identity:
-            return {"capability": "request.verify", "why": f"{klass} on GET {route}",
+            yield {"capability": "request.verify", "why": f"{klass} on GET {route}",
                     "input": {"check": "exposure" if klass == "exposure" else "unauthenticated_api",
                               "method": "GET", "path": path}}
         if klass == "default_credentials" and method == "POST":
-            return {"capability": "http.request", "why": f"default credentials on POST {route}", "input": {
+            yield {"capability": "http.request", "why": f"default credentials on POST {route}", "default_credential": True, "input": {
                 "method": "POST", "path": path, "json_body": {"username": "", "password": ""},
                 "request_bindings": [
                     {"default_credential": "dc-01", "credential_field": "username", "body_pointer": "/username"},
                     {"default_credential": "dc-01", "credential_field": "secret", "body_pointer": "/password"}]}}
         if klass in {"review", "object_authz", "function_authz"} and method == "GET":
-            return {"capability": "http.request", "why": f"{klass}: read GET {route}" + (
+            yield {"capability": "http.request", "why": f"{klass}: read GET {route}" + (
                 " as the login that reached it" if identity else ""),
                 "input": {"method": "GET", "path": path, **identity}}
-    return None
 
 
 def next_calls(report: Mapping[str, Any] | None, *, limit: int = NEXT_CALLS) -> list[dict[str, Any]]:
+    """The first few ready calls of the open list, only of capabilities the Hunt may run (the
+    report's ``allowed``, when it was built with the manifest)."""
     calls: list[dict[str, Any]] = []
+    allowed = (report or {}).get("allowed")
     for item in (report or {}).get("open") or ():
-        call = next_call(item) if isinstance(item, Mapping) else None
+        call = next_call(item, allowed) if isinstance(item, Mapping) else None
         if call is not None:
             calls.append(call)
         if len(calls) >= limit:

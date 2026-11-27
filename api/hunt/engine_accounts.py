@@ -176,6 +176,21 @@ def bindings_for(*, token: str | None, cookie_action: str | None) -> list[dict[s
     return None
 
 
+_SENSITIVE_INPUT = re.compile(r"pass(?:word|wd)?|pwd|secret|token|mail|role|admin|permission|privilege|"
+                              r"group|scope|is_?staff|is_?super|owner", re.I)
+
+
+def own_path(route: str, refs: Mapping[str, str]) -> str | None:
+    """A templated route filled with the account's own ids, or None when one of its ids is not the
+    account's own (a write is never sent to another user's object)."""
+    if "{" not in route:
+        return route
+    own = own_id(route, refs)
+    if own is None or route.count("{") > 1:
+        return None
+    return re.sub(r"\{[^/{}]*\}", own, route)
+
+
 def feature_writes(items: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, list[str]]]:
     """``(method, path, inputs)`` of mapped writes a user of the application would send: inputs known,
     the route not destructive, not a sign-in or a sign-up."""
@@ -187,6 +202,8 @@ def feature_writes(items: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, l
             continue
         if _DESTRUCTIVE.search(route) or _SIGNUP.search(route) or _USER_COLLECTION.match(route):
             continue
+        if any(_SENSITIVE_INPUT.search(name) for name in params):
+            continue  # an account's secret, address or authority is never written
         found.append((method, route, params))
     return found[:MAX_FEATURE_WRITES]
 
@@ -205,5 +222,5 @@ def body_json(text: Any) -> Any:
 
 
 __all__ = ["MAX_ACCOUNTS", "MAX_FEATURE_WRITES", "MAX_LOGIN_READS", "MAX_OBJECT_ROUTES", "bindings_for",
-           "concrete_for", "feature_writes", "field_value", "new_account", "object_key", "own_id", "own_refs",
+           "concrete_for", "feature_writes", "field_value", "new_account", "object_key", "own_id", "own_path", "own_refs",
            "signup_body", "signup_routes", "token_ref"]
