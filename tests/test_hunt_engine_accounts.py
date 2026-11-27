@@ -246,3 +246,22 @@ def test_without_the_flag_the_engine_asks_and_makes_accounts_only_when_granted(a
 def test_a_users_collection_seen_only_as_a_read_is_tried_as_a_sign_up():
     assert [path for path, _ in ea.signup_routes([{"endpoint": "GET /api/Users", "params": []},
                                                   {"endpoint": "GET /api/Products", "params": []}])] == ["/api/Users"]
+
+
+def test_an_id_the_sign_in_names_and_a_mapped_collection_route_give_the_object_route_to_compare():
+    """A signed-out crawl never maps ``/rest/basket/{id}``; the collection route and the account's
+    own ``bid`` imply it."""
+    assert ea.derived_object_routes(
+        [{"endpoint": "GET /rest/basket"}, {"endpoint": "GET /api/Products"}, {"endpoint": "GET /api/Users"},
+         {"endpoint": "POST /rest/basket"}], {"bid": "6", "id": "3"}) == ["/rest/basket/{id}"]
+    # Nothing is derived without an id of that collection's name, nor repeated when mapped.
+    assert ea.derived_object_routes([{"endpoint": "GET /api/Products"}], {"bid": "6"}) == []
+    assert ea.derived_object_routes([{"endpoint": "GET /rest/basket"}, {"endpoint": "GET /rest/basket/{id}"}],
+                                    {"bid": "6"}) == []
+    shop = _Shop()
+    report = {"open": [item if item["endpoint"] != "GET /rest/basket/{id}" else {**item, "endpoint": "GET /rest/basket"}
+                       for item in REPORT["open"]]}
+    asyncio.run(Sweep(call=shop.call, create_candidate=shop.create, state={}, live=shop.live)
+                .run(_run(["http.request", "authz.verify"]), report))
+    authz = [v for cap, v, _ in shop.calls if cap == "authz.verify"]
+    assert len(authz) == 1 and authz[0]["routes"] == ["/rest/basket/11"]

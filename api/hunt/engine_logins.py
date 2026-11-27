@@ -147,6 +147,8 @@ class EngineLogins:
             if method == "GET" and route.startswith("/") and (
                     route in self.signed_in_only or "{" in route or self._api_route(route)):
                 reads.append(route)
+        for login in self.engine_logins:
+            reads.extend(route for route in ea.derived_object_routes(items, login["refs"]) if route not in reads)
         writes_list = ea.feature_writes(items) if writes else []
         # Writes only as accounts the engine made (never as a default-credential login, which may be
         # a real user's), and only to the account's own objects.
@@ -195,7 +197,8 @@ class EngineLogins:
             return
         first, second = accounts[0], accounts[1]
         routes: list[str] = []
-        for item in items:
+        derived = [{"endpoint": f"GET {route}"} for route in ea.derived_object_routes(items, first["refs"])]
+        for item in [*items, *derived]:
             method, _, route = str(item.get("endpoint") or "").partition(" ")
             if method != "GET" or "{" not in route:
                 continue

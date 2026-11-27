@@ -216,6 +216,29 @@ def feature_writes(items: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, l
     return found[:MAX_FEATURE_WRITES]
 
 
+def derived_object_routes(items: Sequence[Mapping[str, Any]], refs: Mapping[str, str]) -> list[str]:
+    """Object routes the map does not hold but REST naming implies: a sign-in answer names the
+    account's own id for a collection (``bid``, ``basketId``) and the map holds that collection's
+    route (``GET /rest/basket``), so ``/rest/basket/{id}`` addresses the account's own object.
+
+    The single-page application reads such objects only once a user is signed in, so a signed-out
+    crawl never maps them; a templated route the map already holds is not repeated."""
+    templated = {str(item.get("endpoint") or "").partition(" ")[2] for item in items}
+    found: list[str] = []
+    for item in items:
+        method, _, route = str(item.get("endpoint") or "").partition(" ")
+        route = route.split("?", 1)[0].rstrip("/")
+        if method != "GET" or "{" in route or not route.startswith("/") or route.count("/") < 1:
+            continue
+        candidate = f"{route}/{{id}}"
+        if candidate in templated or candidate in found:
+            continue
+        if own_id(candidate, refs) is not None and object_key(candidate) not in {
+                "user", "account", "customer", "member", "profile"}:
+            found.append(candidate)
+    return found[:MAX_OBJECT_ROUTES]
+
+
 def concrete_for(route: str, refs: Mapping[str, str]) -> str:
     """A requestable path: the account's own id where the route names its collection, else 1."""
     own = own_id(route, refs)
@@ -230,5 +253,6 @@ def body_json(text: Any) -> Any:
 
 
 __all__ = ["MAX_ACCOUNTS", "MAX_FEATURE_WRITES", "MAX_LOGIN_READS", "MAX_OBJECT_ROUTES", "bindings_for",
+           "derived_object_routes",
            "concrete_for", "feature_writes", "field_value", "new_account", "object_key", "own_id", "own_path", "own_refs",
            "signup_body", "signup_routes", "token_ref"]
