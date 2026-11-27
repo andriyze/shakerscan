@@ -687,3 +687,33 @@ def test_smart_bola_no_budget_runs_to_completion(monkeypatch):
     )
 
     assert results.get("budget_exceeded") is False
+
+
+def test_a_uuid_addressed_object_route_is_replayed_with_the_rows_uuid_not_its_integer_id():
+    """A producer row carries ``id`` and ``uuid``; the object route takes the UUID. The replay
+    built ``/vehicles/6`` from the integer and never tried the route the application uses."""
+    owned = "9a71757c-d2da-4e20-8484-6a0baded4c25"
+    seen = []
+
+    async def fetch(url, headers=None, **_kwargs):
+        seen.append(url)
+        token = _auth_token(headers)
+        path = urlsplit(url).path
+        if path == "/identity/api/v2/vehicle/vehicles":
+            rows = [{"id": 6, "uuid": owned, "vin": "8NL4B4867J3U56DHX"}] if token == "owner" else []
+            return _fake_http_response(url, 200, json.dumps(rows))
+        if path == f"/identity/api/v2/vehicle/{owned}/location":  # no ownership check
+            return _fake_http_response(url, 200, json.dumps(
+                {"carId": owned, "vehicleLocation": {"id": 3, "latitude": "37.74", "longitude": "-84.30"},
+                 "fullName": "Owner", "email": "owner@example.invalid"}))
+        return _fake_http_response(url, 404, "{}")
+
+    base = "http://crapi.example.test"
+    result = asyncio.run(authz_resource_replay_test(
+        base, [f"{base}/identity/api/v2/vehicle/vehicles",
+               f"{base}/identity/api/v2/vehicle/1c0d6bd2-0000-4000-8000-000000000001/location"],
+        _fake_session("owner"), _fake_session("other"),
+        max_producers=1, max_replays=1, timeout=5, max_seconds=30, fetcher=fetch, allow_write_replays=False))
+    assert any(url.endswith(f"/vehicle/{owned}/location") for url in seen)
+    assert not any(url.endswith("/vehicle/6/location") for url in seen)
+    assert result["cross_principal_violations"] >= 1

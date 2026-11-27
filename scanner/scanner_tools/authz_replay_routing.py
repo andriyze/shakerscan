@@ -14,6 +14,31 @@ Location = tuple[Literal["path", "query"], int]
 _GENERIC_IDENTIFIERS = frozenset({"", "id", "uuid", "uid", "object", "resource"})
 
 
+UUID_SHAPE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def id_shape(value: str) -> str:
+    """``uuid``, ``int`` or ``other``: an object route's id segment and the value put there agree."""
+    text = str(value or "")
+    if UUID_SHAPE.match(text):
+        return "uuid"
+    return "int" if text.isdigit() else "other"
+
+
+def template_id_shapes(template_url: str) -> set[str]:
+    try:
+        segments = urlsplit(template_url).path.split("/")
+    except ValueError:
+        return set()
+    return {id_shape(segment) for segment in segments if id_shape(segment) in {"uuid", "int"}}
+
+
+def fits_template(object_id: str, template_url: str) -> bool:
+    """A UUID goes only where the route held a UUID, a number only where it held a number."""
+    shapes = template_id_shapes(template_url)
+    return not shapes or id_shape(object_id) in shapes
+
+
 def _resource_name(value: str) -> str:
     """Comparable routing label, never an access-control assertion."""
     value = unquote(str(value)).strip("{}<>:$ ")
@@ -117,6 +142,18 @@ def prioritize_replay_candidates(
     hint = _resource_name(object_id_key)
     producer_noun = _resource_name(canonical_path.rsplit("/", 1)[-1])
 
+    def _observed_direct(item: Mapping[str, Any]) -> bool:
+        if item.get("source") != "discovered_consumer_template" or item.get("object_id_location") != "path":
+            return False
+        try:
+            path = urlsplit(str(item.get("url") or "")).path.rstrip("/") or "/"
+        except ValueError:
+            return False
+        return unquote(path.rsplit("/", 1)[-1]) == object_id and (path.rsplit("/", 1)[0] or "/") in {
+            canonical_path, producer_path}
+
+    observed_direct = any(_observed_direct(item) for item in candidates)
+
     def rank(item: Mapping[str, Any]) -> tuple[int, int, int]:
         url = str(item.get("url") or "")
         if source_origin is None or _origin(url) != source_origin:
@@ -141,6 +178,14 @@ def prioritize_replay_candidates(
             1 if producer_noun and leaf == producer_noun else 0
         )
         observed = int(item.get("source") == "discovered_consumer_template")
+        # A route the application was seen using, addressing this producer's own resource by
+        # this id (``/vehicle/{uuid}/location`` for a ``/vehicles`` row), is evidence; an
+        # inferred ``/vehicles/{uuid}`` is a guess.
+        # Only a sub-resource of this object (the id is not the last segment), and only when no
+        # route the application was seen using names the object directly.
+        if (observed and producer_noun and producer_noun in selected_names and parent == path
+                and not observed_direct):
+            topology = 5
         return field_match, topology, observed
 
     return [dict(item) for item in sorted(candidates, key=rank, reverse=True)]
