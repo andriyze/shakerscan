@@ -365,3 +365,14 @@ def test_javascript_analysis_reads_api_paths_kept_without_a_leading_slash_or_und
             "/community/api/v2/community/posts/recent", "/workshop/api/shop/products",
             "/v1/graphql/query", "/api/Users"} <= set(routes)
     assert not any("example.com" in r or r.startswith("/./") or " " in r for r in routes)
+
+
+def test_relative_api_paths_are_also_reported_under_each_base_the_bundle_names():
+    from api.capabilities.artifact import analyze_javascript_bytes
+
+    body = (b'var fg="identity/",pg="workshop/",hg={LOGIN:"api/auth/login",'
+            b'SHOP:"api/shop/products",ABS:"/api/v1/health"};')
+    routes = set(analyze_javascript_bytes(body)["routes"])
+    assert {"/api/auth/login", "/identity/api/auth/login", "/workshop/api/auth/login",
+            "/identity/api/shop/products", "/workshop/api/shop/products", "/api/v1/health"} <= routes
+    assert "/identity/api/v1/health" not in routes  # an absolute path is not joined to a base

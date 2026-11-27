@@ -76,6 +76,10 @@ _ROUTE_RE = re.compile(
 _API_SEGMENT_ROUTE_RE = re.compile(
     r"[\"'`](/?(?:[A-Za-z0-9_.~-]+/){0,3}(?:api|rest|graphql|rpc)(?:/[A-Za-z0-9._~!$&()*+,;=:@%{}-]*)+)[\"'`]"
 )
+# The bases a bundle joins relative API paths to at runtime: single-segment strings such as
+# ``"identity/"`` or ``"/workshop/"`` (crAPI keeps ``fg="identity/"`` beside ``LOGIN:"api/auth/login"``).
+_BASE_PREFIX_RE = re.compile(r"[\"'`]/?([a-z][a-z0-9_-]{1,30})/[\"'`]")
+MAX_BASE_PREFIXES = 8
 _SUPABASE_RE = re.compile(r"https://[a-z0-9-]{3,80}\.supabase\.co", re.I)
 _SOURCE_MAP_RE = re.compile(r"sourceMappingURL\s*=\s*([^\s*]+)")
 
@@ -184,9 +188,25 @@ def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[st
                        'body_parameter_names': [_masked_string(str(p), 80) for p in request.get('body_params', [])[:30]],
                        'reachability': 'unverified', 'provenance': 'static_http_call'})
     found = set(_ROUTE_RE.findall(text))
+    relative: list[str] = []
     for route in _API_SEGMENT_ROUTE_RE.findall(text):
         if "//" not in route and not route.lstrip("/").startswith((".", "node_modules")):
             found.add("/" + route.lstrip("/"))
+            if not route.startswith("/") and route not in relative:
+                relative.append(route)
+    # A relative path is joined to a base at runtime; each base the bundle names is a candidate
+    # (the sweep's own requests tell which answer).
+    bases = []
+    for base in _BASE_PREFIX_RE.findall(text):
+        if base not in bases and base not in {"api", "rest", "graphql", "rpc", "static", "assets"}:
+            bases.append(base)
+        if len(bases) >= MAX_BASE_PREFIXES:
+            break
+    for route in relative:
+        if route.split("/", 1)[0] in bases:
+            continue  # already under a base
+        for base in bases:
+            found.add(f"/{base}/{route}")
     routes = sorted({_masked_string(route, 500) for route in found}
                     | {shape['url'] for shape in shapes})[:200]
     # A reference the bundle's end cuts is skipped as a cut token is: masked alone, a piece of a
