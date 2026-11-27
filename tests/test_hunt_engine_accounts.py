@@ -265,3 +265,27 @@ def test_an_id_the_sign_in_names_and_a_mapped_collection_route_give_the_object_r
                 .run(_run(["http.request", "authz.verify"]), report))
     authz = [v for cap, v, _ in shop.calls if cap == "authz.verify"]
     assert len(authz) == 1 and authz[0]["routes"] == ["/rest/basket/11"]
+
+
+def test_a_sign_in_outside_an_api_prefix_is_a_login_the_engine_signs_in_with():
+    """VAmPI's /users/v1/login: the sweep recorded JSON logins only under /api-style prefixes, so
+    the engine registered an account and then had no route to sign in with."""
+    alias = {"/users/v1/register": "/api/Users", "/users/v1/login": "/rest/user/login"}
+
+    class UsersShop(_Shop):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and values.get("path") in alias:
+                values = {**values, "path": alias[values["path"]]}
+            return await super().call(capability, values, key)
+
+    shop = UsersShop()
+    report = {"open": [
+        {"endpoint": "POST /users/v1/register", "untested": ["sqli"], "params": []},
+        {"endpoint": "POST /users/v1/login", "untested": ["default_credentials"], "params": []},
+        {"endpoint": "GET /rest/basket/{id}", "untested": ["object_authz"], "params": []},
+    ]}
+    state = {}
+    asyncio.run(Sweep(call=shop.call, create_candidate=shop.create, state=state, live=shop.live)
+                .run(_run(["http.request", "authz.verify"]), report))
+    assert len(shop.users) == 2
+    assert len(state["sweep_stats"]["engine_logins"]) == 2

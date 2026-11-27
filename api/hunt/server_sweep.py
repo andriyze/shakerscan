@@ -675,6 +675,9 @@ class Sweep(EngineLogins):
         gate = asyncio.Semaphore(SHORT_CONCURRENCY)
         links: list[str] = []
         targets = []
+        # A POST sign-in outside an /api-style prefix (``/users/v1/login``): a JSON login unless a
+        # page read below shows it as an HTML form.
+        json_logins: list[str] = []
         for item in items[:MAX_READS]:
             method, _, route = str(item.get("endpoint") or "").partition(" ")
             if not route.startswith("/"):
@@ -685,6 +688,8 @@ class Sweep(EngineLogins):
             elif method == "POST" and "default_credentials" in (item.get("untested") or ()) and (
                     "/api" in route or _API_PREFIX.match(route)):
                 self.logins.setdefault(route, (route, "username", "password", True))
+            elif method == "POST" and _LOGIN_PATH.search(route) and "{" not in route:
+                json_logins.append(route)
 
         async def look(path: str, principal: str | None) -> Mapping[str, Any]:
             values = {"method": "GET", "path": path, "follow_redirects": False,
@@ -756,6 +761,8 @@ class Sweep(EngineLogins):
                 links.extend(await self._probe_shape(route, slots if route in self.signed_in_only else ()))
 
         await asyncio.gather(*(read(route) for route in targets))
+        for route in json_logins:
+            self.logins.setdefault(route, (route, "username", "password", True))
         return links
 
     async def _api_routes(self, items: Sequence[Mapping[str, Any]]) -> list[str]:
