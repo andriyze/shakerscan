@@ -51,6 +51,11 @@ BAN_STREAK = 20
 BAN_STREAK_PATHS = 3
 MAX_KNOWN_GOOD = 4_096
 LOCK_HOLD_SECONDS = 900.0
+# A target that stops answering (timeouts, refused or unanswered connections, nothing else in
+# between) is held: an overloaded application gets room to recover, and a hung one is not sent
+# minutes of requests that can only time out. Any answer clears the streak.
+SILENT_STREAK = 5
+SILENT_BASE_SECONDS = 15.0
 SHARED_KEY = "scan:origin_hold:{origin}"
 SHARED_CHECK_SECONDS = 1.0
 # Extend the shared hold only when this one ends later (PTTL in ms; -2 missing, -1 no expiry).
@@ -185,7 +190,8 @@ class ResponseReader:
 
 
 class _Origin:
-    __slots__ = ("until", "reason", "throttles", "bans", "streak", "streak_paths", "known_good", "locked")
+    __slots__ = ("until", "reason", "throttles", "bans", "streak", "streak_paths", "known_good", "locked",
+                 "silent", "outages")
 
     def __init__(self) -> None:
         self.until = 0.0
@@ -196,6 +202,8 @@ class _Origin:
         self.streak_paths: set[str] = set()
         self.known_good: set[tuple[str, str]] = set()
         self.locked: dict[tuple[str, str], float] = {}
+        self.silent = 0
+        self.outages = 0
 
 
 class TargetBackoff:
@@ -262,6 +270,7 @@ class TargetBackoff:
     def observe(self, origin: str, status: int, headers: dict[bytes, bytes], request: dict | None) -> str | None:
         """Account one answer; returns ``throttled`` or ``banned`` when it set a hold."""
         state = self._get(origin)
+        state.silent, state.outages = 0, 0  # it answered
         method = str((request or {}).get("method") or "").upper()
         target = str((request or {}).get("target") or "")
         key = (method, target)
@@ -294,6 +303,19 @@ class TargetBackoff:
             if status < 400 and target and len(state.known_good) < MAX_KNOWN_GOOD:
                 state.known_good.add(key)
         return None
+
+    def observe_silence(self, origin: str) -> str | None:
+        """Account one request the target never answered (a timeout, a connection it refused or
+        left unanswered); returns ``unreachable`` when the streak set a hold."""
+        state = self._get(origin)
+        state.silent += 1
+        if state.silent < SILENT_STREAK:
+            return None
+        state.silent = 0
+        state.outages += 1
+        hold = min(MAX_HOLD_SECONDS, SILENT_BASE_SECONDS * 2 ** min(state.outages - 1, 3))
+        self._hold(origin, state, hold, f"{SILENT_STREAK} requests in a row got no answer")
+        return "unreachable"
 
     def _hold(self, origin: str, state: _Origin, seconds: float, reason: str) -> None:
         until = self._clock() + seconds

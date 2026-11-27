@@ -296,6 +296,11 @@ class PinnedSocksProxy:
         if hold:
             self.holds[hold] = self.holds.get(hold, 0) + 1
 
+    def _note_silence(self) -> None:
+        hold = self._backoff.observe_silence(self.paced_origin)
+        if hold:
+            self.holds[hold] = self.holds.get(hold, 0) + 1
+
     async def _wait_hold(self) -> None:
         self.held_seconds += await self._backoff.wait(self.paced_origin)
 
@@ -445,6 +450,7 @@ class PinnedSocksProxy:
                 )
                 break
             if connected_address is None:
+                self._note_silence()
                 await self._reply(writer, 5)
                 return
             self.connections_opened += 1
@@ -460,6 +466,7 @@ class PinnedSocksProxy:
                     refuse[0] = True
 
             answers = ResponseReader(sent, self._note_response)
+            answered = [False]
 
             async def relay(
                 source: asyncio.StreamReader,
@@ -502,6 +509,7 @@ class PinnedSocksProxy:
                                 await self._pace.take(self.paced_origin, started)
                         else:
                             self.bytes_from_target += len(chunk)
+                            answered[0] = True
                             answers.feed(chunk)
                         target.write(chunk)
                         await target.drain()
@@ -518,6 +526,9 @@ class PinnedSocksProxy:
                 relay(upstream_reader, writer, toward_target=False)
             )
             await asyncio.gather(left, right, return_exceptions=True)
+            if sent and not answered[0]:
+                # Plain HTTP requests went out and not one byte came back before the client gave up.
+                self._note_silence()
         except (asyncio.IncompleteReadError, asyncio.TimeoutError, UnicodeError, ValueError, OSError):
             pass
         finally:

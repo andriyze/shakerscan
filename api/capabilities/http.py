@@ -730,10 +730,17 @@ async def execute_bound_http_request(
                         # must never duplicate a state-changing request.
                         last_connect_error = exc
                         continue
+                    except httpx.TimeoutException:
+                        # Connected, never answered: a hung or overloaded target.
+                        if backoff_origin:
+                            TARGET_BACKOFF.observe_silence(backoff_origin)
+                        raise
                     pinned_address = candidate_address
                     connected_addresses.append(candidate_address)
                     break
                 if response is None:
+                    if backoff_origin:
+                        TARGET_BACKOFF.observe_silence(backoff_origin)
                     # Keep the real cause on the chain: a certificate the client will not
                     # trust is a different finding from a port nobody answers on.
                     raise httpx.ConnectError(

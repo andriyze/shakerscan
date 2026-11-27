@@ -262,3 +262,101 @@ def test_the_engines_own_http_client_waits_out_a_retry_after():
     target_backoff.BACKOFF.reset()
     assert first["ok"] and second["ok"]
     assert len(arrivals) == 2 and arrivals[1] - arrivals[0] >= 0.9
+
+
+def test_a_target_that_stops_answering_is_held_and_any_answer_clears_the_streak():
+    """A hung application (a lab app deadlocked by one request) was sent 25 minutes of requests
+    that could only time out. Five unanswered requests in a row hold the origin, doubling."""
+    clock = _Clock()
+    backoff = TargetBackoff(clock)
+    for _ in range(target_backoff.SILENT_STREAK - 1):
+        assert backoff.observe_silence(ORIGIN) is None
+    _answer(backoff, 500)  # an error page is still an answer
+    for _ in range(target_backoff.SILENT_STREAK - 1):
+        assert backoff.observe_silence(ORIGIN) is None
+    assert backoff.remaining(ORIGIN) == 0
+    assert backoff.observe_silence(ORIGIN) == "unreachable"
+    assert backoff.remaining(ORIGIN) == target_backoff.SILENT_BASE_SECONDS
+    clock.now += 100
+    for _ in range(target_backoff.SILENT_STREAK):
+        backoff.observe_silence(ORIGIN)
+    assert backoff.remaining(ORIGIN) == 2 * target_backoff.SILENT_BASE_SECONDS
+    for _ in range(10 * target_backoff.SILENT_STREAK):
+        backoff.observe_silence(ORIGIN)
+    assert backoff.remaining(ORIGIN) <= target_backoff.MAX_HOLD_SECONDS
+    clock.now += 1000
+    _answer(backoff, 200)
+    for _ in range(target_backoff.SILENT_STREAK):
+        backoff.observe_silence(ORIGIN)
+    assert backoff.remaining(ORIGIN) == target_backoff.SILENT_BASE_SECONDS  # the answer reset the doubling
+
+
+def test_the_tunnel_counts_requests_a_hung_target_never_answers():
+    target_backoff.BACKOFF.reset()
+
+    async def scenario():
+        async def app(reader, writer):  # accepts and reads, never answers
+            while await reader.read(4096):
+                pass
+            writer.close()
+
+        try:
+            upstream = await asyncio.start_server(app, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("the unit-test sandbox forbids loopback listeners")
+        port = upstream.sockets[0].getsockname()[1]
+        async with PinnedSocksProxy(hostname="shop.example.test", pinned_address="127.0.0.1", port=port,
+                                    scheme="http") as proxy:
+            for index in range(target_backoff.SILENT_STREAK):
+                reader, writer = await _socks_connect(proxy.proxy_url, "shop.example.test", port)
+                writer.write(f"GET /{index} HTTP/1.1\r\nHost: shop.example.test\r\n\r\n".encode())
+                await writer.drain()
+                await asyncio.sleep(0.05)
+                writer.close()  # the client gives up
+                await writer.wait_closed()
+            await asyncio.sleep(0.2)
+            record = proxy.receipt()
+            held = target_backoff.BACKOFF.remaining(proxy.paced_origin)
+        upstream.close()
+        await upstream.wait_closed()
+        return record, held
+
+    record, held = asyncio.run(scenario())
+    target_backoff.BACKOFF.reset()
+    assert record["holds"] == {"unreachable": 1}
+    assert held > 0
+
+
+def test_the_engines_own_http_client_counts_a_timeout_as_silence():
+    from uuid import UUID
+    from capabilities.http import execute_bound_http_request
+    from runtime.models import TargetBinding
+
+    target_backoff.BACKOFF.reset()
+
+    async def scenario():
+        async def app(reader, writer):
+            while await reader.read(4096):
+                pass
+            writer.close()
+
+        try:
+            server = await asyncio.start_server(app, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("the unit-test sandbox forbids loopback listeners")
+        base = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        target = TargetBinding(target_id=str(UUID(int=2)), target_kind="web", canonical_host="127.0.0.1",
+                               allowed_origins=(base,), allowed_addresses=("127.0.0.1",),
+                               allowed_root_domains=("127.0.0.1",), environment="lab", scope_receipt_id=str(UUID(int=3)))
+        result = await execute_bound_http_request(base, {"method": "GET", "path": "/a"}, target=target,
+                                                  timeout_seconds=1)
+        state = target_backoff.BACKOFF._origins.get(target_backoff.BACKOFF._origins and
+                                                    next(iter(target_backoff.BACKOFF._origins)))
+        server.close()
+        await server.wait_closed()
+        return result, state
+
+    result, state = asyncio.run(scenario())
+    target_backoff.BACKOFF.reset()
+    assert not result["ok"]
+    assert state is not None and state.silent == 1

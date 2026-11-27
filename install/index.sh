@@ -711,6 +711,7 @@ download "$REPO_RAW_BASE/api/runtime/hunt_http_contract.py" "$INSTALL_DIR/api/ru
 download "$REPO_RAW_BASE/api/runtime/hunt_http_exchange_contract.py" "$INSTALL_DIR/api/runtime/hunt_http_exchange_contract.py"
 download "$REPO_RAW_BASE/api/runtime/request_verify_contract.py" "$INSTALL_DIR/api/runtime/request_verify_contract.py"
 download "$REPO_RAW_BASE/api/runtime/origin_pace.py" "$INSTALL_DIR/api/runtime/origin_pace.py"
+download "$REPO_RAW_BASE/api/runtime/target_backoff.py" "$INSTALL_DIR/api/runtime/target_backoff.py"
 download "$REPO_RAW_BASE/api/runtime/hunt_scanner_contract.py" "$INSTALL_DIR/api/runtime/hunt_scanner_contract.py"
 download "$REPO_RAW_BASE/api/runtime/browser_login_contract.py" "$INSTALL_DIR/api/runtime/browser_login_contract.py"
 download "$REPO_RAW_BASE/api/runtime/credentials.py" "$INSTALL_DIR/api/runtime/credentials.py"
