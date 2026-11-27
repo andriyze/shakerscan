@@ -137,10 +137,13 @@ def test_a_cleartext_tunnel_keeps_each_request_line_and_its_host_header():
     assert record["address_connections"] == {"127.0.0.1": 1}
     assert record["content_readable"] is True
     # A request line inside a body is data, not a request (the counter's message framing).
-    assert record["request_lines"] == [
+    assert [{k: v for k, v in line.items() if k != "status"} for line in record["request_lines"]] == [
         {"method": "GET", "target": "/login?next=%2F", "host": "app.example.test"},
         {"method": "POST", "target": "/api/items", "host": "app.example.test"},
     ]
+    # Each line carries the status of the answer the tunnel read for it.
+    assert record["request_lines"][0]["status"] == 200
+    assert record["status_counts"].get("200", 0) >= 1
     assert record["methods_observed"] == {"GET": 1, "POST": 1}
     assert record["refused_destinations"] == [
         {"destination": f"evil.example.test:{port}", "attempts": 1},

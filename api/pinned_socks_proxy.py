@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import re
 import contextlib
 import ipaddress
@@ -10,6 +11,7 @@ import struct
 from typing import Any, Awaitable, Callable, Iterable
 
 from runtime import origin_pace
+from runtime.target_backoff import BACKOFF, ResponseReader
 from runtime.target_bound_socket import FrozenTargetSocketFactory
 
 
@@ -239,6 +241,13 @@ class PinnedSocksProxy:
         # encrypted connection, whose requests cannot be read, takes one per connection.
         self._pace = origin_pace.current()
         self.paced_origin = f"{self.scheme or 'http'}://{self.hostname}:{self.port}"
+        # The target's answers, read from cleartext responses (runtime/target_backoff): their
+        # statuses, and the holds they set on the origin (a 429's Retry-After, a WAF ban), which
+        # this tunnel waits out before it relays more.
+        self._backoff = BACKOFF
+        self.status_counts: dict[str, int] = {}
+        self.holds: dict[str, int] = {}
+        self.held_seconds = 0.0
 
     @property
     def proxy_url(self) -> str:
@@ -276,6 +285,18 @@ class PinnedSocksProxy:
             self.request_lines.append(request)
         else:
             self.request_lines_dropped += 1
+
+    def _note_response(self, status: int, headers: dict[bytes, bytes], request: dict | None) -> None:
+        key = str(status)
+        self.status_counts[key] = self.status_counts.get(key, 0) + 1
+        if request is not None:
+            request["status"] = status
+        hold = self._backoff.observe(self.paced_origin, status, headers, request)
+        if hold:
+            self.holds[hold] = self.holds.get(hold, 0) + 1
+
+    async def _wait_hold(self) -> None:
+        self.held_seconds += await self._backoff.wait(self.paced_origin)
 
     def _note_refused(self, destination: str, port: int) -> None:
         key = f"{str(destination)[:_MAX_HOST_CHARS]}:{int(port)}"
@@ -318,6 +339,10 @@ class PinnedSocksProxy:
             "refused_destinations_other": int(self.refused_destinations_other),
             "address_literal_destinations_refused": int(self.address_literal_destinations_refused),
             "scheme_mismatch_refused": int(self.scheme_mismatch_refused),
+            # Statuses of the cleartext answers read, and the holds they set (runtime/target_backoff).
+            "status_counts": dict(sorted(self.status_counts.items())),
+            "holds": dict(sorted(self.holds.items())),
+            "held_seconds": round(self.held_seconds, 1),
         }
 
     def receipt(self) -> dict[str, Any]:
@@ -379,6 +404,8 @@ class PinnedSocksProxy:
                 self._note_refused(destination, requested_port)
                 await self._reply(writer, 2)
                 return
+            # A held origin (the target asked to wait, or banned us) gets no new connection.
+            await self._wait_hold()
             if self._admit is not None:
                 await self._admit()
                 self.admitted_connections += 1
@@ -421,15 +448,21 @@ class PinnedSocksProxy:
             self.connections_opened += 1
             await self._reply(writer, 0)
 
+            sent: deque = deque()
+
+            def on_request(request: dict[str, Any]) -> None:
+                self._note_request(request)
+                sent.append(request)
+
+            answers = ResponseReader(sent, self._note_response)
+
             async def relay(
                 source: asyncio.StreamReader,
                 target: asyncio.StreamWriter,
                 *,
                 toward_target: bool,
             ) -> None:
-                counter = RequestCounter(
-                    on_request=self._note_request if toward_target else None,
-                )
+                counter = RequestCounter(on_request=on_request if toward_target else None)
                 paced_tls = [True]
                 first = toward_target and self.scheme is not None
                 try:
@@ -452,10 +485,13 @@ class PinnedSocksProxy:
                             self.http_requests_observed += started
                             if not counter.measurable:
                                 self.wire_requests_measurable = False
+                            if started:
+                                await self._wait_hold()
                             if self._pace is not None and started:
                                 await self._pace.take(self.paced_origin, started)
                         else:
                             self.bytes_from_target += len(chunk)
+                            answers.feed(chunk)
                         target.write(chunk)
                         await target.drain()
                 except (OSError, ConnectionError, asyncio.CancelledError):
