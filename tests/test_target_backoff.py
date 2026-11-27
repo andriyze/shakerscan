@@ -110,6 +110,19 @@ def test_a_long_run_of_403s_across_paths_is_a_ban():
     assert not any(_answer(single, 403, f"/admin?x={i}") for i in range(60))
 
 
+def test_a_423_refuses_that_sign_in_route_and_nothing_else():
+    clock = _Clock()
+    backoff = TargetBackoff(clock)
+    assert _answer(backoff, 401, "/login", "POST") is None
+    assert _answer(backoff, 423, "/login", "POST") == "locked"
+    assert backoff.is_locked(ORIGIN, {"method": "POST", "target": "/login?next=/"})
+    assert not backoff.is_locked(ORIGIN, {"method": "GET", "target": "/login"})
+    assert not backoff.is_locked(ORIGIN, {"method": "POST", "target": "/search"})
+    assert backoff.remaining(ORIGIN) == 0  # the rest of the application is not held
+    clock.now += target_backoff.LOCK_HOLD_SECONDS + 1
+    assert not backoff.is_locked(ORIGIN, {"method": "POST", "target": "/login"})
+
+
 def test_unread_tunnel_answers_are_not_degraded_answers():
     unread = [{"status_code": None, "elapsed_ms": None, "error": None}] * 40
     assert assess(unread).state == "normal"

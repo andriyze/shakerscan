@@ -224,6 +224,7 @@ def record_tunnel(
             "bytes_from_target", "http_requests_observed", "content_readable",
             "methods_observed", "request_lines_dropped", "refused_destinations",
             "refused_destinations_other", "status_counts", "holds", "held_seconds",
+            "refused_after_lock",
         )
     }
     summary["tool"] = str(tool or "")

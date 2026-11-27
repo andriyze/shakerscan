@@ -17,6 +17,10 @@ the next request or opens the next connection:
 * ``429`` (or ``503`` with ``Retry-After``): hold for the ``Retry-After`` the target asked for
   (seconds or an HTTP date, at most ``MAX_HOLD_SECONDS``), or, without one, an exponential
   backoff from ``THROTTLE_BASE_SECONDS``.
+* ``423 Locked``: the request locked something (an account after failed sign-ins). Further
+  requests with that method and path are refused in the tunnel for ``LOCK_HOLD_SECONDS``: more
+  sign-in attempts would only keep a real user locked out (nuclei's default-login templates try
+  several passwords per account).
 * A ban: a ``403`` for exactly a request (method and target) the origin had answered without one,
   or ``BAN_STREAK`` consecutive 403s across at least ``BAN_STREAK_PATHS`` paths. Ordinary 403s on
   attack payloads (a WAF blocking one request) do not hold the origin; a ban answers everything
@@ -44,6 +48,7 @@ MAX_BAN_HOLD_SECONDS = 300.0
 BAN_STREAK = 20
 BAN_STREAK_PATHS = 3
 MAX_KNOWN_GOOD = 4_096
+LOCK_HOLD_SECONDS = 900.0
 _STATUS_LINE = re.compile(rb"^HTTP/1\.[01] (\d{3})(?: .*)?$")
 _MAX_HEADER_BYTES = 64 * 1024
 
@@ -170,7 +175,7 @@ class ResponseReader:
 
 
 class _Origin:
-    __slots__ = ("until", "reason", "throttles", "bans", "streak", "streak_paths", "known_good")
+    __slots__ = ("until", "reason", "throttles", "bans", "streak", "streak_paths", "known_good", "locked")
 
     def __init__(self) -> None:
         self.until = 0.0
@@ -180,6 +185,7 @@ class _Origin:
         self.streak = 0
         self.streak_paths: set[str] = set()
         self.known_good: set[tuple[str, str]] = set()
+        self.locked: dict[tuple[str, str], float] = {}
 
 
 class TargetBackoff:
@@ -203,6 +209,9 @@ class TargetBackoff:
         key = (method, target)
         path = target.split("?", 1)[0]
         retry = retry_after_seconds(headers.get(b"retry-after", b"").decode("latin-1"))
+        if status == 423 and target:
+            state.locked[(method, path)] = self._clock() + LOCK_HOLD_SECONDS
+            return "locked"
         if status == 429 or (status == 503 and retry is not None):
             state.throttles += 1
             hold = retry if retry is not None else THROTTLE_BASE_SECONDS * 2 ** min(state.throttles - 1, 5)
@@ -232,6 +241,16 @@ class TargetBackoff:
         until = self._clock() + seconds
         if until > state.until:
             state.until, state.reason = until, reason
+
+    def is_locked(self, origin: str, request: dict | None) -> bool:
+        """Whether a request goes to a method and path the target answered 423 for."""
+        state = self._origins.get(origin)
+        if state is None or not state.locked:
+            return False
+        key = (str((request or {}).get("method") or "").upper(),
+               str((request or {}).get("target") or "").split("?", 1)[0])
+        until = state.locked.get(key)
+        return until is not None and until > self._clock()
 
     def remaining(self, origin: str) -> float:
         state = self._origins.get(origin)

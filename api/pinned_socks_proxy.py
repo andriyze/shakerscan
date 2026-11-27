@@ -248,6 +248,7 @@ class PinnedSocksProxy:
         self.status_counts: dict[str, int] = {}
         self.holds: dict[str, int] = {}
         self.held_seconds = 0.0
+        self.refused_after_lock = 0
 
     @property
     def proxy_url(self) -> str:
@@ -343,6 +344,7 @@ class PinnedSocksProxy:
             "status_counts": dict(sorted(self.status_counts.items())),
             "holds": dict(sorted(self.holds.items())),
             "held_seconds": round(self.held_seconds, 1),
+            "refused_after_lock": int(self.refused_after_lock),
         }
 
     def receipt(self) -> dict[str, Any]:
@@ -449,10 +451,13 @@ class PinnedSocksProxy:
             await self._reply(writer, 0)
 
             sent: deque = deque()
+            refuse = [False]
 
             def on_request(request: dict[str, Any]) -> None:
                 self._note_request(request)
                 sent.append(request)
+                if self._backoff.is_locked(self.paced_origin, request):
+                    refuse[0] = True
 
             answers = ResponseReader(sent, self._note_response)
 
@@ -485,6 +490,12 @@ class PinnedSocksProxy:
                             self.http_requests_observed += started
                             if not counter.measurable:
                                 self.wire_requests_measurable = False
+                            if refuse[0]:
+                                # The target locked what this request would try again (423).
+                                self.refused_after_lock += 1
+                                with contextlib.suppress(OSError):
+                                    writer.close()
+                                return
                             if started:
                                 await self._wait_hold()
                             if self._pace is not None and started:
