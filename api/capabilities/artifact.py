@@ -947,6 +947,12 @@ async def analyze_target_javascript(
         analysis["withheld_values"] = collector.entries(json.dumps(
             [analysis["jwt_observations"], analysis["routes"], analysis["source_maps"]],
             ensure_ascii=False))
+    spec_routes = _api_description_routes(target_url, path, body, private.headers().get("content-type"))
+    if spec_routes is not None:
+        # The document is an API description (OpenAPI/Swagger): the routes it declares, parsed
+        # here where the whole body is (a long spec passes a request's answer sample; a server
+        # that ignores byte ranges cannot be read in windows).
+        analysis["api_description_routes"] = spec_routes
     analysis.update({
         "kind": "javascript_analysis",
         "path": path,
@@ -960,6 +966,39 @@ async def analyze_target_javascript(
         "observation": analysis,
         "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
     }
+
+
+MAX_API_DESCRIPTION_ROUTES = 500
+
+
+def _api_description_routes(target_url: str, path: str, body: bytes, content_type: Any) -> list[dict[str, Any]] | None:
+    """``[{method, path, body_field_names, content_type}]`` of an OpenAPI/Swagger document, else None."""
+    start = body[:4096]
+    # Only a document that names itself as one near its start; a script bundle never reaches the parser.
+    if start.lstrip()[:1] not in {b"{", b"o", b"s", b"-", b"#"} or not (b"openapi" in start or b"swagger" in start):
+        return None
+    try:
+        from capabilities.spec_ingest import ingest_spec_bodies
+    except ModuleNotFoundError:  # package import layout
+        from api.capabilities.spec_ingest import ingest_spec_bodies
+    parts = urllib.parse.urlsplit(target_url)
+    origin = urllib.parse.urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+    try:
+        records = ingest_spec_bodies([(origin + path, body, str(content_type or "") or None)], origin=origin)
+    except Exception:  # noqa: BLE001 - untrusted document
+        return None
+    routes: list[dict[str, Any]] = []
+    for record in records[:MAX_API_DESCRIPTION_ROUTES]:
+        url = str(record.get("url") or "")
+        if not url.startswith(origin):
+            continue
+        routes.append({
+            "method": str(record.get("method") or "GET").upper(),
+            "path": _masked_string(url[len(origin):] or "/", 500),
+            "body_field_names": [_masked_string(str(name), 80) for name in record.get("body_field_names") or ()][:30],
+            "content_type": str(record.get("content_type") or "")[:100],
+        })
+    return routes or None
 
 
 __all__ = [

@@ -257,30 +257,30 @@ def test_stop_cancels_the_running_discovery_and_drops_a_deferred_finish():
     assert asyncio.run(scenario()).calls
 
 
-def test_an_api_description_longer_than_the_answer_sample_is_read_whole_and_ingested(monkeypatch):
-    """VAmPI's 29 KB spec answered complete, but http.request returns a 16 KB sample: the routes it
-    declares were never mapped, only noted for the planner. Discovery reads it in artifact windows."""
-    monkeypatch.setattr(auto_discovery, "SPEC_WINDOW_BYTES", 64)
-    paths = {f"/api/v1/thing{i}": {"get": {}} for i in range(6)}
-    paths["/users/v1/{username}"] = {"delete": {}}
-    spec = json.dumps({"openapi": "3.0.0", "paths": paths})
-    sample = spec[:100]
 
-    class Windows(_Fake):
+def test_an_api_description_longer_than_the_answer_sample_is_parsed_whole_and_ingested():
+    """VAmPI's 29 KB spec answered complete, but http.request returns a 16 KB sample and Werkzeug
+    ignores byte ranges: the routes it declares were never mapped, only noted for the planner.
+    Discovery has the worker parse the whole document (javascript.analyze) and ingests its routes."""
+    spec = json.dumps({"openapi": "3.0.0", "paths": {"/users/v1/{username}": {"delete": {}}}})
+
+    class Worker(_Fake):
         async def execute(self, hunt_id, capability, values, key):
-            if capability == "artifact.inspect":
+            if capability == "javascript.analyze":
                 self.calls.append((capability, dict(values), key))
-                offset, size = int(values["offset"]), int(values["max_bytes"])
                 return {"action_result": {"status": "success", "observations": [{
-                    "offset": offset, "returned_bytes": len(spec[offset:offset + size].encode()),
-                    "resource_bytes": len(spec), "text_sample": spec[offset:offset + size]}]}}
+                    "kind": "javascript_analysis", "api_description_routes": [
+                        {"method": "GET", "path": "/api/v1/thing0", "body_field_names": [], "content_type": ""},
+                        {"method": "POST", "path": "/users/v1/register", "content_type": "application/json",
+                         "body_field_names": ["username", "password", "email"]},
+                        {"method": "DELETE", "path": "/users/v1/{username}", "body_field_names": [],
+                         "content_type": ""}]}]}}
             return await super().execute(hunt_id, capability, values, key)
 
-    fake = Windows({"/openapi.json": _response(200, sample, length=len(spec), content_type="application/json")})
+    fake = Worker({"/openapi.json": _response(200, spec[:40], length=29_537, content_type="application/json")})
     state = asyncio.run(_runner(fake).run())
     (_target, worklist, _source), = fake.recorded
-    assert {"GET /api/v1/thing0", "GET /api/v1/thing5"} <= set(worklist)
-    assert any(entry.startswith("DELETE /users/v1/") for entry in worklist)
-    windows = [values for cap, values, _key in fake.calls if cap == "artifact.inspect"]
-    assert [w["offset"] for w in windows] == list(range(0, len(spec), 64))
+    assert "GET /api/v1/thing0" in worklist and "DELETE /users/v1/{username}" in worklist
+    assert 'POST /users/v1/register json:{"username":"","password":"","email":""}' in worklist
+    assert [values["path"] for cap, values, _key in fake.calls if cap == "javascript.analyze"].count("/openapi.json") == 1
     assert not any("API description at /openapi.json" in note for note in state.get("notes", []))

@@ -376,3 +376,17 @@ def test_relative_api_paths_are_also_reported_under_each_base_the_bundle_names()
     assert {"/api/auth/login", "/identity/api/auth/login", "/workshop/api/auth/login",
             "/identity/api/shop/products", "/workshop/api/shop/products", "/api/v1/health"} <= routes
     assert "/identity/api/v1/health" not in routes  # an absolute path is not joined to a base
+
+
+def test_an_api_description_returns_the_routes_it_declares_and_a_script_returns_none():
+    from api.capabilities.artifact import _api_description_routes
+
+    spec = json.dumps({"openapi": "3.0.1", "paths": {
+        "/users/v1/login": {"post": {"requestBody": {"content": {"application/json": {"schema": {
+            "type": "object", "properties": {"username": {"type": "string"}, "password": {"type": "string"}}}}}}}},
+        "/books/v1/{book_title}": {"get": {}}}}).encode()
+    routes = _api_description_routes("http://app.example.test:5002", "/openapi.json", spec, "application/json")
+    by = {(r["method"], r["path"].split("?")[0]): r for r in routes}
+    assert ("POST", "/users/v1/login") in by and set(by[("POST", "/users/v1/login")]["body_field_names"]) == {"username", "password"}
+    assert any(method == "GET" and path.startswith("/books/v1/") for method, path in by)
+    assert _api_description_routes("http://app.example.test", "/x.js", b"!function(){var openapi=1}()", None) is None

@@ -66,10 +66,6 @@ CONTROL_LENGTH_TOLERANCE = 0.05
 # Discovery and the sweep never outlive the Hunt's own wall; a Hunt without one gets this.
 MAX_DISCOVERY_SECONDS = 24 * 3600
 
-# An API description is read whole in artifact.inspect windows when the probe's sample is short.
-SPEC_WINDOW_BYTES = 16_384
-MAX_SPEC_WINDOWS = 32
-MAX_SPEC_BYTES = SPEC_WINDOW_BYTES * MAX_SPEC_WINDOWS
 SPEC_PATHS: tuple[str, ...] = (
     "/openapi.json", "/swagger.json", "/v3/api-docs", "/v2/api-docs", "/api-docs", "/api-docs.json",
     "/swagger/v1/swagger.json", "/openapi.yaml", "/swagger.yaml", "/api/openapi.json",
@@ -583,35 +579,26 @@ class DiscoveryRunner:
         return answer_of(result)
 
     async def _whole_spec(self, path: str, answer: Mapping[str, Any]) -> Mapping[str, Any]:
-        """An API description longer than a request's answer sample, read whole in artifact windows.
+        """An API description longer than a request's answer sample, parsed on the worker.
 
         ``http.request`` returns the first ``body_sample`` characters; a spec past them (VAmPI's is
-        29 KB) was never ingested, only noted for the planner. The windows' text is the masked text
-        the planner could read; only the routes ingested from it are kept."""
+        29 KB) was never ingested, only noted for the planner, and a server that ignores byte
+        ranges cannot be read in artifact windows. ``javascript.analyze`` reads the whole document
+        and returns the routes an OpenAPI/Swagger description declares."""
         body = str(answer.get("body") or "")
         length = int(answer.get("length") or 0)
-        if not answer.get("complete") or length <= len(body.encode("utf-8")) or length > MAX_SPEC_BYTES:
+        if not answer.get("complete") or length <= len(body.encode("utf-8")):
             return answer
-        parts: list[str] = []
-        offset = 0
-        while offset < length and len(parts) < MAX_SPEC_WINDOWS:
-            await self.pace.take(1)
-            try:
-                result = await self._call("artifact.inspect", {"path": path, "offset": offset,
-                                                               "max_bytes": SPEC_WINDOW_BYTES},
-                                          f"spec-window:{_probe_key(path)}:{offset}")
-            except _Refused:
-                return answer
-            window = _observation_of(result)
-            returned = int(window.get("returned_bytes") or 0) if window else 0
-            if not returned or int(window.get("offset") or 0) != offset:
-                return answer
-            parts.append(str(window.get("text_sample") or ""))
-            offset += returned
-        if offset < length:
+        await self.pace.take(1)
+        try:
+            result = await self._call("javascript.analyze", {"path": path}, f"spec-read:{_probe_key(path)}")
+        except _Refused:
             return answer
-        text = "".join(parts)
-        return {**answer, "body": text, "length": len(text.encode("utf-8"))}
+        analysis = _observation_of(result)
+        routes = (analysis or {}).get("api_description_routes")
+        if not isinstance(routes, list) or not routes:
+            return answer
+        return {**answer, "records": routes}
 
     async def _probe_phase(self, run: Mapping[str, Any]) -> None:
         self.state["probes"] = "running"
@@ -734,13 +721,17 @@ def _spec_routes(specs: Sequence[tuple[str, Mapping[str, Any]]], *, origin: str)
         from ..capabilities.spec_ingest import ingest_spec_bodies
     documents = [(f"{origin}{path}", str(answer.get("body") or "").encode("utf-8"), answer.get("content_type"))
                  for path, answer in specs if answer.get("complete") and answer.get("body")
+                 and not answer.get("records")
                  and int(answer.get("length") or 0) <= len(str(answer.get("body") or "").encode("utf-8"))]
-    if not documents:
+    # Routes the worker parsed from a whole document (``_whole_spec``), relative to the origin.
+    parsed = [{**dict(route), "url": origin + str(route.get("path") or "")}
+              for _path, answer in specs for route in answer.get("records") or () if isinstance(route, Mapping)]
+    if not documents and not parsed:
         return []
     try:
-        records = ingest_spec_bodies(documents, origin=origin)
+        records = (ingest_spec_bodies(documents, origin=origin) if documents else []) + parsed
     except Exception:  # noqa: BLE001 - untrusted document
-        return []
+        records = parsed
     out: list[str] = []
     for record in records[:500]:
         url = str(record.get("url") or "")
