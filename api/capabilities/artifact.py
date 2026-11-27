@@ -221,6 +221,10 @@ def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[st
         "new Function", "postMessage", "localStorage", "sessionStorage",
     )
     sinks = [name.rstrip("(") for name in sink_names if name in text]
+    try:
+        from capabilities.dom_flows import dom_xss_leads
+    except ModuleNotFoundError:  # package import layout
+        from .dom_flows import dom_xss_leads
     return {
         "schema_version": "javascript-static-analysis/v1",
         "bytes_analyzed": len(body),
@@ -234,6 +238,8 @@ def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[st
         "supabase_origins": supabase_origins,
         "source_maps": source_maps,
         "client_sink_signals": sinks,
+        # Sources that reach an HTML or code sink nearby: leads for the browser proof (xss.verify).
+        "dom_xss_leads": dom_xss_leads(text),
     }
 
 

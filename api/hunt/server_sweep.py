@@ -296,6 +296,7 @@ def _response(result: Any) -> Mapping[str, Any]:
 
 # Errors that mean the engine dropped a call before a worker ran it (budget released unspent).
 _NOT_STARTED_ERRORS = frozenset({"stale_reservation_recovered", "worker_result_timeout"})
+MAX_DOM_XSS_LEADS = 6
 MAX_CALLS_IN_FLIGHT = max(1, int(os.environ.get("SHAKERSCAN_SWEEP_CALLS_IN_FLIGHT", "4") or 4))
 
 
@@ -493,6 +494,7 @@ class Sweep(EngineLogins):
         self.shape_probed: set[str] = set()
         self.signin_checked: set[str] = set()
         self.jwt_checked: set[str] = set()
+        self.xss_tool = False
         # Calls the sweep has open at once. One agent-tool worker runs three at a time, and a call
         # queued longer than its reservation lease (90 s for http.request) is dropped unsent: with
         # slow answers (30-60 s each) an unbounded burst queued 34 calls past it. Four open calls
@@ -620,6 +622,7 @@ class Sweep(EngineLogins):
         slots = _signed_in_slots(run)
         self.request_verify = "request.verify" in allowed
         self.sqli_tool = "sqli.verify" in allowed
+        self.xss_tool = "xss.verify" in allowed
         templates = ("templates.scan" in allowed and bool(policy.get("active_testing"))
                      and bool(policy.get("approval_receipt_id")))
         self.state["sweep"] = "running"
@@ -912,11 +915,25 @@ class Sweep(EngineLogins):
             action = (result or {}).get("action_result") if isinstance(result, Mapping) else None
             for observation in (action or {}).get("observations") or ():
                 if isinstance(observation, Mapping) and observation.get("kind") == "javascript_analysis":
+                    self._dom_xss(route if not script else "/", observation.get("dom_xss_leads") or ())
                     for found in observation.get("routes") or ():
                         text = str(found)
                         if text.startswith("/") and not text.startswith("//") and "[withheld" not in text:
                             routes.append(f"GET {text}")
         return routes
+
+    def _dom_xss(self, page: str, leads: Sequence[Any]) -> None:
+        """The browser XSS proof for each URL parameter a script reads into an HTML or code sink
+        (``dom_flows``), on the page that loads it (a bundle's page is taken to be ``/``)."""
+        if not self.xss_tool:
+            return
+        for lead in list(leads)[:MAX_DOM_XSS_LEADS]:
+            parameter = str((lead or {}).get("parameter") or "") if isinstance(lead, Mapping) else ""
+            if not parameter or not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", parameter):
+                continue
+            path = f"{page.split('?', 1)[0]}?{parameter}=1"
+            self._count("dom_xss_leads")
+            self._queue_long(("xss.verify", {"path": path, "deep_domxss": True}, sweep_key("dom-xss", path)))
 
     async def _default_credentials(self, *, request_checks: bool = False) -> None:
         # Sign-in forms and Basic-protected routes in turn: the few logins a Hunt may try cover both.
