@@ -561,7 +561,11 @@ yourself (`request_bindings` naming what your sign-in captured) is tested by the
 login. Without attached principals, register or sign in to two different accounts and pass their
 captured logins to `authz.verify` as `primary_bindings` and `secondary_bindings`: the server runs
 the comparison only when its own records show two different accounts (different token subjects,
-or two sign-in requests with different account names). A finish while it runs or follows is accepted
+or two sign-in requests with different account names). With the state-changing permission the
+engine also makes two accounts itself where the application lets anyone sign up, signs in as each,
+reads the mapped routes and sends the mapped non-destructive writes as each, and compares the two on
+the routes that name each account's own objects; a default credential it finds accepted is used the
+same way (`sweep_stats.engine_logins` names those logins). A finish while it runs or follows is accepted
 and kept (`finish_deferred`); the Hunt finishes with your debrief after the sweep's last round.
 A passive Hunt gets none of this and is never refused for open coverage; neither is a Hunt
 whose approval was revoked or expired, and its finish stops the engine's work.

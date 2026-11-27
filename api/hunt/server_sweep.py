@@ -62,6 +62,8 @@ try:
     from runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
+from .engine_logins import EngineLogins
+from . import engine_accounts
 from .route_words import API_ROUTE_WORDS, MAX_API_PREFIXES
 try:
     from capabilities.product_api import product_api_for
@@ -376,7 +378,7 @@ def _default_credential_request(path: str, user: str, secret: str, pair: str, *,
     }
 
 
-class Sweep:
+class Sweep(EngineLogins):
     """One Hunt's sweep. ``call`` runs one capability call; ``create_candidate`` records one.
 
     The sweep runs in rounds until a round finds nothing new to test: each round reads the
@@ -430,6 +432,7 @@ class Sweep:
         self.shape_probed: set[str] = set()
         self.signin_checked: set[str] = set()
         self.jwt_checked: set[str] = set()
+        self._init_engine_logins()
         # The anonymous answer each read route gave (status, sample length, title), and the
         # mounts already queued for testing per route tail: one application served under several
         # mounts (/a/app.php, /b/app.php answering alike) is tested once.
@@ -442,6 +445,23 @@ class Sweep:
         self.request_verify = False
         self.sqli_tool = False
         self._long_keys: set[str] = set()
+
+    # Helpers the engine-login mixin uses.
+    @staticmethod
+    def _key(*parts: str) -> str:
+        return sweep_key(*parts)
+
+    @staticmethod
+    def _response_of(result: Any) -> Mapping[str, Any]:
+        return _response(result)
+
+    @staticmethod
+    def _action_of(result: Any) -> str | None:
+        return _action_id(result)
+
+    @staticmethod
+    def _api_route(route: str) -> bool:
+        return bool(_API_PREFIX.match(route))
 
     def _count(self, name: str) -> None:
         self.counts[name] = self.counts.get(name, 0) + 1
@@ -559,6 +579,10 @@ class Sweep:
                     found += await self._javascript(items)
                 if "http.request" in allowed and writes:
                     await self._default_credentials(request_checks="request.verify" in allowed)
+                    # Accounts the engine makes itself, then the application used as each of its
+                    # logins (engine_accounts): what that maps is tested as the login next round.
+                    await self._make_accounts(items)
+                    await self._use_as_logins(items, writes=writes, allowed=allowed)
                 if "request.verify" in allowed:
                     self._request_checks(fresh, writes=writes, slots=slots, first=rounds == 1)
                 if templates and writes and "state_changing" not in self.product_checks_run:
@@ -654,7 +678,8 @@ class Sweep:
             if method == "GET":
                 if route not in self.answers:  # an endpoint back for its new inputs was read already
                     targets.append(route)
-            elif method == "POST" and "default_credentials" in (item.get("untested") or ()) and "/api" in route:
+            elif method == "POST" and "default_credentials" in (item.get("untested") or ()) and (
+                    "/api" in route or _API_PREFIX.match(route)):
                 self.logins.setdefault(route, (route, "username", "password", True))
 
         async def look(path: str, principal: str | None) -> Mapping[str, Any]:
@@ -713,7 +738,8 @@ class Sweep:
             html = response.get("html") if isinstance(response.get("html"), Mapping) else {}
             self.answers[route] = (response.get("status"), len(str(response.get("body_sample") or "")),
                                    str(html.get("title") or "")[:200])
-            if _LOGIN_PATH.search(route) and response.get("status") in {405, 400} and "/api" in route:
+            if _LOGIN_PATH.search(route) and response.get("status") in {405, 400} and (
+                    "/api" in route or _API_PREFIX.match(route)):
                 self.logins.setdefault(route, (route, "username", "password", True))
             if response.get("status") == 401 and "basic" in (response.get("challenge_schemes") or ()):
                 self.basic_logins.setdefault(path.split("/")[1] if path.count("/") else "", path)
@@ -841,6 +867,12 @@ class Sweep:
             if result is None or verdict in {"rate_limited", "locked", "not_sent"}:
                 break
             action = _action_id(result)
+            if verdict == "accepted" and action and not basic:
+                # Chaining: the accepted pair's session is a login the sweep uses like its own accounts.
+                token = engine_accounts.token_ref(response)
+                if token:
+                    self.adopt_login(f"default {pair} ({path})", engine_accounts.bindings_for(
+                        token=token, cookie_action=None), refs=engine_accounts.own_refs(response))
             if verdict == "accepted" and action:
                 await self._candidate_and_verify({
                     "family": "default_credentials",
