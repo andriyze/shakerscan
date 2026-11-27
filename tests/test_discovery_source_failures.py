@@ -34,7 +34,7 @@ def _fetch_raising(errors, calls):
     return fetch
 
 
-@pytest.mark.parametrize("reason", ["HTTP 503", "HTTP 502", "HTTP 429", "unreachable (timeout)",
+@pytest.mark.parametrize("reason", ["HTTP 503", "HTTP 502", "HTTP 429", "HTTP 404", "unreachable (timeout)",
                                     "unexpected non-JSON answer"])
 def test_a_failing_crtsh_raises_after_retries_instead_of_returning_nothing(monkeypatch, reason):
     calls: list[str] = []
@@ -44,12 +44,31 @@ def test_a_failing_crtsh_raises_after_retries_instead_of_returning_nothing(monke
     assert len(calls) == ct_monitor.CRTSH_ATTEMPTS
 
 
-def test_a_client_error_is_not_retried(monkeypatch):
+@pytest.mark.parametrize("reason", ["HTTP 400", "HTTP 403"])
+def test_a_client_error_is_not_retried(monkeypatch, reason):
     calls: list[str] = []
-    monkeypatch.setattr(ct_monitor, "_crtsh_fetch", _fetch_raising([ct_monitor.CTQueryError("HTTP 404")], calls))
+    monkeypatch.setattr(ct_monitor, "_crtsh_fetch", _fetch_raising([ct_monitor.CTQueryError(reason)], calls))
     with pytest.raises(ct_monitor.CTQueryError):
         asyncio.run(ct_monitor._query_crtsh("example.com"))
     assert len(calls) == 1
+
+
+def test_crtsh_404_then_502_then_an_answer_succeeds_with_backoff(monkeypatch):
+    """crt.sh answered 404 for one root and 502 for another during one discovery: both are its
+    overload answers. The query backs off (growing pauses, bounded) and gets the names."""
+    calls: list[str] = []
+    waits: list[float] = []
+
+    async def record(seconds):
+        waits.append(seconds)
+    monkeypatch.setattr(ct_monitor.asyncio, "sleep", record)
+    answer = [{"id": 1, "name_value": "www.example.com", "common_name": "www.example.com"}]
+    monkeypatch.setattr(ct_monitor, "_crtsh_fetch", _fetch_raising(
+        [ct_monitor.CTQueryError("HTTP 404"), ct_monitor.CTQueryError("HTTP 502"), answer], calls))
+    assert asyncio.run(ct_monitor._query_crtsh("%.example.com")) == answer
+    assert len(calls) == 3
+    assert waits == list(ct_monitor.CRTSH_RETRY_DELAYS[:2]) and waits == sorted(waits)
+    assert sum(ct_monitor.CRTSH_RETRY_DELAYS) <= 60
 
 
 def test_a_transient_failure_then_an_answer_succeeds(monkeypatch):

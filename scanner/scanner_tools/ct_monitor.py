@@ -45,10 +45,15 @@ class CTQueryError(Exception):
     """crt.sh did not answer with a usable result. Never read as "no certificates"."""
 
 
-#: Attempts per crt.sh query, and the pause before each retry (crt.sh often answers 502/503/429
-#: or times out under load; an empty list must only ever mean crt.sh answered "none").
-CRTSH_ATTEMPTS = 3
-CRTSH_RETRY_DELAYS = (2.0, 5.0)
+#: Attempts per crt.sh query, and the pause before each retry (crt.sh often answers 502/503/429,
+#: or 404 for a query it serves fine a minute later, or times out under load; an empty list must
+#: only ever mean crt.sh answered "none"). The pauses back off so an overloaded crt.sh gets time to
+#: recover: at most 50 s of waiting per query on top of the attempts themselves.
+CRTSH_ATTEMPTS = 4
+CRTSH_RETRY_DELAYS = (5.0, 15.0, 30.0)
+#: Client errors crt.sh answers while overloaded. Its search answers an empty list, never 404,
+#: for a name with no certificates, so a 404 is a transient failure, not an answer.
+CRTSH_TRANSIENT_CLIENT_ERRORS = frozenset({404, 408, 425, 429})
 
 
 def _crtsh_fetch(url: str, timeout: int) -> list[dict[str, Any]]:
@@ -97,7 +102,7 @@ def _retryable(error: CTQueryError) -> bool:
             code = int(text.split()[1])
         except (IndexError, ValueError):
             return True
-        return code == 429 or code >= 500
+        return code in CRTSH_TRANSIENT_CLIENT_ERRORS or code >= 500
     return True
 
 
