@@ -24,16 +24,28 @@ def disabled() -> dict[str, bool]:
     return {name: False for name in SETTING_KEYS}
 
 
-async def load_intel_sources(conn: Any) -> dict[str, bool]:
-    """Which optional sources the operator enabled. Off when unset or unreadable."""
+async def _read(conn: Any) -> dict[str, bool]:
     sources = disabled()
+    for name, key in SETTING_KEYS.items():
+        value = await conn.fetchval("SELECT value FROM app_settings WHERE key = $1", key)
+        sources[name] = str(value or "").strip().lower() == "true"
+    return sources
+
+
+async def load_intel_sources(conn: Any) -> dict[str, bool]:
+    """Which optional sources the operator enabled. Off when unset or unreadable.
+
+    Callers read this inside their own transaction. A failed statement would abort that
+    transaction, so the read runs in a savepoint: a failure here costs the caller nothing.
+    """
     try:
-        for name, key in SETTING_KEYS.items():
-            value = await conn.fetchval("SELECT value FROM app_settings WHERE key = $1", key)
-            sources[name] = str(value or "").strip().lower() == "true"
+        in_transaction = getattr(conn, "is_in_transaction", None)
+        if callable(in_transaction) and in_transaction():
+            async with conn.transaction():
+                return await _read(conn)
+        return await _read(conn)
     except Exception:
         return disabled()
-    return sources
 
 
 __all__ = ["SETTING_KEYS", "disabled", "load_intel_sources"]
