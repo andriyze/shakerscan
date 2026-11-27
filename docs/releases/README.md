@@ -5,6 +5,10 @@ product vocabulary and support boundary of that release; do not rewrite old note
 current product. For current behavior use `../functionality-reference.md`, and for publication state
 use `../release-process.md` plus `RELEASES.md` at the repository root.
 
+## 2.15 line
+
+- [`2.15.0.md`](2.15.0.md) — integration candidate on `release/2.15.0`; follows 2.14.1.
+
 ## 2.14 line
 
 - [`2.14.1.md`](2.14.1.md) — integration candidate on `release/2.14.1`; follows 2.14.0.
