@@ -349,3 +349,19 @@ def test_a_whole_javascript_bundle_fits_the_private_body_read():
     from api.capabilities.http import MAX_PRIVATE_BODY_BYTES
 
     assert MAX_PRIVATE_BODY_BYTES >= MAX_JAVASCRIPT_BYTES >= 2 * 1_207_722
+
+
+def test_javascript_analysis_reads_api_paths_kept_without_a_leading_slash_or_under_a_service():
+    """A bundle's API path constants are often relative (joined to a base URL at runtime) or sit
+    under a service prefix; the analysis read none of them from a real application's bundle."""
+    from api.capabilities.artifact import analyze_javascript_bytes
+
+    body = (b'var u={LOGIN:"identity/api/auth/login",VEH:"identity/api/v2/vehicle/vehicles",'
+            b'POSTS:"/community/api/v2/community/posts/recent",SHOP:`workshop/api/shop/products`,'
+            b'Q:"v1/graphql/query"};var notes="see api docs";var mod="./api/client";'
+            b'var ext="https://cdn.example.com/api/x";var old="/api/Users";')
+    routes = analyze_javascript_bytes(body)["routes"]
+    assert {"/identity/api/auth/login", "/identity/api/v2/vehicle/vehicles",
+            "/community/api/v2/community/posts/recent", "/workshop/api/shop/products",
+            "/v1/graphql/query", "/api/Users"} <= set(routes)
+    assert not any("example.com" in r or r.startswith("/./") or " " in r for r in routes)

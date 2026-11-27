@@ -70,6 +70,12 @@ _JWT_RE = re.compile(r"(?<![A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,
 _ROUTE_RE = re.compile(
     r"[\"']((?:/api|/rest|/graphql|/rpc|/auth|/admin)(?:/[A-Za-z0-9._~!$&'()*+,;=:@%{}$-]*)*)[\"']"
 )
+# API paths a bundle keeps without a leading slash, or under a service prefix
+# (``"identity/api/v2/vehicle/vehicles"``, ``"/workshop/api/shop/products"``): an ``api``/``rest``/
+# ``graphql``/``rpc`` segment within the first four. Reported with a leading slash.
+_API_SEGMENT_ROUTE_RE = re.compile(
+    r"[\"'`](/?(?:[A-Za-z0-9_.~-]+/){0,3}(?:api|rest|graphql|rpc)(?:/[A-Za-z0-9._~!$&()*+,;=:@%{}-]*)+)[\"'`]"
+)
 _SUPABASE_RE = re.compile(r"https://[a-z0-9-]{3,80}\.supabase\.co", re.I)
 _SOURCE_MAP_RE = re.compile(r"sourceMappingURL\s*=\s*([^\s*]+)")
 
@@ -177,7 +183,11 @@ def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[st
                        'query_parameter_names': [_masked_string(str(p), 80) for p in request.get('params', [])[:30]],
                        'body_parameter_names': [_masked_string(str(p), 80) for p in request.get('body_params', [])[:30]],
                        'reachability': 'unverified', 'provenance': 'static_http_call'})
-    routes = sorted({_masked_string(route, 500) for route in set(_ROUTE_RE.findall(text))}
+    found = set(_ROUTE_RE.findall(text))
+    for route in _API_SEGMENT_ROUTE_RE.findall(text):
+        if "//" not in route and not route.lstrip("/").startswith((".", "node_modules")):
+            found.add("/" + route.lstrip("/"))
+    routes = sorted({_masked_string(route, 500) for route in found}
                     | {shape['url'] for shape in shapes})[:200]
     # A reference the bundle's end cuts is skipped as a cut token is: masked alone, a piece of a
     # userinfo password or a key in its path would show.
