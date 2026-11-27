@@ -63,6 +63,7 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
 from .engine_logins import EngineLogins
+from . import graphql_sweep
 from . import engine_accounts
 from .route_words import API_ROUTE_WORDS, MAX_API_PREFIXES
 try:
@@ -453,6 +454,8 @@ class Sweep(EngineLogins):
         self.shape_probed: set[str] = set()
         self.signin_checked: set[str] = set()
         self.jwt_checked: set[str] = set()
+        self.graphql_seen: list[tuple[str, str]] = []
+        self.graphql_done: set[str] = set()
         self._init_engine_logins()
         # The anonymous answer each read route gave (status, sample length, title), and the
         # mounts already queued for testing per route tail: one application served under several
@@ -618,6 +621,8 @@ class Sweep(EngineLogins):
                 if "authz.verify" in allowed and {"primary", "secondary"} <= set(slots):
                     await self._function_authz(fresh)
                 await self._injection(fresh, allowed=allowed, writes=writes, slots=slots)
+                if {"http.request", "candidate.verify"} <= allowed:
+                    await self._graphql_arguments(writes=writes)
                 if "http.request" in allowed:
                     # Last in the round: the checks queued above run while route names are tried
                     # (one engine call each, about a second apiece at the Hunt's call rate).
@@ -1221,6 +1226,7 @@ class Sweep(EngineLogins):
                     jobs.append((0, {"check": "jwt", "method": "GET", "path": path, **identity}, None))
             if _GRAPHQL_PATH.search(route):
                 jobs.append((0, {"check": "graphql", "method": "POST" if writes else "GET", "path": path, **identity}, None))
+                self.graphql_seen.append((path, json.dumps(identity, sort_keys=True)))
                 continue
             if method == "GET" and "unauthenticated_api" in untested and \
                     sum(1 for _rank, job, _f in jobs if job["check"] == "cors") < MAX_HEADER_CHECK_ROUTES:
@@ -1252,6 +1258,22 @@ class Sweep(EngineLogins):
         jobs.sort(key=lambda job: job[0])
         for rank, values, follow in jobs:
             self._queue_request_check(values, follow_up=follow, rank=rank)
+
+    async def _graphql_arguments(self, *, writes: bool) -> None:
+        """Each GraphQL endpoint's query arguments, tested as inputs (hunt/graphql_sweep)."""
+        for path, identity in graphql_sweep.routes(self.graphql_seen):
+            if path in self.graphql_done:
+                continue
+            self.graphql_done.add(path)
+            result = await self._safe("http.request", graphql_sweep.introspection_request(path, identity, writes=writes),
+                                      sweep_key("graphql-schema", path))
+            action = _action_id(result)
+            body = _response(result).get("body_sample")
+            if not action or not body:
+                continue
+            for locus in graphql_sweep.argument_loci(body, path.split("?", 1)[0]):
+                self._count("graphql_arguments")
+                await self._candidate_and_verify(graphql_sweep.candidate_values(locus, action))
 
     async def _signin_checks(self, path: str, user: str, secret: str, json_body: bool) -> None:
         """A sign-in's own request checks: rate limiting, LDAP and NoSQL wildcards (request.verify)."""

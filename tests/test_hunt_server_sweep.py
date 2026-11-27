@@ -846,3 +846,60 @@ def test_the_engine_never_sends_its_own_request_to_a_destructive_route():
     for path in ("/users/v1/{id}", "/books/v1", "/api/products?q=reset", "/resetting-guide",
                  "/deleted-items", "/api/settings", "/runtime/status", "/install-guide/intro"):
         assert not destructive_route(path), path
+
+
+SCHEMA = {"data": {"__schema": {"queryType": {"fields": [
+    {"name": "pastes", "type": {"kind": "LIST", "name": None, "ofType": {"kind": "OBJECT", "name": "Paste"}},
+     "args": [{"name": "public", "type": {"kind": "SCALAR", "name": "Boolean"}},
+              {"name": "limit", "type": {"kind": "SCALAR", "name": "Int"}},
+              {"name": "filter", "type": {"kind": "SCALAR", "name": "String"}}]},
+    {"name": "systemDebug", "type": {"kind": "SCALAR", "name": "String"},
+     "args": [{"name": "arg", "type": {"kind": "SCALAR", "name": "String"}}]},
+    {"name": "paste", "type": {"kind": "OBJECT", "name": "Paste"},
+     "args": [{"name": "id", "type": {"kind": "NON_NULL", "name": None, "ofType": {"kind": "SCALAR", "name": "Int"}}},
+              {"name": "title", "type": {"kind": "SCALAR", "name": "String"}}]},
+    {"name": "deleteAllPastes", "type": {"kind": "SCALAR", "name": "Boolean"},
+     "args": [{"name": "reason", "type": {"kind": "SCALAR", "name": "String"}}]},
+    {"name": "lookup", "type": {"kind": "SCALAR", "name": "String"},
+     "args": [{"name": "where", "type": {"kind": "NON_NULL", "name": None, "ofType": {"kind": "INPUT_OBJECT", "name": "W"}}},
+              {"name": "q", "type": {"kind": "SCALAR", "name": "String"}}]},
+]}}}}
+
+
+def test_each_string_argument_of_a_query_field_becomes_a_graphql_locus():
+    """In a driven DVGA Hunt the engine verified introspection yet never probed one argument."""
+    from api.hunt import graphql_sweep
+
+    loci = {(item["field"], item["argument"]): item["operation"]
+            for item in graphql_sweep.argument_loci(json.dumps(SCHEMA), "/graphql")}
+    assert loci == {
+        ("pastes", "filter"): 'query{pastes(filter:"1"){__typename}}',
+        ("systemDebug", "arg"): 'query{systemDebug(arg:"1")}',
+        ("paste", "title"): 'query{paste(title:"1",id:1){__typename}}',  # the required id filled in
+    }  # deleteAllPastes is destructive; lookup needs an input object no placeholder fills
+    assert graphql_sweep.destructive_field("deleteAllPastes") and graphql_sweep.destructive_field("resetDB")
+    assert not graphql_sweep.destructive_field("deletedItems") and not graphql_sweep.destructive_field("pastes")
+    assert graphql_sweep.argument_loci("not json", "/graphql") == []
+
+
+def test_the_sweep_reads_a_graphql_schema_and_proves_its_arguments():
+    class GraphQLApp(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and values.get("path") == "/graphql":
+                self.calls.append((capability, dict(values), key))
+                return _answer(200, json.dumps(SCHEMA), action="schema")
+            return await super().call(capability, values, key)
+
+    engine = GraphQLApp()
+    report = {"open": [{"endpoint": "POST /graphql", "untested": ["graphql"], "params": []}]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=[*ALL, "request.verify"]), report))
+    graphql = [c for c in engine.candidates if c["locus"].get("operation")]
+    assert {(c["locus"]["parameter"], c["family"]) for c in graphql} == {
+        ("filter", "injection"), ("arg", "injection"), ("title", "injection")}
+    assert all(c["locus"]["method"] == "POST" and c["locus"]["route"] == "/graphql"
+               and c["evidence_refs"] == ["action:schema"] for c in graphql)
+    schema_reads = [v for cap, v, _ in engine.calls if cap == "http.request" and v.get("path") == "/graphql"]
+    assert len(schema_reads) == 1 and "__schema" in schema_reads[0]["json_body"]["query"]
+    verified = {v["candidate_id"] for cap, v, _ in engine.calls if cap == "candidate.verify"}
+    assert len(verified) >= 3
