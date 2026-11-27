@@ -782,3 +782,37 @@ def test_a_replayed_collection_request_is_labelled_as_a_replay():
     sources = {item["concrete_path"]: item["source"] for item in surface["endpoints"]}
     assert sources["/api/v1/rag/documents"] == "collections.replay"
     assert sources["/api/orders"] == "known_endpoints"
+
+
+def test_wordlist_paths_that_answer_errors_never_become_path_sqli_candidates():
+    """Content discovery tries well-known product paths from a wordlist and records a hit for a
+    403 or an error page too. The numeric segment of such a path (``/rest/api/2``,
+    ``/_layouts/15``) is the product's API or release number, not an application value: it must
+    not become a time-based SQL injection candidate. The same route seen by the crawler still is.
+    """
+    content = [
+        {"kind": "content_discovery", "url": "https://app.example.test/rest/api/2/serverInfo", "status": 403},
+        {"kind": "content_discovery", "url": "https://app.example.test/_layouts/15/start.aspx", "status": 404},
+    ]
+
+    def path_candidates(**producers):
+        defaults = {name: _summary("skipped") for name in ("collection_replay", "subdomains", "probe", "crawl", "content")}
+        surface = build_scan_surface_manifest(
+            target_url="https://app.example.test", target=TARGET, options={}, max_endpoints=100,
+            **{**defaults, **producers},
+        )
+        endpoints = build_endpoint_manifest(
+            scan_id="40000000-0000-4000-8000-000000000001", target_binding_digest="a" * 64,
+            surface_manifest=surface, source_action_ids=("discover.web_content",),
+        )
+        assert {"/rest/api/{int}/serverInfo", "/_layouts/{int}/start.aspx"} <= {
+            entry["canonical_path"] for entry in endpoints.entries
+        }
+        candidates = build_candidate_manifest(endpoints, source_action_ids=("discover.candidates",), maximum=50)
+        return {c["canonical_path"] for c in candidates.entries if c.get("parameter_location") == "path"}
+
+    assert path_candidates(content=_summary("success", content)) == set()
+    crawled = [{"kind": "discovered_route", "method": "GET", "url": item["url"]} for item in content]
+    assert path_candidates(crawl=_summary("success", crawled)) == {
+        "/rest/api/{int}/serverInfo", "/_layouts/{int}/start.aspx",
+    }

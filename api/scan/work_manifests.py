@@ -1142,6 +1142,10 @@ _CACHE_BUSTER_PARAMETERS = frozenset({
 })
 
 
+# Endpoint producers whose paths come from a fixed wordlist rather than from the application.
+_WORDLIST_ENDPOINT_SOURCES = frozenset({"web.content_discover"})
+
+
 def build_candidate_manifest(
     endpoint_manifest: ScanWorkManifest,
     *,
@@ -1330,9 +1334,18 @@ def build_candidate_manifest(
         # A templated path segment (/api/orders/{int}) is an injectable value the query never names.
         # The URL-only sqlmap path adapter can only test GET operations. Do not invent a
         # GET handler for a POST/PUT/DELETE route, even when mutation is authorized.
+        # A wordlist path's numeric segment is the wordlist's own literal (``/rest/api/2/...``,
+        # ``/_layouts/15/...``: a product's API or release number), not a value the application
+        # was seen to substitute into a query. Content discovery records a hit for a 403 or an
+        # error page too, so these segments turned technology-probe paths that answer 4xx into
+        # time-based SQL injection candidates: about 11 minutes of sqlmap each, proving nothing.
+        # Path-segment candidates come only from sources that observed the application use the
+        # route (crawl, browser, spec, known endpoints, replayed requests).
         path_segments = (
             _templated_path_segments(str(endpoint["canonical_path"]))
-            if endpoint["method"] == "GET" else []
+            if endpoint["method"] == "GET"
+            and str(endpoint["source_tool"]) not in _WORDLIST_ENDPOINT_SOURCES
+            else []
         )
         if endpoint["method"] != "GET" and _templated_path_segments(str(endpoint["canonical_path"])):
             unsupported_path_operations = True
