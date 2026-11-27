@@ -51,6 +51,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 import hashlib
 import heapq
 import json
+import os
 import re
 import secrets
 import time
@@ -293,6 +294,38 @@ def _response(result: Any) -> Mapping[str, Any]:
     return {}
 
 
+# Errors that mean the engine dropped a call before a worker ran it (budget released unspent).
+_NOT_STARTED_ERRORS = frozenset({"stale_reservation_recovered", "worker_result_timeout"})
+MAX_CALLS_IN_FLIGHT = max(1, int(os.environ.get("SHAKERSCAN_SWEEP_CALLS_IN_FLIGHT", "4") or 4))
+
+
+def _result_parts(result: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(result, Mapping):
+        return []
+    return [part for part in (result, result.get("result"), result.get("action_result"))
+            if isinstance(part, Mapping)]
+
+
+def _error_of(result: Any) -> str:
+    return next((str(part["error"]) for part in _result_parts(result) if part.get("error")), "")
+
+
+def _lost(result: Any) -> bool:
+    """The call ended without running: dropped from the queue or never answered by a worker."""
+    return _error_of(result) in _NOT_STARTED_ERRORS
+
+
+def _never_started(result: Any) -> bool:
+    """Dropped from the queue before any request could reach the target: its reservation was
+    recovered with nothing charged and no start recorded, so it is safe to send once more. A worker
+    timeout is not: the call may have been running."""
+    parts = _result_parts(result)
+    return (_error_of(result) == "stale_reservation_recovered"
+            and not any(part.get("execution_started") is True or part.get("execution_uncertain") is True
+                        or any(int(v or 0) for v in dict(part.get("budget_consumed") or {}).values())
+                        for part in parts))
+
+
 def _action_id(result: Any) -> str | None:
     if not isinstance(result, Mapping):
         return None
@@ -454,6 +487,12 @@ class Sweep(EngineLogins):
         self.shape_probed: set[str] = set()
         self.signin_checked: set[str] = set()
         self.jwt_checked: set[str] = set()
+        # Calls the sweep has open at once. One agent-tool worker runs three at a time, and a call
+        # queued longer than its reservation lease (90 s for http.request) is dropped unsent: with
+        # slow answers (30-60 s each) an unbounded burst queued 34 calls past it. Four open calls
+        # keep the wait under one call's time; SHAKERSCAN_SWEEP_CALLS_IN_FLIGHT raises it for a
+        # larger worker pool.
+        self._in_flight = asyncio.Semaphore(MAX_CALLS_IN_FLIGHT)
         self.graphql_seen: list[tuple[str, str]] = []
         self.graphql_done: set[str] = set()
         self._init_engine_logins()
@@ -515,13 +554,15 @@ class Sweep(EngineLogins):
             self._count(f"{capability}:destructive_route_skipped")
             return None
         waited = 0.0
+        requeued = False
         while True:
             if not await self._live():
                 raise asyncio.CancelledError()
             try:
                 if self._pace is not None and wire_cost(capability, values):
                     await self._pace.take(wire_cost(capability, values))
-                result = await self._call(capability, values, key)
+                async with self._in_flight:
+                    result = await self._call(capability, values, key)
             except asyncio.CancelledError:
                 raise
             except Refused as exc:
@@ -531,6 +572,17 @@ class Sweep(EngineLogins):
                     continue
                 self._count(f"{capability}:refused")
                 self._note(f"{capability}: {exc}")
+                return None
+            if _never_started(result) and not requeued:
+                # The engine dropped the call before it ran (its queued reservation expired while
+                # the workers were busy): nothing reached the target, so it is sent once more.
+                requeued = True
+                self._count(f"{capability}:requeued")
+                key = f"{key}:requeue"[:200]
+                continue
+            if _lost(result):
+                self._count(f"{capability}:lost")
+                self._note(f"{capability}: the engine dropped a call before it ran ({_error_of(result)})")
                 return None
             self._count(capability)
             return result

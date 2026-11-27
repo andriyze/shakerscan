@@ -903,3 +903,34 @@ def test_the_sweep_reads_a_graphql_schema_and_proves_its_arguments():
     assert len(schema_reads) == 1 and "__schema" in schema_reads[0]["json_body"]["query"]
     verified = {v["candidate_id"] for cap, v, _ in engine.calls if cap == "candidate.verify"}
     assert len(verified) >= 3
+
+
+def test_a_call_the_engine_dropped_unsent_is_sent_once_more_and_a_lost_one_is_not_a_success():
+    """Two Hunts on one engine: 34 sweep calls waited past their reservation lease, were recovered
+    unsent and counted as done. A call dropped before it ran is requeued once (a new key); a worker
+    timeout, which may have run, is counted lost and never resent."""
+    dropped = {"result": {"error": "stale_reservation_recovered", "execution_started": None, "budget_consumed": {}}}
+    timeout = {"status": "timeout", "error": "worker_result_timeout"}
+
+    class Flaky(_Engine):
+        def __init__(self, first):
+            super().__init__()
+            self.first = first
+
+        async def call(self, capability, values, key):
+            if not self.calls:
+                self.calls.append((capability, dict(values), key))
+                return self.first
+            return await super().call(capability, values, key)
+
+    engine = Flaky(dropped)
+    sweep = Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+    result = asyncio.run(sweep._safe("http.request", {"method": "GET", "path": "/a"}, "auto-sweep:read:x"))
+    assert [key for _c, _v, key in engine.calls] == ["auto-sweep:read:x", "auto-sweep:read:x:requeue"]
+    assert result is not None and sweep.counts["http.request:requeued"] == 1
+
+    engine = Flaky(timeout)
+    sweep = Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+    assert asyncio.run(sweep._safe("http.request", {"method": "GET", "path": "/a"}, "auto-sweep:read:y")) is None
+    assert len(engine.calls) == 1 and sweep.counts == {"http.request:lost": 1}
+    assert server_sweep.MAX_CALLS_IN_FLIGHT >= 1
