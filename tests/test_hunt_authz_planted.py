@@ -33,6 +33,10 @@ def test_the_planted_field_value_and_creator_come_from_the_create_request():
     assert authz_planted._body_value(body, "application/json", "secret") == SECRET
     assert authz_planted._body_value(b"secret=" + SECRET.encode() + b"&x=1", "application/x-www-form-urlencoded",
                                      "secret") == SECRET
+    # The archive keeps a text body as a JSON string (live VAmPI: the value was not found until decoded).
+    stored = json.dumps(json.dumps({"book_title": "t1", "secret": SECRET}))
+    assert authz_planted._body_value(authz_planted._archived_text(stored).encode(), "application/json", "secret") == SECRET
+    assert authz_planted._archived_text(b'{"a": 1}') == '{"a": 1}'
     values = {"primary_bindings": [{"source_action_id": "login-a"}],
               "secondary_bindings": [{"source_action_id": "login-b"}]}
     assert authz_planted.creator_slot({"request_bindings": [{"source_action_id": "login-b"}]}, values) == "secondary"

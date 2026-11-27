@@ -67,6 +67,22 @@ def _body_value(body: bytes, content_type: str, field: str) -> str | None:
     return found[0] if len(found) == 1 else None
 
 
+def _archived_text(stored: Any) -> str:
+    """An archived body as text. The archive keeps text bodies as a JSON string (the body's text
+    quoted), so one layer of JSON is undone when the stored value is one."""
+    if isinstance(stored, (bytes, bytearray)):
+        stored = bytes(stored).decode("utf-8", "replace")
+    text = str(stored or "")
+    if text.startswith('"'):
+        try:
+            inner = json.loads(text)
+        except ValueError:
+            return text
+        if isinstance(inner, str):
+            return inner
+    return text
+
+
 def creator_slot(action_input: Mapping[str, Any], values: Mapping[str, Any]) -> str | None:
     """Which of the proof's two principals sent the create request, or None."""
     principal = str(action_input.get("as_principal") or "").lower()
@@ -125,7 +141,7 @@ async def planted_source(conn: Any, *, hunt_id: Any, values: Mapping[str, Any]) 
     payloads, _used = await read_transaction_payloads(
         conn, [transactions[0]["id"]], external_payload_budget=1 << 20, hunt_run_id=str(hunt_id))
     payload = payloads.get(str(transactions[0]["id"])) or {}
-    body = payload.get("request_body") or b""
+    body = _archived_text(payload.get("request_body"))
     headers = payload.get("request_headers") or {}
     if isinstance(headers, (bytes, str)):
         try:
@@ -133,7 +149,7 @@ async def planted_source(conn: Any, *, hunt_id: Any, values: Mapping[str, Any]) 
         except ValueError:
             headers = {}
     content_type = str({str(k).lower(): v for k, v in dict(headers or {}).items()}.get("content-type") or "")
-    value = _body_value(body if isinstance(body, bytes) else str(body).encode(), content_type.lower(), field)
+    value = _body_value(body.encode(), content_type.lower(), field)
     if value is None or not distinctive(value):
         raise PlantedObjectRefused(
             f"the create request's body holds no single distinctive value in {field} "
