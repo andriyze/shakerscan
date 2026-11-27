@@ -109,12 +109,10 @@ def public_verification_families() -> dict[str, Any]:
             "families": ["command_injection", "injection", "nosqli", "path_traversal", "sqli",
                          "ssrf", "ssti"],
             "locus": {"route": "/path of a GET request", "parameter": "the query parameter name"},
-            "graphql_locus": {"method": "POST", "route": "/graphql endpoint path",
-                              "operation": "the minimal GraphQL document, e.g. query{search(keyword:\"a\"){id}}",
-                              "parameter": "one string argument in it"},
-            "note": ("A specific family runs that proof; 'injection' runs every one. A GraphQL "
-                     "argument is proven in place (graphql_locus); a mutation needs the "
-                     "state-changing permission. XSS (family "
+            "graphql_locus": {"method": "POST", "route": "/graphql", "operation": "GraphQL document",
+                              "parameter": "a string argument in it"},
+            "note": ("A specific family runs that proof; 'injection' runs every one (graphql_locus for "
+                     "a GraphQL argument). XSS (family "
                      "xss) and a request-body parameter are proven by xss.verify and sqli.verify: "
                      "candidate.verify answers with that call, ready to send (next_call)."),
         },

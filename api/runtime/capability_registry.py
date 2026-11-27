@@ -1749,13 +1749,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_input_schema=_schema({
                 "mode":{"type":"string","enum":["object","selected_object","function","planted_object"],"default":"object",
                     "description":("selected_object compares two ordered owner/object references, including opaque slug IDs; access evidence alone never proves entitlement. "
-                        "planted_object: routes [object, collection listing]; one principal created the object in this Hunt (create_action_id) with a distinctive "
-                        "value in a private field (planted_field); verified when the other principal reads that value, the shared listing withholds it, and an "
-                        "anonymous read does not show it. For a collection every user lists, where the object mode skips each object.")},
+                        "planted_object: routes [object, its listing]; proves the other principal reads a private value one principal planted.")},
                 "create_action_id": {"type": "string", "maxLength": 36,
-                    "description": "planted_object: the http.request (POST/PUT/PATCH) that created the object as one of the two principals."},
+                    "description": "planted_object: the http.request that created the object as one principal."},
                 "planted_field": {"type": "string", "maxLength": 120,
-                    "description": "planted_object: the private field of that request's body holding the planted value (secret, note, ...)."},
+                    "description": "planted_object: the private body field it planted."},
                 "origin": _SERVICE_ORIGIN_PROPERTY,
                 "primary_principal": {"type": "string", "enum": ["primary"]},
                 "secondary_principal": {"type": "string", "enum": ["secondary"]},
