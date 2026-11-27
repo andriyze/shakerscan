@@ -94,6 +94,11 @@ def checklist(body: str) -> dict[str, list[str]]:
 def build_section(*, hunt_id: str, signals: list[str], objective: str, target_kind: str,
                   allowed_capabilities: Iterable[str] | None, library: Any = None) -> dict[str, Any]:
     from .skills import read_skill_body, skill_library
+    if not signals:
+        # Nothing mapped calls for a methodology yet; the objective's words alone matched the wrong
+        # ones (a generic "authorization flaws" picked GraphQL and SSO).
+        return {"signals": [], "methodologies": [],
+                "note": "No mapped route or input calls for a methodology yet; this updates as the Hunt maps more."}
     library = library or skill_library()
     suggestions = library.suggest(goal=objective, target_kind=target_kind, signals=signals,
                                   allowed_capabilities=allowed_capabilities, limit=MAX_SKILLS)
@@ -119,21 +124,38 @@ def build_section(*, hunt_id: str, signals: list[str], objective: str, target_ki
     }
 
 
+async def surface_rows(conn: Any, row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The routes and inputs this Hunt has reached: every path it sent (with its query names) and
+    the routes its coverage report maps (with their inputs). The target inventory is only one of
+    the sources: Continuous ASM, which fills it, may be off."""
+    import urllib.parse
+    rows: list[dict[str, Any]] = []
+    sent = await conn.fetch(
+        """SELECT DISTINCT url FROM http_transactions WHERE hunt_run_id=$1 LIMIT $2""",
+        row.get("id"), MAX_ENDPOINTS)
+    for item in sent:
+        parts = urllib.parse.urlsplit(str(item["url"] or ""))
+        names = [name for name, _value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)]
+        rows.append({"path": parts.path or "/", "param_shape": "&".join(names), "content_type": None})
+    from .coverage_map import load_coverage
+    report = await load_coverage(conn, row) or {}
+    for item in [*(report.get("open") or ()), *(report.get("signed_in") or ())]:
+        method, _, route = str(item.get("endpoint") or "").partition(" ")
+        rows.append({"path": route, "param_shape": "&".join(str(name) for name in item.get("params") or ()),
+                     "content_type": None})
+    return rows
+
+
 async def briefing_section(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
-    target = row.get("target_id")
-    if not target:
+    if not row.get("target_id"):
         return {"signals": [], "methodologies": []}
-    rows = await conn.fetch(
-        """SELECT path, param_shape, content_type FROM target_endpoints
-           WHERE target_id=$1 AND test_status <> 'gone' ORDER BY last_seen_at DESC LIMIT $2""",
-        target, MAX_ENDPOINTS)
     policy = row.get("policy_json") or {}
     if isinstance(policy, str):
         import json
         policy = json.loads(policy or "{}")
     allowed = policy.get("allowed_capabilities") if isinstance(policy, Mapping) else None
     return build_section(
-        hunt_id=str(row.get("id")), signals=surface_signals([dict(item) for item in rows]),
+        hunt_id=str(row.get("id")), signals=surface_signals(await surface_rows(conn, row)),
         objective=str(row.get("objective") or ""), target_kind=str(row.get("target_kind") or "web"),
         allowed_capabilities=allowed,
     )

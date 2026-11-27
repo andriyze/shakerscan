@@ -42,3 +42,9 @@ def test_the_methodology_gives_way_first_when_the_briefing_is_too_large():
         {"skill_id": "a", "steps": ["s" * 300] * 2}, {"skill_id": "b", "steps": ["t" * 300] * 2}]},
         "objective": {"text": "o"}, "trimmed": []}
     assert len(bound_briefing(long, limit=900)["methodology"]["methodologies"]) == 1
+
+
+def test_no_surface_signal_lists_no_methodology_rather_than_a_guess_from_the_objective():
+    section = mb.build_section(hunt_id="h1", signals=[], objective="Find vulnerabilities, including authorization flaws",
+                               target_kind="web", allowed_capabilities=None)
+    assert section["methodologies"] == []
