@@ -449,7 +449,9 @@ python3 scripts/generate_device_advisories.py \
 python3 scripts/generate_device_advisories.py --vendor mosquitto --output /tmp/mosquitto.json
 ```
 
-`--kev`, `--epss`, `--templates` and `--zero-wire` take downloaded files (the CISA KEV catalog,
+`--base PATH` refreshes an existing snapshot instead of rebuilding it: its records are kept, the
+CVEs given with `--cve` that it does not carry are added, and the context files below are
+re-applied to every record. `--kev`, `--epss`, `--templates` and `--zero-wire` take downloaded files (the CISA KEV catalog,
 the FIRST EPSS CSV, a nuclei templates directory and the Cloudflare Radar Zero Wire RSS feed) and
 add exploitation context to the records; see `docs/service-intelligence.md`.
 

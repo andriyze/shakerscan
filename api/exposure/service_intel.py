@@ -186,7 +186,7 @@ def candidate_priority(row: Mapping[str, Any]) -> tuple[Any, ...]:
 # Product names fingerprints report without a CPE (httpx/tech detection, some nmap banners) ->
 # the NVD CPE part:vendor:product the snapshot keys on. Only unambiguous names; a version is required.
 PRODUCT_CPE_ALIASES: dict[str, tuple[str, ...]] = {
-    "nginx": ("a:f5:nginx", "a:nginx:nginx"),
+    "nginx": ("a:f5:nginx", "a:nginx:nginx", "a:f5:nginx_open_source"),
     "apache": ("a:apache:http_server",),
     "apache httpd": ("a:apache:http_server",),
     "apache http server": ("a:apache:http_server",),
