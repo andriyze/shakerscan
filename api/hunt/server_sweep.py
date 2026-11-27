@@ -65,6 +65,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
 from .engine_logins import EngineLogins
 from . import graphql_sweep
+from .serialization_signals import serialized_formats
 from . import engine_accounts
 from .route_words import API_ROUTE_WORDS, MAX_API_PREFIXES
 try:
@@ -169,7 +170,7 @@ _GRAPHQL_PATH = re.compile(r"(?:^|/)graph(?:i)?ql(?:/|$)", re.I)
 _EXPOSURE_ROUTE = re.compile(
     r"(?:/$|/\.[^/]+|\.[A-Za-z0-9~]{1,8}$|(?:^|/)(?:metrics|debug|status|server-status|server-info|info|"
     r"env|environment|trace|logs?|console|actuator(?:/[a-z]+)?|heapdump|dump|backups?|config|"
-    r"configuration|settings|ftp|well-known)$)", re.I)
+    r"configuration|settings|ftp|well-known|vars|indices|threaddump|loggers|logfile)$)", re.I)
 # An API root a route sits under: /api, /api/v1, /rest, /v2 ... (the sweep tries API_ROUTE_WORDS there).
 # A path segment that names an operation which destroys, resets or ends something: a GET to it is a
 # write on many applications (VAmPI's GET /createdb recreates its database; a GET /logout ends the
@@ -501,6 +502,7 @@ class Sweep(EngineLogins):
         # keep the wait under one call's time; SHAKERSCAN_SWEEP_CALLS_IN_FLIGHT raises it for a
         # larger worker pool.
         self._in_flight = asyncio.Semaphore(MAX_CALLS_IN_FLIGHT)
+        self.serialized_seen: set[str] = set()
         self.login_pages: dict[str, str] = {}  # a form login's action -> the page that showed it
         self.graphql_seen: list[tuple[str, str]] = []
         self.graphql_done: set[str] = set()
@@ -820,6 +822,20 @@ class Sweep(EngineLogins):
                     and _EXPOSURE_ROUTE.search(path)):
                 # The Scan's exposure classes (metrics, autoindex, debug pages, secret files ...).
                 self._queue_request_check({"check": "exposure", "method": "GET", "path": path})
+            formats = serialized_formats(str(response.get("body_sample") or "")) if action else []
+            if formats and path.split("?", 1)[0] not in self.serialized_seen:
+                # A serialized object the page hands its client (serialization_signals): the input
+                # that carries it back is worth testing; nothing proves it here.
+                self.serialized_seen.add(path.split("?", 1)[0])
+                await self._candidate_and_verify({
+                    "family": "insecure_deserialization",
+                    "title": f"{path} hands the client a serialized object ({', '.join(formats)})",
+                    "claim": (f"GET {path} answered with a {', '.join(formats)} serialized object; an "
+                              "application usually reads such a value back (engine sweep, signature only)."),
+                    "severity": "info",
+                    "locus": {"method": "GET", "path": path},
+                    "evidence_refs": [f"action:{action}"],
+                }, verify=False)
             if signal and action and not (principal and signal == "account records"):
                 who = f"the {principal} principal" if principal else "an anonymous caller"
                 await self._candidate_and_verify({
