@@ -95,6 +95,14 @@ means **no match in that snapshot**, not “no vulnerabilities.” Configure the
 incorrect digest fails closed; its trust status remains visible. This feature never performs a live
 CVE, KEV, EPSS or exploit-site query.
 
+### Vendor-declared ranges
+
+NVD analysis can trail publication by days or weeks. A snapshot built with `--vendor-ranges`
+carries, for a CVE NVD has not analysed, the affected ranges the CVE's own publisher declared.
+Such a candidate reports `range_source: cna` (otherwise `nvd`) and the Services view labels it
+"Vendor-declared range". It is a candidate like any other; only ranges with a plain version bound
+for a curated product are taken, and a platform-conditional or open-ended declaration is left out.
+
 ### Curated briefings
 
 A snapshot built with `--zero-wire` marks the CVEs named in a

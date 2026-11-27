@@ -18,10 +18,10 @@ BUNDLED_SNAPSHOT_PATH = os.path.join(
     "data",
     "device_advisories.json",
 )
-BUNDLED_SNAPSHOT_SHA256 = "ce2a04c41f9a3b08c973b993b27614e53ada471b5214a50dc293047d3972c395"
+BUNDLED_SNAPSHOT_SHA256 = "8342e2399e2191b8a6d53a12c00c5732cc4dd9ec89c067cc40fadff779c87b33"
 # The built-in snapshot's own generated_at: an external bundle older than this is refused, so a
 # stale bundle left on the host cannot replace newer data shipped in a later image.
-BUNDLED_SNAPSHOT_GENERATED_AT = "2026-11-27T19:34:27Z"
+BUNDLED_SNAPSHOT_GENERATED_AT = "2026-11-27T19:46:40Z"
 
 # A network banner, Nmap guess, or unauthenticated protocol response can produce a
 # syntactically exact CPE without proving which firmware is installed. Only authenticated or

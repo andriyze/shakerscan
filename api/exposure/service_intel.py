@@ -132,7 +132,10 @@ def _exploitation_context(records: list[Mapping[str, Any]]) -> dict[str, Any]:
     EPSS likelihood, the curated briefing naming the CVE, and the checks the image's own templates
     carry. Metadata, never executed."""
     context: dict[str, Any] = {"cvss_score": None, "known_exploited": None, "epss": None,
-                               "briefing": None, "checks": []}
+                               "briefing": None, "checks": [],
+                               # Whose affected range matched: NVD's analysis, or the CVE publisher's
+                               # own declaration while NVD has not analysed the CVE yet.
+                               "range_source": "cna" if any(r.get("range_source") == "cna" for r in records) else "nvd"}
     for record in records:
         score = _number(record.get("cvss_score"), 0, 10)
         if score is not None and (context["cvss_score"] is None or score > context["cvss_score"]):

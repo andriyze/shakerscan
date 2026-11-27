@@ -28,6 +28,7 @@ export interface ServiceCandidate {
   // EPSS likelihood, and checks the image's own templates carry. Absent on an older engine.
   cvss_score?: number | null
   known_exploited?: { date_added: string | null; ransomware: boolean } | null
+  range_source?: 'nvd' | 'cna'
   briefing?: { source: string; id: string; published: string; action: string | null; url: string } | null
   epss?: { score: number; percentile: number | null } | null
   checks?: Array<{ kind: string; id: string; safety?: 'exploit' | 'probe' }>
