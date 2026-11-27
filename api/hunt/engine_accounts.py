@@ -64,7 +64,15 @@ def signup_routes(items: Sequence[Mapping[str, Any]]) -> list[tuple[str, list[st
     found: list[tuple[int, str, list[str]]] = []
     for item in items:
         method, _, route = str(item.get("endpoint") or "").partition(" ")
-        if method != "POST" or not route.startswith("/") or "{" in route:
+        if not route.startswith("/") or "{" in route:
+            continue
+        if method == "GET":
+            # An API's own JavaScript names its users collection, usually as a read: registration
+            # there is a POST to the same collection (REST create).
+            if _USER_COLLECTION.match(route) or _SIGNUP.search(route):
+                found.append((2, route.rstrip("/"), []))
+            continue
+        if method != "POST":
             continue
         params = [str(name) for name in item.get("params") or ()]
         confirm = sum(1 for name in params if _SECRET_FIELD.search(name)) >= 2 or any(

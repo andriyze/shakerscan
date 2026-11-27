@@ -224,3 +224,25 @@ def test_the_debrief_lists_what_the_engine_made_on_the_target():
     debrief = debrief_coverage(report, forced=False, reason=None)
     assert debrief["discovery"]["engine_accounts"] == discovery["engine_accounts"]
     assert debrief["discovery"]["engine_writes"] == discovery["engine_writes"]
+
+
+@pytest.mark.parametrize("answer, accounts", [("pending", 0), ("unavailable", 0), ("granted", 2)])
+def test_without_the_flag_the_engine_asks_and_makes_accounts_only_when_granted(answer, accounts):
+    asked = []
+
+    async def ask(flag, routes):
+        asked.append((flag, list(routes)))
+        return answer
+
+    shop = _Shop()
+    state = {}
+    asyncio.run(Sweep(call=shop.call, create_candidate=shop.create, state=state, live=shop.live,
+                      request_permission=ask).run(_run(["http.request"], accounts=False), REPORT))
+    assert asked == [("account-creation", ["/api/Users"])]
+    assert len(shop.users) == accounts
+    assert ("engine_accounts" in state) == bool(accounts)
+
+
+def test_a_users_collection_seen_only_as_a_read_is_tried_as_a_sign_up():
+    assert [path for path, _ in ea.signup_routes([{"endpoint": "GET /api/Users", "params": []},
+                                                  {"endpoint": "GET /api/Products", "params": []}])] == ["/api/Users"]

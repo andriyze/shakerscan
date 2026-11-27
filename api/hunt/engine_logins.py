@@ -42,6 +42,21 @@ class EngineLogins:
         self._count("engine_logins")
         self._stats(engine_logins=[login["label"] for login in self.engine_logins])
 
+    async def _ask_for_accounts(self, items: Sequence[Mapping[str, Any]]) -> bool:
+        """Without allow_account_creation: when the target has a registration route, ask (an ordinary
+        permission request; a launch bound grants it at once). True once it is granted."""
+        routes = [path for path, _params in ea.signup_routes(items)]
+        if not routes or self._request_permission is None:
+            return False
+        try:
+            answer = await self._request_permission("account-creation", routes)
+        except Exception as exc:  # noqa: BLE001 - asking never stops the sweep
+            self._note(f"engine accounts: the permission request failed: {type(exc).__name__}")
+            return False
+        if answer != "granted":
+            self._stats(engine_accounts_permission=answer)
+        return answer == "granted"
+
     async def _make_accounts(self, items: Sequence[Mapping[str, Any]]) -> None:
         """Sign up (at most ``MAX_ACCOUNTS`` accounts) and sign in as each; see ``engine_accounts``."""
         made = sum(1 for login in self.engine_logins if login["label"].startswith("account"))

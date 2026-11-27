@@ -69,6 +69,7 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     "capability_requires_state_changing_http": ReasonSpec(403, KIND_CAPABILITY_ENABLE),
     "capability_requires_network_discovery": ReasonSpec(403, KIND_CAPABILITY_ENABLE),
     "capability_requires_oob": ReasonSpec(403, KIND_CAPABILITY_ENABLE),
+    "capability_requires_account_creation": ReasonSpec(403, KIND_CAPABILITY_ENABLE),
     "capability_not_selected": ReasonSpec(403, KIND_CAPABILITY_ENABLE),
     "state_changing_http_not_allowed": ReasonSpec(403, KIND_CAPABILITY_ENABLE),
     "active_replay_not_allowed": ReasonSpec(403, KIND_CAPABILITY_ENABLE),

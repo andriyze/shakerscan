@@ -375,6 +375,7 @@ export const HUNT_START_CONTRACT = {
     "budget_resume_without_headroom",
     "cancellation_state_unavailable",
     "capability_not_selected",
+    "capability_requires_account_creation",
     "capability_requires_active_testing",
     "capability_requires_credentials",
     "capability_requires_network_discovery",

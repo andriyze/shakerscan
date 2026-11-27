@@ -394,7 +394,9 @@ class Sweep(EngineLogins):
     """
 
     def __init__(self, *, call: Call, create_candidate: CreateCandidate, state: dict[str, Any],
-                 live: Callable[[], Awaitable[bool]], pace: WirePace | None = None) -> None:
+                 live: Callable[[], Awaitable[bool]], pace: WirePace | None = None,
+                 request_permission: Callable[[str, list[str]], Awaitable[str]] | None = None) -> None:
+        self._request_permission = request_permission
         self._pace = pace
         self._call = call
         self._create = create_candidate
@@ -582,7 +584,7 @@ class Sweep(EngineLogins):
                     # Accounts the engine makes itself (only with the operator's explicit
                     # allow_account_creation), then the application used as each of its logins
                     # (engine_accounts): what that maps is tested as the login next round.
-                    if policy.get("allow_account_creation"):
+                    if policy.get("allow_account_creation") or await self._ask_for_accounts(items):
                         await self._make_accounts(items)
                     await self._use_as_logins(items, writes=writes, allowed=allowed)
                 if "request.verify" in allowed:

@@ -562,8 +562,9 @@ login. Without attached principals, register or sign in to two different account
 captured logins to `authz.verify` as `primary_bindings` and `secondary_bindings`: the server runs
 the comparison only when its own records show two different accounts (different token subjects,
 or two sign-in requests with different account names). With the operator's `allow_account_creation`
-(start policy; a launch allows it with `--allow capability:account-creation`; off by default, since an
-account on a real system stays until someone deletes it) the engine also makes two accounts itself
+(start policy, or granted when the engine asks: it raises a permission request when it finds a
+registration route, which a launch `--allow capability:account-creation` grants at once; off by default,
+since an account on a real system stays until someone deletes it) the engine also makes two accounts itself
 where the application lets anyone sign up, signs in as each,
 reads the mapped routes and sends the mapped non-destructive writes as each, and compares the two on
 the routes that name each account's own objects; a default credential it finds accepted is used the

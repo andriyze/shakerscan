@@ -350,11 +350,14 @@ def configure_auto_discovery(*, execute: Executor, record: Recorder,
                              load_run: Callable[[str], Awaitable[Mapping[str, Any] | None]],
                              load_report: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None = None,
                              create_candidate: Callable[[str, Mapping[str, Any]], Awaitable[Any]] | None = None,
-                             finish: Callable[..., Awaitable[Any]] | None = None) -> None:
+                             finish: Callable[..., Awaitable[Any]] | None = None,
+                             request_permission: Callable[..., Awaitable[str]] | None = None) -> None:
     """Wire the Hunt capability call, the inventory write, the run read, and for the sweep the
-    coverage read, candidate recording and the deferred finish (composition root)."""
+    coverage read, candidate recording, the deferred finish and its own permission requests
+    (composition root)."""
     _DEFAULTS.update(execute=execute, record=record, load_run=load_run)
-    for name, value in (("load_report", load_report), ("create_candidate", create_candidate), ("finish", finish)):
+    for name, value in (("load_report", load_report), ("create_candidate", create_candidate), ("finish", finish),
+                        ("request_permission", request_permission)):
         if value is not None:
             _DEFAULTS[name] = value
 
@@ -496,8 +499,13 @@ class DiscoveryRunner:
             return _live(await self._load_run(self.hunt_id))
 
         create = self._create_candidate
+        ask = _DEFAULTS.get("request_permission")
+
+        async def request_permission(flag: str, routes: list[str]) -> str:
+            return await ask(self.hunt_id, flag, routes) if ask is not None else "unavailable"
+
         sweep = Sweep(call=call, create_candidate=lambda values: create(self.hunt_id, values),
-                      state=self.state, live=live, pace=self.pace)
+                      state=self.state, live=live, pace=self.pace, request_permission=request_permission)
         target_id = str(run.get("target_id") or "")
 
         async def reload() -> Mapping[str, Any] | None:
