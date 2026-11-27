@@ -180,8 +180,9 @@ def test_finish_guard_refuses_open_coverage_with_time_left_and_names_it():
 
 def test_finish_guard_lets_the_hunt_finish_when_it_should():
     report = build_coverage(actions=[], endpoints=[_endpoint("/search", params="q")])
-    # Forced with a reason after half the open pairs closed; refused when forced without one.
-    assert finish_guard(_run(), report, force=True, force_reason="the person asked to stop now", now=NOW) is None
+    # Forced with a reason once a third of the wall has passed; refused when forced without one.
+    later = _run(created_at=NOW - timedelta(minutes=40))
+    assert finish_guard(later, report, force=True, force_reason="the person asked to stop now", now=NOW) is None
     assert "force_reason" in finish_guard(_run(), report, force=True, force_reason=" ", now=NOW)
     # Wall nearly spent, HTTP budget spent, budget exhausted, not a web Hunt, nothing open.
     late = _run(created_at=NOW - timedelta(seconds=5400 - 30))
@@ -279,3 +280,26 @@ def test_a_signed_in_route_with_nothing_open_is_still_listed_for_the_sweep():
     assert set(signed) | opened >= {"GET /rest/basket/{id}", "GET /static/app.css"}
     assert all(item["identity"] == login and item["untested"] == [] for item in signed.values())
     assert report["pairs_open"] == sum(len(item["untested"]) for item in report["open"])
+
+
+def test_every_answer_names_ready_calls_and_an_early_forced_finish_gets_them_back():
+    report = build_coverage(actions=[], endpoints=[_endpoint("/search", params="q"), _endpoint("/.env"),
+                                                   _endpoint("/api/login", method="POST")])
+    calls = coverage_map.next_calls(report)
+    assert calls and len(calls) <= coverage_map.NEXT_CALLS
+    by_capability = {call["capability"] for call in calls}
+    assert by_capability <= {"request.verify", "xss.verify", "http.request"} and all(call["input"] for call in calls)
+    search = next(call for call in calls if "/search" in json.dumps(call))
+    assert search["input"]["parameter"] == "q" or search["capability"] == "xss.verify"
+    assert compact_open_coverage(report, "h1")["next_calls"] == calls
+    # Five minutes into a 90-minute Hunt a forced finish is refused with the calls to send.
+    early = finish_guard(_run(), report, force=True, force_reason="I think I am done here", now=NOW)
+    assert early and "Too early to finish" in early and calls[0]["capability"] in early
+    # Not once a third of the wall has passed, nor on a spent budget, nor with nothing concrete open.
+    assert finish_guard(_run(created_at=NOW - timedelta(minutes=31)), report, force=True,
+                        force_reason="I think I am done here", now=NOW) is None
+    assert finish_guard(_run(status="budget_exhausted"), report, force=True, force_reason="spent, stopping", now=NOW) is None
+    nothing = build_coverage(actions=[], endpoints=[])
+    assert finish_guard(_run(), nothing, force=True, force_reason="nothing left to do", now=NOW) is None
+    # The unforced refusal hands the same calls over.
+    assert "Send next (ready to send)" in finish_guard(_run(), report, force=False, force_reason=None, now=NOW)

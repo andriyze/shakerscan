@@ -118,7 +118,7 @@ def test_finish_with_open_coverage_and_time_left_is_refused_and_names_what_is_op
 
 
 def test_forced_finish_records_the_reason_and_the_open_coverage_in_the_debrief():
-    connection = _Connection()
+    connection = _Connection(created_minutes_ago=40)  # a third of the 90-minute wall has passed
     with pytest.raises(run_router.HTTPException) as no_reason:
         asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[], force=True))
     assert "force_reason" in no_reason.value.detail

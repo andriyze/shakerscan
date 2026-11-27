@@ -567,7 +567,8 @@ def coverage_page(report: Mapping[str, Any], *, limit: int = 50, offset: int = 0
     offset = max(0, int(offset or 0))
     page = items[offset:offset + limit]
     rest = {key: value for key, value in report.items() if key != "open"}
-    return {**rest, "open": page, "returned": len(page), "offset": offset,
+    calls = next_calls(report)
+    return {**rest, **({"next_calls": calls} if calls else {}), "open": page, "returned": len(page), "offset": offset,
             "has_more": offset + len(page) < len(items),
             "next_offset": offset + len(page) if offset + len(page) < len(items) else None}
 
@@ -591,6 +592,7 @@ def compact_open_coverage(report: Mapping[str, Any], hunt_id: str) -> dict[str, 
         **({"sweep_checks": discovery["sweep_checks"]} if discovery.get("sweep_checks") else {}),
         **({"discovery_not_run": list(discovery["not_run"])} if discovery.get("not_run") else {}),
         "next": [_item_line(item) for item in (report.get("open") or [])[:COMPACT_ITEMS]],
+        **({"next_calls": calls} if (calls := next_calls(report)) else {}),
         "list": f"POST /hunts/{hunt_id}/query kind=coverage (or GET /hunts/{hunt_id}/coverage)",
     }
 
@@ -628,6 +630,63 @@ def wall_remaining_seconds(run: Mapping[str, Any], *, now: datetime | None = Non
     return limit - (moment - created).total_seconds()
 
 
+# The planner loop: every capability answer and every finish refusal names the next concrete calls,
+# ready to send, so a planner always has a next step instead of deciding it is done.
+NEXT_CALLS = 3
+# A forced finish before this share of the wall is refused while a concrete next call exists.
+FORCE_MIN_WALL_SHARE = 1 / 3
+
+
+def _concrete(route: str) -> str:
+    return re.sub(r"\{[^/{}]*\}", "1", route)
+
+
+def next_call(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One ready-to-send call that closes the first open class of an endpoint, or None."""
+    method, _, route = str(item.get("endpoint") or "").partition(" ")
+    if not route.startswith("/"):
+        return None
+    path = _concrete(route)
+    params = [str(name) for name in item.get("params") or () if str(name)]
+    identity = {"request_bindings": list(item["identity"])} if item.get("identity") else {}
+    for klass in item.get("untested") or ():
+        if klass in {"sqli", "injection"} and params:
+            check = "sql_injection" if klass == "sqli" else "command_injection"
+            base = ({"query": {name: "1" for name in params[:10]}} if method == "GET"
+                    else {"json_body": {name: "1" for name in params[:20]}})
+            return {"capability": "request.verify", "why": f"{klass} on {method} {route} ({params[0]})",
+                    "input": {"check": check, "method": method, "path": path, "parameter": params[0], **base, **identity}}
+        if klass == "xss" and params and method == "GET":
+            return {"capability": "xss.verify", "why": f"xss on GET {route}",
+                    "input": {"path": f"{path}?" + "&".join(f"{name}=1" for name in params[:10])}}
+        if klass in {"exposure", "unauthenticated_api"} and method == "GET" and not identity:
+            return {"capability": "request.verify", "why": f"{klass} on GET {route}",
+                    "input": {"check": "exposure" if klass == "exposure" else "unauthenticated_api",
+                              "method": "GET", "path": path}}
+        if klass == "default_credentials" and method == "POST":
+            return {"capability": "http.request", "why": f"default credentials on POST {route}", "input": {
+                "method": "POST", "path": path, "json_body": {"username": "", "password": ""},
+                "request_bindings": [
+                    {"default_credential": "dc-01", "credential_field": "username", "body_pointer": "/username"},
+                    {"default_credential": "dc-01", "credential_field": "secret", "body_pointer": "/password"}]}}
+        if klass in {"review", "object_authz", "function_authz"} and method == "GET":
+            return {"capability": "http.request", "why": f"{klass}: read GET {route}" + (
+                " as the login that reached it" if identity else ""),
+                "input": {"method": "GET", "path": path, **identity}}
+    return None
+
+
+def next_calls(report: Mapping[str, Any] | None, *, limit: int = NEXT_CALLS) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for item in (report or {}).get("open") or ():
+        call = next_call(item) if isinstance(item, Mapping) else None
+        if call is not None:
+            calls.append(call)
+        if len(calls) >= limit:
+            break
+    return calls
+
+
 def http_budget_left(run: Mapping[str, Any]) -> bool:
     budget = _json(run.get("budget_json"), {})
     used = _json(run.get("budget_used_json"), {})
@@ -646,7 +705,8 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
     or expired; it has no checks to close the open pairs with), a Hunt whose wall or HTTP budget
     is spent, a budget-exhausted Hunt, one with nothing open, or a forced finish with a reason
     (the engine's own sweep, not the planner, does the remaining work; a finish while it runs is
-    deferred until it ends, see ``run_service``)."""
+    deferred until it ends, see ``run_service``) once a third of the wall has passed: before that
+    a forced finish is refused while a concrete next call exists (``_early_finish``)."""
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or report is None:
         return None
     if not can_test:
@@ -655,7 +715,8 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
         if len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:
             return ("force=true needs force_reason: say in a sentence why the open coverage is left "
                     "untested; it is recorded in the debrief")
-        return None
+        early = _early_finish(run, report, now=now)
+        return early
     if str(run.get("status") or "") == "budget_exhausted":
         return None
     remaining = wall_remaining_seconds(run, now=now)
@@ -663,6 +724,29 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
         return None
     if not http_budget_left(run):
         return None
+    return _open_refusal(run, report, remaining)
+
+
+def _early_finish(run: Mapping[str, Any], report: Mapping[str, Any], *, now: datetime | None) -> str | None:
+    """A forced finish before a third of the wall, with concrete calls still open: refused with them."""
+    if str(run.get("status") or "") == "budget_exhausted" or not http_budget_left(run):
+        return None
+    budget = _json(run.get("budget_json"), {})
+    limit = budget.get("max_duration_seconds")
+    remaining = wall_remaining_seconds(run, now=now)
+    if not isinstance(limit, int) or remaining is None or limit - remaining >= FORCE_MIN_WALL_SHARE * limit:
+        return None
+    calls = next_calls(report)
+    if not calls:
+        return None
+    return (f"Too early to finish: {int((limit - remaining) // 60)} of {int(limit // 60)} min used and concrete "
+            "work is open. Send these next (ready to send, in next_calls): "
+            + "; ".join(f"{call['capability']} — {call['why']}" for call in calls)
+            + f". A forced finish is accepted once a third of the wall has passed.")
+
+
+def _open_refusal(run: Mapping[str, Any], report: Mapping[str, Any], remaining: float | None) -> str | None:
+    """The unforced finish refusal: what is open, and the next calls to send."""
     pending = list((report.get("discovery") or {}).get("pending") or [])
     pairs = int(report.get("pairs_open") or 0)
     if not pairs and not pending:
@@ -679,6 +763,10 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
     ]
     if lines:
         parts.append("Untested first: " + "; ".join(lines) + ".")
+    calls = next_calls(report)
+    if calls:
+        parts.append("Send next (ready to send): " + "; ".join(
+            f"{call['capability']} {json.dumps(call['input'], separators=(',', ':'))[:300]}" for call in calls) + ".")
     parts.append(
         f"Continue: POST /hunts/{hunt_id}/query kind=coverage lists every open pair with the check "
         "to run (class_guide). Or finish with force=true and force_reason; the reason and the open "
