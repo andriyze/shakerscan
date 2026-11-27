@@ -69,7 +69,7 @@ try:
 except ModuleNotFoundError:  # package import layout
     from ..finding_routes.list_schema import FINDING_ORIGIN_SQL
 
-from .finalizer import _SEVERITY_RANK, _TEMPLATE_EXPOSURE_CLASSES, _exposure_location
+from .finalizer import _SEVERITY_RANK, _TEMPLATE_EXPOSURE_CLASSES, _exposure_location, exposure_path
 from .finding_identity import finding_identity_keys
 from .posture_findings import OPT_IN_HEADERS
 
@@ -234,8 +234,7 @@ def verified_exposure_locations(report: Mapping[str, Any]) -> dict[tuple[str, st
             continue
         current = locations.get(key)
         if current is None or rank > current["rank"]:
-            path = urllib.parse.urlsplit(str(finding.get("url"))).path.rstrip("/") or "/"
-            locations[key] = {"origins": origins, "path": path, "rank": rank}
+            locations[key] = {"origins": origins, "path": exposure_path(finding.get("url")), "rank": rank}
     return locations
 
 
@@ -244,8 +243,12 @@ _HEADER_PREDICATE = f"{_HEADER_SQL.format(t='')} = ANY($4::text[])"
 
 
 def _path_sql(column: str) -> str:
-    """A stored URL's path, normalised as finalizer._exposure_location does (no query, no trailing /)."""
-    return f"COALESCE(NULLIF(rtrim(substring({column} from '^[^:/?#]+://[^/?#]*([^?#]*)'), '/'), ''), '/')"
+    """A stored URL's path, normalised as finalizer.exposure_path does (no query, runs of / collapsed,
+    no trailing /)."""
+    return (
+        "COALESCE(NULLIF(rtrim(regexp_replace(substring("
+        f"{column} from '^[^:/?#]+://[^/?#]*([^?#]*)'), '/{{2,}}', '/', 'g'), '/'), ''), '/')"
+    )
 
 
 _EXPOSURE_PREDICATE = f"COALESCE(evidence->>'header_name', '') = '' AND {_path_sql('url')} = ANY($4::text[])"
@@ -338,7 +341,7 @@ class _Retirement:
             header = str(evidence.get("header_name") or evidence.get("matcher_name") or "").lower()
             return header in self.values
         try:
-            path = urllib.parse.urlsplit(str(finding.get("url") or "")).path.rstrip("/") or "/"
+            path = exposure_path(finding.get("url") or "")
         except ValueError:
             return False
         return (

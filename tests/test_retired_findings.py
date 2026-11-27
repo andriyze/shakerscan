@@ -356,3 +356,19 @@ def test_the_worker_saves_without_superseded_duplicates_and_gates_retirement_on_
     call = call[:call.index("\n\n")]
     for argument in ("findings=web_findings", "saved_count=saved_count", "coverage_status=coverage_status"):
         assert argument in call
+
+
+def test_a_double_slash_env_template_row_is_superseded_by_the_dotenv_proof():
+    """``//.env`` from a template and ``/.env`` from the exposure probe are one file."""
+    report = _report(missing=())
+    proof = _exposure_proof(url="https://app.test/.env", exposure_class="environment_secret_file",
+                            severity="critical")
+    template = {"tool": "nuclei", "url": "https://app.test//.env", "severity": "high",
+                "proof_state": "candidate", "evidence": {"template_id": "generic-env"}}
+    other_file = {**template, "url": "https://app.test//.env.old"}
+    report["findings"] += [proof, template, other_file]
+    kept = without_superseded_duplicates(report, report["findings"])
+    assert template not in kept and proof in kept and other_file in kept
+    calls = _folded_calls(report)
+    assert set(calls) == {"nuclei_generic_env_folded_into_exposure_proof"}
+    assert calls["nuclei_generic_env_folded_into_exposure_proof"][3] == ["/.env"]

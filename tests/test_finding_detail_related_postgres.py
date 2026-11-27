@@ -298,3 +298,22 @@ def test_retirement_adversarial_cases_on_the_real_schema():
                  "last_seen_now", "re_reported"):
         assert rows[ids[name]] == ("active", None), name
     assert rows[ids["false_positive"]] == ("false_positive", None)
+
+
+def test_the_retirement_sql_spells_a_stored_path_as_the_finalizer_does():
+    """A template row stored at ``//.env`` is the file the exposure probe proved at ``/.env``."""
+    from api.scan.finalizer import exposure_path
+    from api.scan.retired_findings import _path_sql
+    dsn = require_disposable_database(DSN or "", "shakerscan_proof_sql_test")
+    urls = ["https://app.invalid//.env", "https://app.invalid/.env/", "https://app.invalid:443//a//b/?x=1",
+            "https://app.invalid", "https://app.invalid/", "https://app.invalid/.git/config#top"]
+
+    async def go():
+        conn = await asyncpg.connect(dsn)
+        try:
+            return [await conn.fetchval(f"SELECT {_path_sql('$1::text')}", url) for url in urls]
+        finally:
+            await conn.close()
+
+    assert asyncio.run(go()) == [exposure_path(url) for url in urls]
+    assert [exposure_path(url) for url in urls[:3]] == ["/.env", "/.env", "/a/b"]

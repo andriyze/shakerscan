@@ -1740,6 +1740,29 @@ def test_a_template_match_on_a_proven_exposure_joins_that_finding():
     assert proven["evidence"]["corroborating_template_count"] == 1
 
 
+def test_a_double_slash_template_match_joins_the_proven_dotenv_exposure():
+    """A template joins ``{{BaseURL}}`` (``https://host/``) to ``/.env`` and reports ``//.env``;
+    the exposure probe proved the same file at ``/.env``. One file, one finding."""
+    proven = {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified",
+        "title": "Sensitive exposure: environment secret file", "severity": "critical",
+        "url": "https://app.example.test/.env",
+        "evidence": {"exposure_class": "environment_secret_file"},
+    }
+    template = {
+        "tool": "nuclei", "proof_state": "candidate", "title": "Generic Env File Disclosure",
+        "severity": "high", "url": "https://app.example.test//.env",
+        "evidence": {"template_id": "generic-env", "matcher_name": None},
+    }
+    other_file = {**template, "url": "https://app.example.test//.env.old"}
+    kept = finalizer_module._merge_template_candidates_into_exposure_proofs([proven, template, other_file])
+    assert kept == [proven, other_file]
+    assert proven["evidence"]["corroborating_template_count"] == 1
+    assert finalizer_module._exposure_location("https://app.example.test//.env/?x=1") == (
+        "https://app.example.test/.env"
+    )
+
+
 def _console_proof() -> dict:
     return {
         "tool": "shakerscan_exposure_probe", "proof_state": "verified", "severity": "medium",
