@@ -495,3 +495,18 @@ def test_the_public_projection_carries_target_identity_and_completion():
     assert projection["root_domain"] == "example.test"
     assert projection["completed_at"] == "2026-01-01T00:00:00Z"
     assert projection["stop_reason"] == "completed"
+
+
+@pytest.mark.parametrize(("signals", "expected"), [
+    # A live DVGA Hunt: the WebSocket skill (graphql-ws, "injection" in its description) and the
+    # JavaScript skill ("page", "single") ranked above the GraphQL skill the signal names.
+    (["graphql", "python", "flask", "command injection", "sqlite"], "skill.web.graphql-security-testing"),
+    (["graphql", "jquery", "bootstrap", "single page app"], "skill.web.graphql-security-testing"),
+    (["ssrf"], "skill.web.ssrf-url-fetch-and-cloud-metadata-testing"),
+    (["xxe"], "skill.web.path-traversal-file-inclusion-and-xxe-testing"),
+    (["command injection"], "skill.web.command-ssti-expression-and-deserialization-testing"),
+    (["werkzeug"], "skill.web.security-misconfiguration-error-handling-and-logging-testing"),
+])
+def test_a_signal_that_names_a_skill_ranks_that_skill_first(library, signals, expected):
+    suggestions = library.suggest(goal="", target_kind="web", signals=signals)
+    assert suggestions[0]["skill_id"] == expected

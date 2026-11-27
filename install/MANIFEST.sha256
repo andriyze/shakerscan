@@ -239,11 +239,11 @@ e2cb25807e6d242f40668a8f49573874112a7bea018ea0d93a3ef7869400796d  skills/web/08-
 f72a0d7f715888db819f96cc1e2f2c10ddd862dbb34696f0e92b8cfad54cf0c6  skills/web/12-graphql-security-testing.md
 556c8c53d8990fe4e4f394f12e3073511d9b3416931bc65094cbc41ca1d851b4  skills/web/13-websocket-sse-and-realtime-security-testing.md
 d06d9d4ed7b7e2b93ade9ecdd8e976d13ff384bd62ba6b3023a3fb9bbcf930a1  skills/web/14-sql-nosql-orm-and-ldap-injection-testing.md
-e62a3bd05f697e001c23af197f4138212772e320b9b07afd92ad3f90b434c03d  skills/web/15-command-ssti-expression-and-deserialization-testing.md
+b4b506645417c5d16b6c692ca16a46d523691f0e5b0d060b06e9f16048908400  skills/web/15-command-ssti-expression-and-deserialization-testing.md
 e2d8b33e8c8bd0c7e6affd26bf42bb6525ba23f74bcb04be871689ed40111c15  skills/web/16-xss-dom-and-client-side-injection-testing.md
 3e809c86a1092a83f44157d53bdce1d3f2d83860defd1033ff0f690a554ab049  skills/web/17-csrf-cors-clickjacking-and-cross-origin-testing.md
-1cd64017a62cc86b588b21a9d8cf50ef58c66b8851f1b3ff298ff4cf4e17e09c  skills/web/18-ssrf-url-fetch-and-cloud-metadata-testing.md
-965a8121ee56122c07e41a3b56e937bda3a17d89d9a325bdade3dc9b27e381ef  skills/web/19-path-traversal-file-inclusion-and-xxe-testing.md
+aa154ec08dc590a5d01d4d58c01b1c48d51ee97334dcf15ec6fd1b9a7208bdb4  skills/web/18-ssrf-url-fetch-and-cloud-metadata-testing.md
+a6f4a14fe08cbc6ef6e2ea0d7bb6a0c1f06c132e0b4777f5e00341679936445c  skills/web/19-path-traversal-file-inclusion-and-xxe-testing.md
 76dade79f45ddca7590b06ce42c5f5e527bc4d836b6b292fd03cafd9c77d3594  skills/web/20-file-upload-and-file-processing-testing.md
 106cabf3e30c94b01af1b7f0947c2300098cec937078b7eb8c072892eae58a19  skills/web/21-oauth-oidc-saml-and-sso-testing.md
 c71d0b308ea39fc126c7b0efaa4ce3ac383a96456936c5bfcfd881911693f3a4  skills/web/22-http-request-smuggling-and-desync-testing.md
@@ -252,7 +252,7 @@ d7ccb1bf12fbe9350517d5374cacc22e531fd5f682691f53b062766ba8b9ea5c  skills/web/24-
 7caf47d72bcdd0c6296240a387f9e9bf823fa90deb765e5341115e616c12f223  skills/web/25-rate-limit-resource-consumption-and-automation-abuse-testing.md
 38aa6b279249f032d45c041718d743ac24f67d9756f15cad6a344a10645db550  skills/web/26-cryptography-tls-secrets-and-sensitive-data-testing.md
 c7e497be4dce1084ebcd66962d9cbe352b1b581102c991c39a2b8552a55139ac  skills/web/27-software-supply-chain-and-integrity-testing.md
-5c9c2bbfc1297ed03677a7ff6b671f7d853237c8038959202e1f158b2b5d2cb1  skills/web/28-security-misconfiguration-error-handling-and-logging-testing.md
+5581558300efe22db8a34ed642b85f8670c8dedbb430631bc6dc1db073d00254  skills/web/28-security-misconfiguration-error-handling-and-logging-testing.md
 c66cfb66fd9cbff37719e67447b2d831fe5a108ba6ff09dacad14575fa5b5e10  skills/web/29-web-llm-and-ai-feature-security-testing.md
 c052089db29fb8425bf979331f8584311f9ec049b88ac43d48586951bb33fcdd  skills/web/30-scanner-orchestration-evidence-chaining-and-regression.md
 f1a77d65e785b30c1e2703b0ecdea4820a05b049c6f82c0788c23dc0981734f8  skills/web/31-edge-waf-and-origin-exposure-validation.md

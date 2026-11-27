@@ -38,8 +38,12 @@ MAX_CONTEXT_SKILL_SUGGESTIONS = 3
 _SUGGESTION_STOP_WORDS = frozenset({
     "and", "application", "authorized", "comprehensive", "for", "from", "hunt",
     "investigate", "security", "target", "test", "testing", "the", "this", "web",
-    "with",
+    "with", "page", "single", "app", "site", "server",
 })
+# A signal that names what a skill is about (its title, or one primary trigger, as a whole
+# phrase) outranks any number of single words a broad skill happens to share with the signals.
+SIGNAL_TITLE_WEIGHT = 30
+SIGNAL_TRIGGER_WEIGHT = 20
 # Advisory methodology cost dimensions. These never resize the saved Hunt budget or
 # turn methodology selection into another execution limit.
 SKILL_BUDGET_DIMENSIONS = frozenset({
@@ -491,8 +495,20 @@ class HuntSkillLibrary:
             # Routing metadata is more intentional than prose, so an overlap there is worth
             # more. This remains deterministic advice: only an explicit skill_ids request binds.
             routing_terms = self._routing_terms(" ".join((*spec.triggers, *spec.indicators)))
+            title_terms = self._routing_terms(" ".join((spec.name, spec.title)))
+            trigger_terms = [self._routing_terms(trigger) for trigger in spec.triggers]
+            named = 0
+            for signal in (*signals, *priority_signals):
+                terms = self._routing_terms(signal)
+                if not terms:
+                    continue
+                if terms <= title_terms:
+                    named += SIGNAL_TITLE_WEIGHT
+                elif any(terms <= trigger for trigger in trigger_terms if trigger):
+                    named += SIGNAL_TRIGGER_WEIGHT
             score = (
-                len(query_terms & skill_terms)
+                named
+                + len(query_terms & skill_terms)
                 + (3 * len(goal_terms & routing_terms))
                 + (5 * len(signal_terms & routing_terms))
                 + (12 * len(priority_terms & skill_terms))

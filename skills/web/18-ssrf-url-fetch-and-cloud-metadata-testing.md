@@ -32,6 +32,10 @@ routing:
   - PDF_generation
   - callback
   - server_side_fetch
+  - SSRF
+  - server_side_request_forgery
+  - cloud_metadata
+  - URL_import
   indicators:
   - controlled_DNS_callback
   - controlled_HTTP_callback

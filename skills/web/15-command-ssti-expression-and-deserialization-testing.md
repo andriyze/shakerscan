@@ -31,6 +31,14 @@ routing:
   - serialized_object
   - document_conversion
   - job_runner
+  - command_injection
+  - os_command_injection
+  - SSTI
+  - server_side_template_injection
+  - Jinja2_or_Twig_template
+  - insecure_deserialization
+  - pickle_or_Java_serialization
+  - remote_code_execution
   indicators:
   - arithmetic_evaluation
   - string_expression_evaluation
