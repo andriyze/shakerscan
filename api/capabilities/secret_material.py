@@ -128,6 +128,33 @@ def shannon_entropy_bits(value: str) -> float:
     return -sum((n / total) * math.log2(n / total) for n in counts.values())
 
 
+# Documentation placeholder shapes, matched anywhere in a value. A value that contains one is a
+# stand-in the reader is meant to replace, never a leaked secret:
+#
+# * an angle-bracket slot: ``<service token>``, ``<your-api-key>``, ``prefix-<token>``;
+# * a template or shell reference: ``${API_TOKEN}``, ``{{ token }}``;
+# * a "your ... here" slot: ``your-api-key-here``, ``YOUR_TOKEN``;
+# * a run of four or more ``x`` or ``X`` (``xxxx-xxxx``, ``sk_live_XXXXXXXXXXXX``), or of ``*``,
+#   ``.`` or ``_`` standing for elided characters.
+#
+# Random secret material contains none of these: base64, hex and provider alphabets have no
+# angle brackets, braces or ``${``, and four identical characters in a row are rare enough in a
+# random value that the screen costs no real detection.
+_DOCUMENTATION_PLACEHOLDER_RE = re.compile(
+    r"<[^<>\r\n]{1,80}>|\$\{[^}]{0,80}\}|\{\{[^}]{0,80}\}\}|(?:^|[^a-z0-9])your(?:[-_ ]|$)"
+    r"|[-_ ]here$|x{4,}|\*{4,}|\.{4,}|_{4,}",
+    re.IGNORECASE,
+)
+
+
+def is_documentation_placeholder(value: str) -> bool:
+    """Whether a value is, or embeds, a documentation placeholder (see the rule above)."""
+    stripped = str(value or "").strip().strip("\"'")
+    if not stripped:
+        return True
+    return bool(_DOCUMENTATION_PLACEHOLDER_RE.search(stripped[:_SHAPE_MAX_CHARS]))
+
+
 def is_placeholder_secret(value: str) -> bool:
     """True when a shape-matching value is a documentation placeholder, not real secret material."""
     stripped = value.strip()
@@ -135,6 +162,8 @@ def is_placeholder_secret(value: str) -> bool:
         return True
     lowered = stripped.lower()
     if any(token in lowered for token in PLACEHOLDER_SECRET_TOKENS):
+        return True
+    if is_documentation_placeholder(stripped):
         return True
     # Provider secrets are random; a short or low-entropy tail is a stand-in. The bound is applied
     # to the random remainder so a long fixed prefix (``sk_live_``) cannot carry a value past it.
@@ -521,6 +550,7 @@ __all__ = [
     "SecretEvidence",
     "classify_selfevident_secret_values",
     "fingerprinted_secret_evidence",
+    "is_documentation_placeholder",
     "is_placeholder_secret",
     "is_non_secret_value_shape",
     "is_redactable_key_name",

@@ -113,6 +113,37 @@ def test_markdown_prose_placeholders_and_non_markdown_files_prove_nothing():
     assert _classify("/notes.txt", fenced) is None
 
 
+def test_a_docs_page_with_a_placeholder_token_in_its_env_block_proves_nothing():
+    """A served docs page shows how to start a tool with a service token: the value is the
+    placeholder ``<service token>`` followed by the command the variable is set for."""
+    docs = (
+        "# MCP server\n\nBehind an authenticating gateway, set the API token as well.\n\n"
+        "```bash\n"
+        "EXAMPLE_API_URL=https://scanner.example.com \\\n"
+        "EXAMPLE_MCP_ALLOW_REMOTE_API=true \\\n"
+        "EXAMPLE_API_TOKEN=<service token> ./run.sh mcp\n"
+        "```\n"
+    )
+    for content_type in ("text/markdown; charset=utf-8", "text/plain"):
+        assert _classify("/markdown/docs/mcp.md", docs, content_type) is None
+    for value in ("<service token>", "your-api-token-here", "YOUR_API_TOKEN", "xxxxxxxxxxxxxxxxxxxx",
+                  "changeme", "${EXAMPLE_API_TOKEN}", "{{ api_token }}", "tok_<paste-here>", '""', "''"):
+        block = f"```\nEXAMPLE_API_TOKEN={value} ./run.sh\nEXAMPLE_DEPLOY_SECRET={value}\n```\n"
+        assert _classify("/docs/setup.md", block, "text/markdown") is None, value
+
+
+def test_a_real_token_before_a_command_still_verifies_and_only_the_value_is_fingerprinted():
+    docs = f"```bash\nEXAMPLE_API_URL=https://scanner.example.com \\\nEXAMPLE_API_TOKEN={TOKEN} ./run.sh mcp\n```\n"
+    signature = _classify("/markdown/docs/mcp.md", docs, "text/markdown")
+    assert signature is not None and signature.proves_sensitive_exposure
+    assert signature.matched_pattern == "markdown_env_block_secret"
+    assert _fields(signature) == {"EXAMPLE_API_TOKEN"}
+    assert TOKEN not in redacted_exposure_excerpt(docs.encode(), signature)
+    # The proof is the value alone, not the value plus the command after it.
+    alone = _classify("/x.md", f"```\nEXAMPLE_API_TOKEN={TOKEN}\n```\n", "text/markdown")
+    assert signature.secret_evidence() == alone.secret_evidence()
+
+
 # --- HTML comments ------------------------------------------------------------------------------
 
 def test_a_credential_in_an_html_comment_verifies():
