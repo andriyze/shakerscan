@@ -86,7 +86,7 @@ EMBEDDED_CPE: dict[str, list[str]] = {
 NETWORK_SERVICE_CPE: dict[str, list[str]] = {
     "openssh": ["cpe:2.3:a:openbsd:openssh"],
     "apache-httpd": ["cpe:2.3:a:apache:http_server"],
-    "nginx": ["cpe:2.3:a:f5:nginx", "cpe:2.3:a:nginx:nginx"],
+    "nginx": ["cpe:2.3:a:f5:nginx", "cpe:2.3:a:nginx:nginx", "cpe:2.3:a:f5:nginx_open_source"],
     "iis": ["cpe:2.3:a:microsoft:internet_information_services"],
     "tomcat": ["cpe:2.3:a:apache:tomcat"],
     "jetty": ["cpe:2.3:a:eclipse:jetty"],
@@ -749,6 +749,22 @@ def normalize_snapshot(snapshot: dict) -> dict:
             "titles": titles, "advisories": ranges + list(grouped.values())}
 
 
+def merge_into_base(base_path: str, snapshot: dict) -> dict:
+    """Refresh an existing snapshot instead of rebuilding it: keep every record of ``base_path``
+    and add the newly collected records for CVEs it does not carry yet. A CVE the base already
+    carries keeps the base's records, which came from a product-wide query."""
+    with open(base_path, encoding="utf-8") as handle:
+        base = json.load(handle)
+    if not isinstance(base, dict) or base.get("schema_version") != SCHEMA_VERSION:
+        raise SystemExit(f"error: {base_path} is not a {SCHEMA_VERSION} snapshot")
+    carried = {str(item.get("cve") or "") for item in base.get("advisories") or []}
+    added = [item for item in snapshot["advisories"] if str(item.get("cve") or "") not in carried]
+    print(f"base carries {len(carried)} CVEs; adding {len({item['cve'] for item in added})} new", file=sys.stderr)
+    return {**snapshot, "source": base.get("source") or snapshot["source"],
+            "titles": {**snapshot["titles"], **(base.get("titles") or {})},
+            "advisories": list(base.get("advisories") or []) + added}
+
+
 def write_snapshot(snapshot: dict, output_path: str) -> str:
     directory = os.path.dirname(os.path.abspath(output_path))
     if directory:
@@ -851,6 +867,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="emit only the built-in curated seed; no network access")
     parser.add_argument("--network-services", action="store_true",
                         help="query every built-in network/web service product (NETWORK_SERVICE_CPE)")
+    parser.add_argument("--base", metavar="PATH", default=None,
+                        help="existing snapshot to refresh: keep its records, add the new CVEs, and "
+                             "re-apply --kev/--epss/--templates/--zero-wire to all of them")
     parser.add_argument("--kev", metavar="FILE", default=None,
                         help="CISA KEV catalog JSON to mark known exploited CVEs")
     parser.add_argument("--epss", metavar="FILE", default=None,
@@ -969,10 +988,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"collected {len(entries)} bounded advisories; "
           f"skipped {skipped_unbounded} unbounded and {skipped_product} out-of-scope configuration matches",
           file=sys.stderr)
-    snapshot = build_snapshot(entries)
+    snapshot = normalize_snapshot(build_snapshot(entries))
+    if args.base:
+        snapshot = merge_into_base(args.base, snapshot)
+        if args.zero_wire:  # a briefing mark is as current as the feed: none outlives it
+            for item in snapshot["advisories"]:
+                item.pop("briefing", None)
     enrich(snapshot["advisories"], load_kev(args.kev), load_epss(args.epss), load_template_checks(args.templates),
            load_template_safety(args.templates), load_zero_wire(args.zero_wire))
-    snapshot = normalize_snapshot(snapshot)
     digest = write_snapshot(snapshot, args.output)
     for name, count in per_cve_counts.items():
         print(f"  {count:4d}  {name}", file=sys.stderr)

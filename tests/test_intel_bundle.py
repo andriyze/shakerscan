@@ -25,7 +25,7 @@ def _seed():
     )
 
 
-def _snapshot(generated_at="2026-10-20T00:00:00Z", cve="CVE-2099-0001"):
+def _snapshot(generated_at="2099-01-01T00:00:00Z", cve="CVE-2099-0001"):
     return (json.dumps({
         "schema_version": "shakerscan-device-advisories/v2", "generated_at": generated_at,
         "titles": {cve: "Bundle-only advisory"},
@@ -37,7 +37,7 @@ def _snapshot(generated_at="2026-10-20T00:00:00Z", cve="CVE-2099-0001"):
     }, separators=(",", ":")) + "\n").encode()
 
 
-def _write_bundle(directory, seed, *, version=1, snapshot=None, generated_at="2026-10-20T00:00:00Z"):
+def _write_bundle(directory, seed, *, version=1, snapshot=None, generated_at="2099-01-01T00:00:00Z"):
     snapshot = snapshot if snapshot is not None else _snapshot(generated_at)
     public = intel_bundle.public_key_for(seed)
     key_id = intel_bundle.key_id_for(public)
