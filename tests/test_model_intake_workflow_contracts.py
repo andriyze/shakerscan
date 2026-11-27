@@ -893,8 +893,8 @@ def test_signer_image_and_database_role_are_narrow_and_releasable():
     upgrade = dockerfile.split("RUN apt-get update", 1)[1].split("rm -rf /var/lib/apt/lists/*", 1)[0]
     assert "apt-get upgrade -y --no-install-recommends" in upgrade
     assert "apt-get install -y --no-install-recommends --only-upgrade libssl3 openssl apt libapt-pkg6.0 " in upgrade
-    # PAM likewise (CVE-2025-6020, fixed in 1.5.2-6+deb12u3).
-    assert "libpam0g libpam-modules libpam-modules-bin libpam-runtime" in upgrade
+    # The libpam packages likewise (CVE-2025-6020, fixed in 1.5.2-6+deb12u3).
+    assert "libpam-modules libpam-modules-bin libpam-runtime libpam0g" in upgrade
     assert "boto3==" in (ROOT / "api" / "model_intake_signer.requirements.lock").read_text()
     assert "NOSUPERUSER NOCREATEDB NOCREATEROLE" in role_script
     assert "UPDATE (state, updated_at)" in role_script

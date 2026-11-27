@@ -9,6 +9,7 @@ certificate names them. Every resolver here is a labelled fixture; no test touch
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 import re
 import socket
@@ -105,26 +106,90 @@ def test_names_that_only_echo_a_wildcard_are_suppressed_and_the_wildcard_recorde
     assert {probe.split(".", 1)[1] for probe in resolver.probes} == {APEX, "dev.example.com"}
 
 
-def test_a_certificate_keeps_a_name_the_wildcard_would_explain_away():
+def test_a_passive_source_keeps_a_name_the_wildcard_would_explain_away_and_marks_it():
+    """Certificate Transparency and passive feeds saw the name in use; only a guess is dropped."""
     resolver = FixtureResolver(
         names={
             "ct.dev.example.com": ([WILDCARD_ADDRESS], None),
             "sub.dev.example.com": ([WILDCARD_ADDRESS], None),
             "dns.dev.example.com": ([WILDCARD_ADDRESS], None),
+            "guess.dev.example.com": ([WILDCARD_ADDRESS], None),
         },
         wildcards={"dev.example.com": ([WILDCARD_ADDRESS], None)},
     )
     plan = _plan(
-        ["ct.dev.example.com", "sub.dev.example.com", "dns.dev.example.com"], resolver,
+        ["ct.dev.example.com", "sub.dev.example.com", "dns.dev.example.com", "guess.dev.example.com"],
+        resolver,
         evidence={
             "ct.dev.example.com": ["gungnir"],
             "sub.dev.example.com": ["subfinder:crtsh"],
-            # A DNS dataset is not a certificate: it may well have recorded the wildcard's echo.
             "dns.dev.example.com": ["subfinder:hackertarget"],
+            "guess.dev.example.com": ["dns_enumeration"],
         },
     )
-    assert plan["scannable"] == ["ct.dev.example.com", "sub.dev.example.com"]
-    assert plan["wildcard_suppressed"] == ["dns.dev.example.com"]
+    assert plan["scannable"] == ["ct.dev.example.com", "sub.dev.example.com", "dns.dev.example.com"]
+    assert plan["wildcard_match"] == plan["scannable"]
+    assert plan["wildcard_suppressed"] == ["guess.dev.example.com"]
+
+
+def test_a_cdn_wildcard_zone_keeps_www_and_ct_names_and_drops_random_guesses():
+    """Behind a CDN every proxied name answers the wildcard's anycast addresses. The address set
+    cannot tell www from an echo, so www and every name a passive source reported are kept
+    (marked), while names discovery only guessed are still dropped."""
+    cdn = ["198.51.100.21", "198.51.100.22"]
+    guesses = [f"{label}.example.com" for label in ("ftp", "vpn", "test", "staging2")]
+    resolver = FixtureResolver(
+        names={
+            "www.example.com": (cdn, None),
+            "app.example.com": (cdn, None),
+            "origin.example.com": (["203.0.113.20"], None),
+            **{name: (cdn, None) for name in guesses},
+        },
+        wildcards={APEX: (cdn, None)},
+    )
+    names = ["www.example.com", "app.example.com", "origin.example.com", *guesses]
+    evidence = {
+        "www.example.com": ["dns_enumeration"],
+        "app.example.com": ["crtsh"],
+        "origin.example.com": ["dns_enumeration"],
+        **{name: ["dns_enumeration"] for name in guesses},
+    }
+    plan = _plan(names, resolver, evidence=evidence)
+    # Names with their own answer first; kept wildcard matches after them, marked.
+    assert plan["scannable"] == ["origin.example.com", "www.example.com", "app.example.com"]
+    assert plan["wildcard_match"] == ["www.example.com", "app.example.com"]
+    assert plan["wildcard_suppressed"] == guesses
+    assert plan["wildcards"][0]["suppressed"] == len(guesses)
+    # Without any recorded source a match is dropped as before; www is kept regardless.
+    bare = _plan(names, resolver)
+    assert bare["scannable"] == ["origin.example.com", "www.example.com"]
+    assert bare["wildcard_suppressed"] == ["app.example.com", *guesses]
+
+    inserted: list[tuple] = []
+
+    class Conn:
+        async def execute(self, query, *args):
+            inserted.append(args)
+            return "INSERT 0 1"
+
+    outcome = asyncio.run(target_resolution.store_discovered_targets(Conn(), plan, APEX, evidence=evidence))
+    stored = {args[0]: json.loads(args[3]) for args in inserted}
+    assert list(stored) == ["https://origin.example.com", "https://www.example.com", "https://app.example.com"]
+    assert stored["https://www.example.com"]["wildcard_match"] is True
+    assert stored["https://app.example.com"]["wildcard_match"] is True
+    assert "wildcard_match" not in stored["https://origin.example.com"]
+    assert outcome["wildcard_match_kept_count"] == 2
+    assert outcome["wildcard_suppressed_count"] == len(guesses)
+
+
+@pytest.mark.parametrize(("name", "sources", "kept"), [
+    ("www.example.com", None, True), ("www.dev.example.com", ["dns_enumeration"], True),
+    ("a.example.com", ["subfinder:hackertarget"], True), ("a.example.com", ["subfinder"], True),
+    ("a.example.com", ["gungnir"], True), ("a.example.com", ["dns_enumeration"], False),
+    ("a.example.com", [], False), ("a.example.com", None, False), ("wwwx.example.com", None, False),
+])
+def test_which_wildcard_matches_are_kept(name, sources, kept):
+    assert discovery_wildcards.keeps_wildcard_match(name, sources) is kept
 
 
 def test_a_cname_wildcard_is_matched_by_its_target_even_when_addresses_rotate():

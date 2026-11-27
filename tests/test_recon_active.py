@@ -187,10 +187,14 @@ def test_dns_enumeration_suppresses_wildcard_echoes_but_keeps_distinct_aliases()
         answer=_resolver(table, wildcard=("wild.test", (["192.0.2.50"], None))),
         name_limit=50, deadline_seconds=10, cancelled=lambda: False, token=_counter(),
     ))
-    hosts = [o["host"] for o in result["observations"] if o["kind"] == "subdomain"]
-    assert hosts == ["vpn.wild.test"]
+    found = {o["host"]: o for o in result["observations"] if o["kind"] == "subdomain"}
+    # A guessed mail is the wildcard's echo; www is kept even as a match (a zone's site name),
+    # and marked so later steps can see its answer is the wildcard's.
+    assert sorted(found) == ["vpn.wild.test", "www.wild.test"]
+    assert found["www.wild.test"]["wildcard_match"] is True
+    assert "wildcard_match" not in found["vpn.wild.test"]
     root = [o for o in result["observations"] if o["kind"] == "dns_enumeration"][0]["roots"][0]
-    assert root["wildcard_suppressed"] == 2 and root["wildcards"][0]["pattern"] == "*.wild.test"
+    assert root["wildcard_suppressed"] == 1 and root["wildcards"][0]["pattern"] == "*.wild.test"
 
 
 def test_dns_enumeration_withholds_names_when_the_wildcard_baseline_is_unjudged():

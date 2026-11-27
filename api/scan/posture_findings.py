@@ -261,14 +261,56 @@ def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() == "true"
 
 
-def cors_probe_verdict(sent: str, headers: Mapping[str, Any]) -> dict[str, bool]:
-    """Whether the answer granted the Origin sent, judged on the header as received.
+# A granted Origin exposes only what the answer carries. Single-sign-on gateways put an
+# interstitial in front of an application (a 302 to the login page, or a 200 sign-in page) and some
+# of them echo the request's Origin with credentials on it: a cross-origin read then gets the login
+# page, not the application's data. These markers name such an interstitial by the gateway's own
+# fixed paths, so a page that merely has a login form is still judged as content.
+_SSO_INTERSTITIAL_MARKERS = (
+    "/cdn-cgi/access/",       # Cloudflare Access
+    "/oauth2/start", "/oauth2/sign_in",  # oauth2-proxy
+    "/.pomerium/",            # Pomerium
+    "/api/firstfactor",       # Authelia
+)
+
+
+def cors_unreadable_reason(response: Mapping[str, Any]) -> str | None:
+    """Why a cross-origin read of this answer would get no application content, or None.
+
+    A CORS grant is proven only on a 2xx answer that carries a body and is not a single-sign-on
+    interstitial. Size fields an older receipt did not record are not held against it.
+    """
+    status = response.get("status")
+    if not isinstance(status, int) or not 200 <= status < 300:
+        if isinstance(status, int) and 300 <= status < 400:
+            return f"the answer was a {status} redirect, which carries no content a script can read"
+        return f"the answer was {status}, not a 2xx response with content"
+    sizes = [response.get(name) for name in ("bytes_observed", "content_length")]
+    if any(isinstance(size, int) for size in sizes) and not any(
+            isinstance(size, int) and size > 0 for size in sizes):
+        return "the answer had an empty body"
+    page = " ".join(
+        str(response.get(name) or "") for name in ("body_sample", "final_url", "location")
+    ).lower()
+    if any(marker in page for marker in _SSO_INTERSTITIAL_MARKERS):
+        return "the answer was a single-sign-on interstitial, not the application's content"
+    return None
+
+
+def cors_probe_verdict(
+    sent: str, headers: Mapping[str, Any], response: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Whether the answer granted the Origin sent, judged on the header as received, and whether
+    the answer carried readable content (judged on the body before the receipt drops it).
 
     The probe records this with its response because the receipt redactor rewrites URL-shaped
     values (a bare origin gains a "/" path): the stored header no longer spells the Origin sent.
     """
     allowed = str(headers.get("access-control-allow-origin") or "").strip()
-    return {"sent_origin_granted": bool(allowed) and allowed.lower() == sent.lower()}
+    verdict: dict[str, Any] = {"sent_origin_granted": bool(allowed) and allowed.lower() == sent.lower()}
+    if response is not None:
+        verdict["unreadable_reason"] = cors_unreadable_reason(response)
+    return verdict
 
 
 def _grants_sent_origin(sent: str, allowed: str, response: Mapping[str, Any]) -> bool:
@@ -314,7 +356,21 @@ def cors_findings(
                "response, but the configuration shows the policy is not deliberate; an origin-reflecting variant would be.")
     else:
         return []
-    return [make(
+    unreadable = None
+    if granted:
+        verdict = response.get("cors_probe")
+        if isinstance(verdict, Mapping) and "unreadable_reason" in verdict:
+            unreadable = verdict.get("unreadable_reason")
+        else:
+            unreadable = cors_unreadable_reason(response)
+    if unreadable:
+        # The grant is real, but this answer exposes nothing: a candidate to look at on a path
+        # that serves content, never a proven high.
+        severity = "low"
+        why = (f"The server granted Origin: {sent}" + (" with credentials" if credentials else "")
+               + f", but {unreadable}. A cross-origin read of this answer gets no data; whether the "
+               "application behind it does the same needs a response that carries content.")
+    finding = make(
         tool="http_baseline", title=title, severity=severity, cwe="CWE-942", url=origin,
         evidence={
             "check": kind, "url": origin, "path": path, "status": status,
@@ -323,9 +379,18 @@ def cors_findings(
             "access_control_allow_credentials": credentials,
             "source_action_id": action_id,
             "severity_basis": severity_basis(kind, severity, why),
+            **({"unreadable_reason": unreadable} if unreadable else {}),
         },
         verification_reason=f"The pinned response to Origin: {sent} granted it in Access-Control-Allow-Origin",
-    )]
+    )
+    if unreadable:
+        finding.pop("proof_contract_v2", None)
+        finding.update({
+            "verified": False, "suspected": True, "needs_verification": True,
+            "proof_state": "candidate",
+            "verification_reason": f"Origin granted, but {unreadable}",
+        })
+    return [finding]
 
 
 # ------------------------------------------------------------------------- open redirect
@@ -492,7 +557,7 @@ def dns_posture_findings(
 
 __all__ = [
     "CORS_PROBE_ACTIONS", "CORS_PROBE_ORIGIN", "OPT_IN_HEADERS", "REDIRECT_CANARY_HOST", "REDIRECT_CANARY_URL",
-    "cors_findings", "cors_probe_verdict", "dns_posture_findings", "header_value_issues", "is_redirect_parameter",
+    "cors_findings", "cors_probe_verdict", "cors_unreadable_reason", "dns_posture_findings", "header_value_issues", "is_redirect_parameter",
     "open_redirect_finding", "redact_url_queries", "redirects_to_canary", "severity_basis",
     "weak_header_findings",
 ]

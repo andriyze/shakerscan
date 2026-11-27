@@ -2062,12 +2062,21 @@ def _findings_for_action(
     return calibrate_findings(findings)
 
 
+def exposure_path(url: Any) -> str:
+    """A URL's path as one exposed file: no query, runs of ``/`` collapsed, no trailing ``/``.
+
+    A template that joins ``{{BaseURL}}`` (``https://host/``) to ``/.env`` requests ``//.env``;
+    the server answers the same file as ``/.env``, so both name one exposure.
+    """
+    path = re.sub(r"/{2,}", "/", urllib.parse.urlsplit(str(url)).path or "/")
+    return path.rstrip("/") or "/"
+
+
 def _exposure_location(url: Any) -> str | None:
     origin = _http_origin(url)
     if not origin:
         return None
-    path = urllib.parse.urlsplit(str(url)).path or "/"
-    return f"{origin}{path.rstrip('/') or '/'}"
+    return f"{origin}{exposure_path(url)}"
 
 
 # A passive-pack template folds into a proven exposure only when it detects the same exposure
@@ -2080,6 +2089,7 @@ OMITTED_CAPABILITY_REASON = "capability_not_in_allocation"
 _TEMPLATE_EXPOSURE_CLASSES: Mapping[str, frozenset[str]] = MappingProxyType({
     "git-config": frozenset({"version_control_exposure"}),
     "git-credentials-disclosure": frozenset({"configuration_secret_file"}),
+    "generic-env": frozenset({"environment_secret_file"}),
     "web-config": frozenset({"configuration_secret_file"}),
     "openapi": frozenset({"api_specification_secret"}),
 })
