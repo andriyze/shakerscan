@@ -95,6 +95,27 @@ means **no match in that snapshot**, not “no vulnerabilities.” Configure the
 incorrect digest fails closed; its trust status remains visible. This feature never performs a live
 CVE, KEV, EPSS or exploit-site query.
 
+### Curated briefings
+
+A snapshot built with `--zero-wire` marks the CVEs named in a
+[Cloudflare Radar Zero Wire](https://radar.cloudflare.com/zero-wire) briefing. A candidate then
+carries `briefing` (source, briefing id, publication date, recommended-action label and a link
+built from the id) and ranks after known-exploited candidates and before exploitation likelihood;
+a Hunt opens a lead for it even when no bundled check exists. Only that metadata is kept: the
+briefing's prose is untrusted third-party text and never enters the snapshot, a lead or planner
+context. A briefing is a reason to look early. It is not evidence about the target, changes no
+score, and verifies nothing. It is as current as the snapshot or signed bundle that carries it.
+
+`scripts/zero_wire_intel.py` reports the coverage gap from the same feed: briefed CVEs the
+snapshot cannot match to a service (product outside the curated list, or no bounded NVD range
+yet) and briefed CVEs no bundled check names.
+
+```bash
+curl -fsS https://radar.cloudflare.com/zero-wire/feed -o zero-wire.rss
+python3 scripts/zero_wire_intel.py --feed zero-wire.rss \
+  --snapshot scanner/data/device_advisories.json --templates /path/to/nuclei-templates
+```
+
 ### Signed intelligence bundles
 
 Newer data can arrive without a new image as a signed bundle installed under `results/intel`

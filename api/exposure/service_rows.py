@@ -297,6 +297,7 @@ def hunt_candidate_rows(services: Iterable[Mapping[str, Any]]) -> list[dict[str,
                 "version": text(service.get("version"), 40) or None,
                 "severity": candidate.get("severity"), "cvss_score": candidate.get("cvss_score"),
                 "known_exploited": bool(candidate.get("known_exploited")),
+                "briefed": bool(candidate.get("briefing")),
                 "epss": epss.get("score") if isinstance(epss, Mapping) else None,
                 "match_type": candidate.get("match_type"), "applicability": "candidate",
                 "applicability_status": candidate.get("applicability_status") or "unresolved",
@@ -308,5 +309,5 @@ def hunt_candidate_rows(services: Iterable[Mapping[str, Any]]) -> list[dict[str,
                 "finding_id": verification.get("finding_id"),
             })
     return sorted(rows, key=lambda row: (
-        not row["known_exploited"], -(row["epss"] or 0.0), -(row["cvss_score"] or 0.0),
+        not row["known_exploited"], not row["briefed"], -(row["epss"] or 0.0), -(row["cvss_score"] or 0.0),
         str(row["cve"]), row["service_id"]))

@@ -637,12 +637,30 @@ def load_template_safety(directory: str | None) -> dict[str, str]:
     return classes
 
 
+def load_zero_wire(path: str | None) -> dict[str, dict]:
+    """The newest Cloudflare Radar Zero Wire briefing naming each CVE (a downloaded RSS feed)."""
+    if not path:
+        return {}
+    scripts = os.path.dirname(os.path.abspath(__file__))
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import zero_wire_intel
+    try:
+        return zero_wire_intel.briefings_by_cve(zero_wire_intel.load_briefings(path))
+    except zero_wire_intel.FeedError as exc:
+        raise SystemExit(f"error reading {path}: {exc}")
+
+
 def enrich(advisories: list[dict], kev: dict[str, dict], epss: dict[str, dict],
-           checks: dict[str, list[str]], safety: dict[str, str] | None = None) -> None:
-    """Add exploitation context: known exploited (CISA KEV), likelihood (EPSS) and the checks the
-    image's own templates carry for the CVE. Metadata only; nothing here is executed."""
+           checks: dict[str, list[str]], safety: dict[str, str] | None = None,
+           briefings: dict[str, dict] | None = None) -> None:
+    """Add exploitation context: known exploited (CISA KEV), likelihood (EPSS), the curated
+    briefing naming the CVE and the checks the image's own templates carry for it. Metadata only;
+    nothing here is executed."""
     for item in advisories:
         cve = str(item.get("cve") or "").upper()
+        if briefings and cve in briefings:
+            item["briefing"] = briefings[cve]
         if cve in kev:
             item["known_exploited"] = kev[cve]
         if cve in epss:
@@ -837,6 +855,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="CISA KEV catalog JSON to mark known exploited CVEs")
     parser.add_argument("--epss", metavar="FILE", default=None,
                         help="FIRST EPSS CSV (or .csv.gz) to add exploit likelihood")
+    parser.add_argument("--zero-wire", metavar="FILE", default=None,
+                        help="Cloudflare Radar Zero Wire RSS feed: mark the CVEs a briefing names")
     parser.add_argument("--templates", metavar="DIR", default=None,
                         help="nuclei templates directory: name the checks that exist for a CVE")
     parser.add_argument("--self-check", action="store_true",
@@ -951,7 +971,7 @@ def main(argv: list[str] | None = None) -> int:
           file=sys.stderr)
     snapshot = build_snapshot(entries)
     enrich(snapshot["advisories"], load_kev(args.kev), load_epss(args.epss), load_template_checks(args.templates),
-           load_template_safety(args.templates))
+           load_template_safety(args.templates), load_zero_wire(args.zero_wire))
     snapshot = normalize_snapshot(snapshot)
     digest = write_snapshot(snapshot, args.output)
     for name, count in per_cve_counts.items():

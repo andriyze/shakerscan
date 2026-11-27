@@ -50,6 +50,12 @@ def test_only_actionable_matches_become_leads_and_no_banner_text_travels():
     [odd] = advisory_proposals([_row(checks=['ok-check', 'Bad Check; rm'], known_exploited=True)])
     assert odd['endorsement']['checks'] == ['ok-check']
     assert len(advisory_proposals([_row(known_exploited=True) for _ in range(MAX_LEADS + 10)])) == MAX_LEADS
+    # Named in a curated briefing: worth a lead without a check, and still only a candidate.
+    [briefed] = advisory_proposals([_row(checks=[], severity='medium', briefed=True)])
+    assert briefed['description'].startswith('Named in a current vulnerability briefing.')
+    assert 'candidate, not a finding' in briefed['description'] and briefed['confidence'] == 0.4
+    assert briefed['metadata']['advisory']['briefed'] is True and briefed['endorsement']['known_exploited'] is False
+    assert advisory_proposals([_row(checks=[], severity='medium', briefed='yes')]) == []
 
 
 def test_a_started_hunt_finds_matched_advisories_on_its_frontier_once(monkeypatch):
