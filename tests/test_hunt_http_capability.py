@@ -56,6 +56,9 @@ def test_planner_sees_only_opaque_session_and_principal_inputs():
     assert set(authz["properties"]) == {
         "primary_session_ref", "secondary_session_ref", "primary_principal", "secondary_principal",
         "primary_bindings", "secondary_bindings", "routes", "origin", "mode",
+        # planted_object: an action id of this Hunt and a field name. The planted value itself is
+        # read by the worker from the archived create request, never supplied by the planner.
+        "create_action_id", "planted_field",
     }
     assert authz["required"] == ["routes"]
     # Two logins the Hunt captured itself are named by reference only, never by value.

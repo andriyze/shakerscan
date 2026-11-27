@@ -1965,6 +1965,8 @@ export const HUNT_START_CONTRACT = {
       "input": {
         "fields": [
           "mode",
+          "create_action_id",
+          "planted_field",
           "origin",
           "primary_principal",
           "secondary_principal",

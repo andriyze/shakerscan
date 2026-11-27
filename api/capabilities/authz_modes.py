@@ -26,6 +26,11 @@ def authz_call_budget(values):
             raise ValueError('Function authorization checks accept 1 to 50 routes')
         return {'http_requests':6*len(values['routes']),
                 'tool_wall_seconds':max(60,6*len(values['routes']))}
+    if values.get('mode') == 'planted_object':
+        # The creator's read, the other's listing, the other's two reads, one anonymous read.
+        if len(values.get('routes') or ()) != 2:
+            raise ValueError('planted_object takes two routes: the object, then its collection listing')
+        return {'http_requests':5,'tool_wall_seconds':60}
     return {'http_requests':4,'tool_wall_seconds':60}
 
 

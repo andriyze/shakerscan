@@ -21902,8 +21902,25 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 raise AuthSessionStoreError(
                     "authorization proof requires distinct primary and secondary profiles"
                 )
+            planted = None
+            if capability_input.get("mode") == "planted_object":
+                # The value and its creator come from the server's records of the create request.
+                from hunt.authz_planted import PlantedObjectRefused, planted_source
+                async with db_pool.acquire() as planted_conn:
+                    try:
+                        planted = await planted_source(planted_conn, hunt_id=hunt_id, values=capability_input)
+                    except PlantedObjectRefused as exc:
+                        raise AuthSessionStoreError(f"planted_object: {exc}") from None
+
             async def execute_authz() -> dict[str, Any]:
                 from capabilities.authz_modes import verify_function_authorization
+                if planted is not None:
+                    from capabilities.authz_planted import verify_planted_object
+                    return await verify_planted_object(
+                        authz_base, routes, target=target, primary_headers=primary_headers,
+                        secondary_headers=secondary_headers, creator=planted[0],
+                        planted_field=str(capability_input.get("planted_field") or ""),
+                        planted_value=planted[1], transaction_recorder=_record_call)
                 return await (verify_function_authorization if capability_input.get("mode") == "function" else verify_target_bound_object_authorization)(
                     authz_base,
                     routes,

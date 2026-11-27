@@ -876,6 +876,52 @@ def canonical_authz_findings(
                 "verification_reason": "Cross-principal owner-object replay proof satisfied",
             })
             findings.append(finding)
+        elif (
+            kind == "authz_differential"
+            and item.get("proof_state") == "verified"
+            and item.get("proof_type") == "planted_private_field_cross_read"
+            and item.get("principal_contexts_distinct") is True
+            and item.get("listing_withholds_value") is True
+            and item.get("repeated") is True
+            and item.get("anonymous_denied") is True
+            and item.get("creator_principal") != item.get("reader_principal")
+        ):
+            # A private value one principal planted in its own object, read by the other principal
+            # twice, withheld from the shared listing and from an anonymous reader
+            # (capabilities/authz_planted).
+            finding = _base_finding(
+                tool="smart_authz",
+                title="Verified broken object authorization (another user's private field)",
+                severity="high",
+                cwe="CWE-639",
+                url=item.get("consumer_url"),
+                evidence={
+                    "url": item.get("consumer_url"),
+                    "producer_url": item.get("producer_url"),
+                    "planted_field": item.get("planted_field"),
+                    "planted_value_sha256": item.get("planted_value_sha256"),
+                    "owner_status": item.get("owner_status"),
+                    "attacker_status": item.get("attacker_status"),
+                    "accepted_principal_responses": dict(item.get("accepted_principal_responses") or {}),
+                    "creator_principal": item.get("creator_principal"),
+                    "reader_principal": item.get("reader_principal"),
+                    "distinct_principal_control": True,
+                    "listing_withholds_value": True,
+                    "anonymous_denied": True,
+                    "proof_type": "planted_private_field_cross_read",
+                    "canonical_capability": "authz.verify",
+                    "capability_receipt": receipt,
+                },
+            )
+            finding.update({
+                "verified": True, "suspected": False, "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name="authz.verify", kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": "Planted private value read by another principal; listing and anonymous controls withheld it",
+            })
+            findings.append(finding)
     return findings
 
 
