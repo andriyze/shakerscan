@@ -66,6 +66,10 @@ CONTROL_LENGTH_TOLERANCE = 0.05
 # Discovery and the sweep never outlive the Hunt's own wall; a Hunt without one gets this.
 MAX_DISCOVERY_SECONDS = 24 * 3600
 
+# An API description is read whole in artifact.inspect windows when the probe's sample is short.
+SPEC_WINDOW_BYTES = 16_384
+MAX_SPEC_WINDOWS = 32
+MAX_SPEC_BYTES = SPEC_WINDOW_BYTES * MAX_SPEC_WINDOWS
 SPEC_PATHS: tuple[str, ...] = (
     "/openapi.json", "/swagger.json", "/v3/api-docs", "/v2/api-docs", "/api-docs", "/api-docs.json",
     "/swagger/v1/swagger.json", "/openapi.yaml", "/swagger.yaml", "/api/openapi.json",
@@ -270,6 +274,14 @@ def _observation(result: Any) -> Mapping[str, Any] | None:
         if isinstance(item, Mapping) and isinstance(item.get("response"), Mapping):
             return item["response"]
     return None
+
+
+def _observation_of(result: Any) -> Mapping[str, Any] | None:
+    """The first observation of a capability result (an artifact window), or None."""
+    action = (result or {}).get("action_result") if isinstance(result, Mapping) else None
+    items = (action or {}).get("observations") if isinstance(action, Mapping) else None
+    first = items[0] if isinstance(items, list) and items else None
+    return first if isinstance(first, Mapping) else None
 
 
 def answer_of(result: Any) -> dict[str, Any] | None:
@@ -570,6 +582,37 @@ class DiscoveryRunner:
                                   _probe_key(path))
         return answer_of(result)
 
+    async def _whole_spec(self, path: str, answer: Mapping[str, Any]) -> Mapping[str, Any]:
+        """An API description longer than a request's answer sample, read whole in artifact windows.
+
+        ``http.request`` returns the first ``body_sample`` characters; a spec past them (VAmPI's is
+        29 KB) was never ingested, only noted for the planner. The windows' text is the masked text
+        the planner could read; only the routes ingested from it are kept."""
+        body = str(answer.get("body") or "")
+        length = int(answer.get("length") or 0)
+        if not answer.get("complete") or length <= len(body.encode("utf-8")) or length > MAX_SPEC_BYTES:
+            return answer
+        parts: list[str] = []
+        offset = 0
+        while offset < length and len(parts) < MAX_SPEC_WINDOWS:
+            await self.pace.take(1)
+            try:
+                result = await self._call("artifact.inspect", {"path": path, "offset": offset,
+                                                               "max_bytes": SPEC_WINDOW_BYTES},
+                                          f"spec-window:{_probe_key(path)}:{offset}")
+            except _Refused:
+                return answer
+            window = _observation_of(result)
+            returned = int(window.get("returned_bytes") or 0) if window else 0
+            if not returned or int(window.get("offset") or 0) != offset:
+                return answer
+            parts.append(str(window.get("text_sample") or ""))
+            offset += returned
+        if offset < length:
+            return answer
+        text = "".join(parts)
+        return {**answer, "body": text, "length": len(text.encode("utf-8"))}
+
     async def _probe_phase(self, run: Mapping[str, Any]) -> None:
         self.state["probes"] = "running"
         target_id = str(run.get("target_id") or "")
@@ -653,6 +696,7 @@ class DiscoveryRunner:
                 found.append(f"GET {path}")
 
         await asyncio.gather(*(exposure(path) for path in EXPOSURE_PATHS))
+        specs = [(path, await self._whole_spec(path, answer)) for path, answer in specs]
         routes = _spec_routes(specs, origin=_origin(run))
         if specs and not routes:
             for path, _answer in specs:
