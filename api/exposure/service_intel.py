@@ -81,6 +81,7 @@ def load_service_intelligence() -> tuple[dict[str, Any], Callable[..., Any]]:
         return device_advisories.match_advisories(
             [records[index] for index in sorted(selected)], cpe=cpe, product=product,
             version=version, identity_evidence_tier="network_service_fingerprint", limit=limit,
+            vendor_ranges=True,  # indexed for all; enrich_service applies the operator's choice
         )
 
     def indexed_matcher(_records, *, cpe, product, version, identity_evidence_tier=None, limit=50):
@@ -129,8 +130,13 @@ def _number(value: Any, low: float, high: float) -> float | None:
 
 def _exploitation_context(records: list[Mapping[str, Any]]) -> dict[str, Any]:
     """Exploitation context from the pinned snapshot: CVSS base score, CISA KEV membership, the
-    EPSS likelihood, and the checks the image's own templates carry. Metadata, never executed."""
-    context: dict[str, Any] = {"cvss_score": None, "known_exploited": None, "epss": None, "checks": []}
+    EPSS likelihood, the curated briefing naming the CVE, and the checks the image's own templates
+    carry. Metadata, never executed."""
+    context: dict[str, Any] = {"cvss_score": None, "known_exploited": None, "epss": None,
+                               "briefing": None, "checks": [],
+                               # Whose affected range matched: NVD's analysis, or the CVE publisher's
+                               # own declaration while NVD has not analysed the CVE yet.
+                               "range_source": "cna" if any(r.get("range_source") == "cna" for r in records) else "nvd"}
     for record in records:
         score = _number(record.get("cvss_score"), 0, 10)
         if score is not None and (context["cvss_score"] is None or score > context["cvss_score"]):
@@ -139,6 +145,8 @@ def _exploitation_context(records: list[Mapping[str, Any]]) -> dict[str, Any]:
         if isinstance(kev, Mapping) and context["known_exploited"] is None:
             context["known_exploited"] = {"date_added": text(kev.get("date_added"), 10) or None,
                                           "ransomware": kev.get("ransomware") is True}
+        if context["briefing"] is None:
+            context["briefing"] = _briefing(record.get("briefing"))
         epss = record.get("epss")
         if isinstance(epss, Mapping) and context["epss"] is None:
             probability, percentile = _number(epss.get("score"), 0, 1), _number(epss.get("percentile"), 0, 1)
@@ -152,16 +160,37 @@ def _exploitation_context(records: list[Mapping[str, Any]]) -> dict[str, Any]:
     return context
 
 
+#: Curated briefing feeds a snapshot may cite, and where each one's briefings live. The link is
+#: built here from a validated id; no URL or prose from the feed is carried.
+BRIEFING_SOURCES = {"cloudflare_zero_wire": "https://radar.cloudflare.com/zero-wire/"}
+
+
+def _briefing(value: Any) -> dict[str, Any] | None:
+    """A third party's curated briefing naming this CVE: a reason to look at it early, never
+    evidence about the target and never part of a score."""
+    if not isinstance(value, Mapping) or value.get("source") not in BRIEFING_SOURCES:
+        return None
+    slug, published, action = value.get("id"), value.get("published"), value.get("action")
+    if not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,119}", slug):
+        return None
+    if not isinstance(published, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", published):
+        return None
+    return {"source": value["source"], "id": slug, "published": published,
+            "action": action if isinstance(action, str) and re.fullmatch(r"[A-Za-z][A-Za-z ]{0,59}", action) else None,
+            "url": BRIEFING_SOURCES[value["source"]] + slug}
+
+
 def candidate_priority(row: Mapping[str, Any]) -> tuple[Any, ...]:
     epss = row.get("epss") or {}
-    return (0 if row.get("known_exploited") else 1, -(epss.get("score") or 0.0),
+    return (0 if row.get("known_exploited") else 1, 0 if row.get("briefing") else 1,
+            -(epss.get("score") or 0.0),
             -(row.get("cvss_score") or 0.0), str(row.get("id") or ""))
 
 
 # Product names fingerprints report without a CPE (httpx/tech detection, some nmap banners) ->
 # the NVD CPE part:vendor:product the snapshot keys on. Only unambiguous names; a version is required.
 PRODUCT_CPE_ALIASES: dict[str, tuple[str, ...]] = {
-    "nginx": ("a:f5:nginx", "a:nginx:nginx"),
+    "nginx": ("a:f5:nginx", "a:nginx:nginx", "a:f5:nginx_open_source"),
     "apache": ("a:apache:http_server",),
     "apache httpd": ("a:apache:http_server",),
     "apache http server": ("a:apache:http_server",),
@@ -295,8 +324,13 @@ def _published_after(records: list[Mapping[str, Any]], observed: Any) -> bool:
     return False
 
 
-def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher: Callable[..., Any]) -> None:
+def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher: Callable[..., Any],
+                   sources: Mapping[str, bool] | None = None) -> None:
     """Attach separate applicability, reference and local-validation dimensions.
+
+    ``sources`` is the operator's opt-in for optional intelligence (``intel_sources``): without
+    ``vendor_declared_ranges`` an advisory matched only through its publisher's own range is left
+    out, and without ``curated_briefings`` no candidate carries or is ranked by a briefing.
 
     The retained inventory is matched against the snapshot loaded now, so a changed advisory
     bundle is applied to every listener already observed without new traffic. Each candidate
@@ -326,6 +360,8 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
             aid = str(row.get("advisory_id") or row.get("cve") or "").upper()
             if CVE_ID.fullmatch(aid):
                 by_id.setdefault(aid, []).append(row)
+    use_vendor_ranges = bool(sources and sources.get("vendor_declared_ranges"))
+    use_briefings = bool(sources and sources.get("curated_briefings"))
     found: dict[str, dict[str, Any]] = {}
     follow: dict[tuple[Any, ...], dict[str, Any]] = {}
     by_component = {item["id"]: item for item in service.get("components") or () if isinstance(item, dict) and item.get("id")}
@@ -342,6 +378,8 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
                 identity_evidence_tier="network_service_fingerprint", limit=MAX_CANDIDATES + 1,
             ):
                 aid = str(match.get("advisory_id") or "").upper()
+                if not use_vendor_ranges and any(row.get("range_source") == "cna" for row in by_id.get(aid, [])):
+                    continue
                 if CVE_ID.fullmatch(aid) and (aid not in component_matches or match.get("match_type") == "exact_cpe_version_range"):
                     component_matches[aid] = match
         not_affected: set[str] = set()
@@ -374,6 +412,8 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
                             "review_status": "not_reviewed_for_execution",
                         }
             context = _exploitation_context(by_id.get(aid, []))
+            if not use_briefings:
+                context["briefing"] = None
             newly = _published_after(by_id.get(aid, []), version_observed)
             candidate = {
                 "id": aid, "title": text(match.get("title"), 500) or aid,
@@ -412,8 +452,8 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
                 service["advisory_changes"].append({"kind": "newly_applicable", "advisory_id": aid,
                                                     "component_id": component.get("id")})
     service["candidates_truncated"] = len(found) > MAX_CANDIDATES
-    # What to look at first: known exploited in the wild, then exploitation likelihood, then
-    # severity; the cap keeps those, never an alphabetical slice.
+    # What to look at first: known exploited in the wild, then named in a curated briefing, then
+    # exploitation likelihood, then severity; the cap keeps those, never an alphabetical slice.
     service["cve_candidates"] = sorted(found.values(), key=candidate_priority)[:MAX_CANDIDATES]
     # Re-evaluation queues only what is missing: one item per component and missing evidence.
     service["advisory_follow_up"] = sorted(follow.values(), key=lambda item: (-item["advisories"], str(item["product"])))[:10]

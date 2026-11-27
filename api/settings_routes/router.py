@@ -29,6 +29,7 @@ try:
     import asm_inventory
     import parallel_scan
     from ai_targets.router import _validate_demo_base_url
+    from exposure.intel_sources import SETTING_KEYS as INTEL_SOURCE_KEYS, load_intel_sources
     from redaction import mask_secret
     from retest_contract import AUTO_FP_MIN_CONFIDENCE_FLOOR
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
@@ -36,6 +37,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import _clean_string_list, _int_or_none, _optional_uuid, _uuid_or_400, utc_now_iso
     from .. import asm_inventory, parallel_scan
     from ..ai_targets.router import _validate_demo_base_url
+    from ..exposure.intel_sources import SETTING_KEYS as INTEL_SOURCE_KEYS, load_intel_sources
     from ..retest_contract import AUTO_FP_MIN_CONFIDENCE_FLOOR
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from scanner.redaction import mask_secret
@@ -183,6 +185,18 @@ async def update_automation_settings(request: AutomationSettingsUpdate):
         )
     if automation_updates:
         r.hset(AUTOMATION_SETTINGS_KEY, mapping=automation_updates)
+
+    # Optional advisory intelligence sources are an operator opt-in read from Postgres only.
+    intel_updates = {
+        INTEL_SOURCE_KEYS[name]: "true" if value else "false"
+        for name, value in (("curated_briefings", request.intel_curated_briefings),
+                            ("vendor_declared_ranges", request.intel_vendor_declared_ranges))
+        if value is not None
+    }
+    if intel_updates:
+        async with _pool().acquire() as conn:
+            for key, value in intel_updates.items():
+                await _write_durable_setting(conn, key, value)
 
     # The approval-receipt requirement is a security gate, so persist it durably
     # to Postgres (Redis stays a cache). This is what enforcement reads, so the
@@ -510,6 +524,11 @@ def _sanitize_automation_settings_response(
                 automation.get("approval_receipts_required_for_state_changing_actions")
             ),
         },
+        # Optional advisory data already in the verified snapshot. Off until an operator enables it;
+        # enabling fetches nothing, grants no authority and changes no score.
+        "intelligence_sources": {
+            name: bool((automation.get("intelligence_sources") or {}).get(name)) for name in INTEL_SOURCE_KEYS
+        },
     }
 
 
@@ -577,6 +596,11 @@ async def _automation_settings_with_durable_flags() -> dict[str, Any]:
         durable = None
     if durable is not None:
         automation[APPROVAL_POLICY_SETTING_KEY] = _is_truthy(durable, default=False)
+    try:
+        async with _pool().acquire() as conn:
+            automation["intelligence_sources"] = await load_intel_sources(conn)
+    except Exception:
+        automation["intelligence_sources"] = {}
     return automation
 
 
@@ -947,6 +971,8 @@ class AutomationSettingsUpdate(ScanExecutionSettingsUpdate):
     default_asm_enabled: Optional[bool] = None
     default_asm_config: Optional[dict[str, Any]] = None
     approval_receipts_required_for_state_changing_actions: Optional[bool] = None
+    intel_curated_briefings: Optional[bool] = None
+    intel_vendor_declared_ranges: Optional[bool] = None
 
 
 class AISettingsProbeRequest(BaseModel):

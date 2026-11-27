@@ -1812,6 +1812,17 @@ def test_update_automation_settings_writes_scan_and_safe_asm_defaults(monkeypatc
     )
     # The security flag is persisted durably to Postgres (not just Redis).
     assert durable_conn.store[api_module.APPROVAL_POLICY_SETTING_KEY] == "true"
+    # Optional advisory intelligence sources stay off until an operator enables each one.
+    assert result["settings"]["intelligence_sources"] == {"curated_briefings": False, "vendor_declared_ranges": False}
+    assert not [key for key in durable_conn.store if key.startswith("intel_")]
+    enabled = asyncio.run(settings_router_module.update_automation_settings(
+        api_module.AutomationSettingsUpdate(intel_curated_briefings=True)))
+    assert enabled["settings"]["intelligence_sources"] == {"curated_briefings": True, "vendor_declared_ranges": False}
+    assert durable_conn.store["intel_curated_briefings_enabled"] == "true"
+    asyncio.run(settings_router_module.update_automation_settings(
+        api_module.AutomationSettingsUpdate(intel_vendor_declared_ranges=True, intel_curated_briefings=False)))
+    shown = asyncio.run(settings_router_module.get_automation_settings())
+    assert shown["intelligence_sources"] == {"curated_briefings": False, "vendor_declared_ranges": True}
 
 
 def test_update_automation_settings_merges_partial_asm_config(monkeypatch):

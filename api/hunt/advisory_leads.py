@@ -20,7 +20,7 @@ from .followup_leads import record_leads
 
 SOURCE = "advisory_intel"
 FAMILY = "known_vulnerability"
-#: Leads recorded per pass. Candidates arrive known-exploited first, then by EPSS and CVSS.
+#: Leads recorded per pass. Candidates arrive known-exploited first, then briefed, then by EPSS and CVSS.
 MAX_LEADS = 25
 MAX_CANDIDATES = 500
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}")
@@ -34,7 +34,8 @@ SETTLED = frozenset({"check_matched", "check_not_matched", "pending"})
 def advisory_proposals(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """The candidate rows worth a lead, as lead-board fields. Pure.
 
-    Worth a lead: known exploited, or critical/high with a bundled check. Left out: a stale
+    Worth a lead: known exploited, named in a curated vulnerability briefing, or critical/high
+    with a bundled check. Left out: a stale
     service identity, and a candidate a verify Scan already settled or is running. Only
     server-derived values reach the lead's text; banner labels stay in service intelligence.
     """
@@ -53,7 +54,8 @@ def advisory_proposals(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         severity = row.get("severity") if row.get("severity") in SEVERITIES else None
         checks = [check for check in row.get("checks") or () if isinstance(check, str) and CHECK_PATTERN.fullmatch(check)]
         exploited = bool(row.get("known_exploited"))
-        if not exploited and not (checks and severity in {"critical", "high"}):
+        briefed = row.get("briefed") is True
+        if not exploited and not briefed and not (checks and severity in {"critical", "high"}):
             continue
         how = (f"A bundled check exists ({', '.join(checks)}): run it against this listener."
                if checks else "No bundled check names this advisory: confirm the version another way first.")
@@ -61,13 +63,14 @@ def advisory_proposals(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
             "family": FAMILY, "cwe": None,
             "title": f"{cve} advisory matches the service on {listener}",
             "description": (("Known to be exploited. " if exploited else "")
+                            + ("Named in a current vulnerability briefing. " if briefed else "")
                             + "The observed product and version fall in this advisory's affected range. "
                             + "A banner match is a candidate, not a finding. " + how),
             "severity_guess": severity or "high", "confidence": 0.5 if exploited else 0.4,
             "dimensions": {"object_key": f"service:{service}", "proof_surface": cve.lower()},
             "endorsement": {"cve": cve, "service_id": service, "known_exploited": exploited, "checks": checks},
             "metadata": {"advisory": {"cve": cve, "service_id": service, "listener": listener,
-                                      "known_exploited": exploited, "checks": checks,
+                                      "known_exploited": exploited, "briefed": briefed, "checks": checks,
                                       "match_type": row.get("match_type") if isinstance(row.get("match_type"), str) else None}},
         })
         if len(proposals) >= MAX_LEADS:

@@ -95,6 +95,50 @@ means **no match in that snapshot**, not “no vulnerabilities.” Configure the
 incorrect digest fails closed; its trust status remains visible. This feature never performs a live
 CVE, KEV, EPSS or exploit-site query.
 
+### Optional sources are off until enabled
+
+Vendor-declared ranges and curated briefings are optional sources. Neither takes part in matching,
+ranking or Hunt leads until an operator enables it: in Settings, under "Advisory intelligence
+sources", or with `PUT /settings/automation` (`intel_vendor_declared_ranges`,
+`intel_curated_briefings`). `GET /settings/automation` reports both under `intelligence_sources`.
+The choice is stored durably and a value that cannot be read counts as off. Changing it is an
+operator's decision, like every settings write; an agent hands over the command. Enabling a
+source fetches nothing: it only lets data already in the verified snapshot be used. Device
+posture never uses vendor-declared ranges, whatever the setting.
+
+```bash
+shakerscan api PUT /settings/automation '{"intel_curated_briefings":true,"intel_vendor_declared_ranges":true}'
+```
+
+### Vendor-declared ranges
+
+NVD analysis can trail publication by days or weeks. A snapshot built with `--vendor-ranges`
+carries, for a CVE NVD has not analysed, the affected ranges the CVE's own publisher declared.
+Such a candidate reports `range_source: cna` (otherwise `nvd`) and the Services view labels it
+"Vendor-declared range". It is a candidate like any other; only ranges with a plain version bound
+for a curated product are taken, and a platform-conditional or open-ended declaration is left out.
+
+### Curated briefings
+
+A snapshot built with `--zero-wire` marks the CVEs named in a
+[Cloudflare Radar Zero Wire](https://radar.cloudflare.com/zero-wire) briefing. A candidate then
+carries `briefing` (source, briefing id, publication date, recommended-action label and a link
+built from the id) and ranks after known-exploited candidates and before exploitation likelihood;
+a Hunt opens a lead for it even when no bundled check exists. Only that metadata is kept: the
+briefing's prose is untrusted third-party text and never enters the snapshot, a lead or planner
+context. A briefing is a reason to look early. It is not evidence about the target, changes no
+score, and verifies nothing. It is as current as the snapshot or signed bundle that carries it.
+
+`scripts/zero_wire_intel.py` reports the coverage gap from the same feed: briefed CVEs the
+snapshot cannot match to a service (product outside the curated list, or no bounded NVD range
+yet) and briefed CVEs no bundled check names.
+
+```bash
+curl -fsS https://radar.cloudflare.com/zero-wire/feed -o zero-wire.rss
+python3 scripts/zero_wire_intel.py --feed zero-wire.rss \
+  --snapshot scanner/data/device_advisories.json --templates /path/to/nuclei-templates
+```
+
 ### Signed intelligence bundles
 
 Newer data can arrive without a new image as a signed bundle installed under `results/intel`

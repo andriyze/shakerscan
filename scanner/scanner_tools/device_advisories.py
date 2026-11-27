@@ -18,10 +18,10 @@ BUNDLED_SNAPSHOT_PATH = os.path.join(
     "data",
     "device_advisories.json",
 )
-BUNDLED_SNAPSHOT_SHA256 = "bdab781f78f07ab87e27e3e0bcc8d6d4c7131e84f131d37a465d1bfbeeeb191e"
+BUNDLED_SNAPSHOT_SHA256 = "8342e2399e2191b8a6d53a12c00c5732cc4dd9ec89c067cc40fadff779c87b33"
 # The built-in snapshot's own generated_at: an external bundle older than this is refused, so a
 # stale bundle left on the host cannot replace newer data shipped in a later image.
-BUNDLED_SNAPSHOT_GENERATED_AT = "2026-10-13T13:29:01Z"
+BUNDLED_SNAPSHOT_GENERATED_AT = "2026-11-27T19:46:40Z"
 
 # A network banner, Nmap guess, or unauthenticated protocol response can produce a
 # syntactically exact CPE without proving which firmware is installed. Only authenticated or
@@ -427,8 +427,11 @@ def readable_advisory_title(title: Any, advisory_id: Any = "") -> str:
 
 def match_advisories(
     records: Any, *, cpe: str | None, product: str | None, version: str | None,
-    identity_evidence_tier: str | None = None, limit: int = 50,
+    identity_evidence_tier: str | None = None, limit: int = 50, vendor_ranges: bool = False,
 ) -> list[dict[str, Any]]:
+    """``vendor_ranges``: also match records whose range the CVE's publisher declared before NVD
+    analysed it (``range_source: cna``). Off by default, so device posture and every caller that
+    did not ask reads NVD-analysed records only."""
     query_cpe = str(cpe or "").strip()
     query_identity = _cpe_identity(query_cpe)
     query_product = str(product or "").strip().lower()
@@ -440,6 +443,8 @@ def match_advisories(
     matches: list[dict[str, Any]] = []
     for raw in list(records or [])[:100_000]:
         if not isinstance(raw, dict):
+            continue
+        if not vendor_ranges and raw.get("range_source") == "cna":
             continue
         advisory_cpe = str(raw.get("cpe") or "").strip()
         advisory_identity = _cpe_identity(advisory_cpe)

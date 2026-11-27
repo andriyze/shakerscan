@@ -26,8 +26,9 @@ def _service(sid, port=443, *, product="Apache httpd", version="2.4.49", presenc
     }
 
 
-def _candidate(cve, severity="high", kev=False, epss=None, cvss=None, check=None):
+def _candidate(cve, severity="high", kev=False, epss=None, cvss=None, check=None, briefed=False):
     return {"id": cve, "severity": severity, "known_exploited": {"date_added": "2021-11-03"} if kev else None,
+            "briefing": {"source": "cloudflare_zero_wire", "id": "a-briefing"} if briefed else None,
             "epss": {"score": epss, "percentile": 0.9} if epss is not None else None, "cvss_score": cvss,
             "match_type": "exact_cpe_version_range",
             "checks": [{"kind": "nuclei_template", "id": check}] if check else []}
@@ -107,6 +108,11 @@ def test_hunt_rows_put_known_exploited_and_likely_first_with_the_check_state():
     assert rows[2]["verification"] == "no_check"
     # A candidate from an older engine carries no applicability: unresolved, never affected.
     assert {row["applicability_status"] for row in rows} == {"unresolved"}
+    # Named in a curated briefing: after known exploited, before likelihood alone.
+    services[1]["cve_candidates"].append(_candidate("CVE-4", "medium", epss=0.001, briefed=True))
+    briefed_rows = hunt_candidate_rows(services)
+    assert [row["cve"] for row in briefed_rows] == ["CVE-3", "CVE-4", "CVE-1", "CVE-2"]
+    assert [row["briefed"] for row in briefed_rows] == [False, True, False, False]
 
 
 def _scan_records(requested, steps, status="completed", target_url=TARGET["locator"]):

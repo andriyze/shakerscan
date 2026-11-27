@@ -10,6 +10,7 @@ except ModuleNotFoundError:  # package import layout
     from ..list_contract import ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
 from .hunt_service_sources import hunt_service_sources
 from .service_actions import hunt_handoff, service_activities
+from .intel_sources import load_intel_sources
 from .service_intel import enrich_service, snapshot_summary
 from .service_rows import attach_verification, listener_groups, severity_counts, verification_records
 from .service_inventory import SCHEMA_VERSION, attach_findings, build_inventory, object_value, origin, text
@@ -197,8 +198,9 @@ async def target_inventory(conn: Any, target: dict[str, Any], snapshot: dict[str
             ORDER BY last_seen_at DESC,id LIMIT $2""", target_id, MAX_FINDINGS + 1,
     )
     unlinked = attach_findings(target, services, [dict(row) for row in finding_rows[:MAX_FINDINGS]])
+    intel_sources = await load_intel_sources(conn)
     for service in services:
-        enrich_service(service, snapshot, matcher)
+        enrich_service(service, snapshot, matcher, intel_sources)
         service["activities"] = service_activities(target, service, registry)
         service["hunt_href"] = hunt_handoff(target, service)
     attach_verification(target, services, await verification_records(conn, target, services))

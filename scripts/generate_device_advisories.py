@@ -86,7 +86,7 @@ EMBEDDED_CPE: dict[str, list[str]] = {
 NETWORK_SERVICE_CPE: dict[str, list[str]] = {
     "openssh": ["cpe:2.3:a:openbsd:openssh"],
     "apache-httpd": ["cpe:2.3:a:apache:http_server"],
-    "nginx": ["cpe:2.3:a:f5:nginx", "cpe:2.3:a:nginx:nginx"],
+    "nginx": ["cpe:2.3:a:f5:nginx", "cpe:2.3:a:nginx:nginx", "cpe:2.3:a:f5:nginx_open_source"],
     "iis": ["cpe:2.3:a:microsoft:internet_information_services"],
     "tomcat": ["cpe:2.3:a:apache:tomcat"],
     "jetty": ["cpe:2.3:a:eclipse:jetty"],
@@ -402,13 +402,13 @@ def severity_from_metrics(cve: dict) -> str:
     for metric_group in groups:
         if not isinstance(metric_group, dict):
             continue
-        for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        for key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
             metrics = metric_group.get(key, [])
             if metrics:
                 severity = metrics[0].get("cvssData", {}).get("baseSeverity")
                 if severity:
                     return str(severity).lower()
-    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+    for key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
         metrics = cve.get(key, [])
         if metrics:
             severity = metrics[0].get("cvssData", {}).get("baseSeverity")
@@ -418,13 +418,13 @@ def severity_from_metrics(cve: dict) -> str:
 
 
 def cvss_score_from_metrics(cve: dict) -> float | None:
-    """The newest CVSS base score NVD lists (v3.1, then v3.0, then v2)."""
+    """The newest CVSS base score NVD lists (v4.0, then v3.1, then v3.0, then v2)."""
     metrics_root: Any = cve.get("metrics", {})
     groups = [metrics_root] if isinstance(metrics_root, dict) else list(metrics_root or [])
     for metric_group in groups:
         if not isinstance(metric_group, dict):
             continue
-        for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        for key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
             for metric in metric_group.get(key, []) or []:
                 score = (metric.get("cvssData") or {}).get("baseScore")
                 if isinstance(score, (int, float)) and 0 <= score <= 10:
@@ -505,7 +505,80 @@ def advisory_from_match(cve: dict, criteria: str, match: dict) -> dict | None:
     return entry
 
 
-def collect_entries(vulnerabilities: list[dict], allowed_keys: set[str]) -> tuple[list[dict], int, int]:
+VENDOR_RANGE_SOURCE = "cna"
+_PLAIN_VERSION = re.compile(r"\d+(?:\.\d+){1,4}(?:[a-z]\d{0,3})?")
+
+
+def curated_cpe_prefixes(extra: list[str] | tuple[str, ...] = ()) -> dict[str, str]:
+    """``vendor:product`` -> the curated ``cpe:2.3:part:vendor:product`` prefix."""
+    prefixes: dict[str, str] = {}
+    for cpes in (*EMBEDDED_CPE.values(), *NETWORK_SERVICE_CPE.values(), list(extra)):
+        for cpe in cpes:
+            key = cpe_product_key(cpe)
+            if key:
+                prefixes.setdefault(key, ":".join(split_cpe23(cpe)[:5]))
+    return prefixes
+
+
+def _vendor_product_cpe(affected: dict, prefixes: dict[str, str]) -> str | None:
+    """The curated product a vendor's affected entry names: by a CPE the vendor gave, else by an
+    exact vendor and product name. No fuzzy naming: an unrecognised product is left out."""
+    for cpe in affected.get("cpes") or []:
+        key = cpe_product_key(str(cpe)) if str(cpe).startswith("cpe:2.3:") else ""
+        if key in prefixes:
+            return prefixes[key]
+    named = "{}:{}".format(str(affected.get("vendor") or "").strip().lower().replace(" ", "_"),
+                           str(affected.get("product") or "").strip().lower().replace(" ", "_"))
+    return prefixes.get(named)
+
+
+def vendor_range_entries(cve: dict, prefixes: dict[str, str]) -> list[dict]:
+    """Affected ranges the CVE's own publisher (its CNA) declared, for a CVE NVD has not analysed.
+
+    NVD returns them beside its record. They are used only while NVD lists no configuration at
+    all; once it does, NVD's analysis is the source. Accepted: an entry whose default status is
+    unaffected, with no platform condition, for a curated product, and a version row marked
+    affected with one plain dotted upper bound. Git hashes, package (rpm) versions, wildcards,
+    free-text ranges and rows carrying status changes are left out rather than guessed at.
+    """
+    if cve.get("configurations"):
+        return []
+    entries: list[dict] = []
+    for block in cve.get("affected") or []:
+        for affected in (block.get("affectedData") or []) if isinstance(block, dict) else []:
+            if not isinstance(affected, dict) or affected.get("defaultStatus") != "unaffected" or affected.get("platforms"):
+                continue
+            prefix = _vendor_product_cpe(affected, prefixes)
+            if not prefix:
+                continue
+            for row in affected.get("versions") or []:
+                if not isinstance(row, dict) or row.get("status") != "affected" or row.get("changes"):
+                    continue
+                if row.get("versionType") not in ("semver", "custom"):
+                    continue
+                start = str(row.get("version") or "")
+                ends = {"version_end_excluding": row.get("lessThan"), "version_end_including": row.get("lessThanOrEqual")}
+                ends = {key: str(value) for key, value in ends.items() if value not in (None, "")}
+                if len(ends) != 1 or not _PLAIN_VERSION.fullmatch(next(iter(ends.values()))):
+                    continue
+                if start != "0" and not _PLAIN_VERSION.fullmatch(start):
+                    continue
+                entries.append({
+                    "cve": cve.get("id", ""), "title": english_description(cve)[:DESCRIPTION_LIMIT],
+                    "severity": severity_from_metrics(cve), "cvss_score": cvss_score_from_metrics(cve),
+                    "cwe": first_cwe(cve), "cpe": prefix + ":*:*:*:*:*:*:*:*",
+                    "product": unescape_cpe_component(split_cpe23(prefix)[4]),
+                    **({"version_start_including": start} if start != "0" else {}), **ends,
+                    "range_source": VENDOR_RANGE_SOURCE,
+                    "published": str(cve.get("published", ""))[:10],
+                    "last_modified": str(cve.get("lastModified", ""))[:10],
+                    "reference": f"https://nvd.nist.gov/vuln/detail/{cve.get('id', '')}",
+                })
+    return entries
+
+
+def collect_entries(vulnerabilities: list[dict], allowed_keys: set[str],
+                    vendor_prefixes: dict[str, str] | None = None) -> tuple[list[dict], int, int]:
     entries: list[dict] = []
     skipped_unbounded = 0
     skipped_product = 0
@@ -524,6 +597,8 @@ def collect_entries(vulnerabilities: list[dict], allowed_keys: set[str]) -> tupl
                 skipped_unbounded += 1
                 continue
             entries.append(entry)
+        if vendor_prefixes:
+            entries.extend(vendor_range_entries(cve, vendor_prefixes))
     return entries, skipped_unbounded, skipped_product
 
 
@@ -637,12 +712,30 @@ def load_template_safety(directory: str | None) -> dict[str, str]:
     return classes
 
 
+def load_zero_wire(path: str | None) -> dict[str, dict]:
+    """The newest Cloudflare Radar Zero Wire briefing naming each CVE (a downloaded RSS feed)."""
+    if not path:
+        return {}
+    scripts = os.path.dirname(os.path.abspath(__file__))
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import zero_wire_intel
+    try:
+        return zero_wire_intel.briefings_by_cve(zero_wire_intel.load_briefings(path))
+    except zero_wire_intel.FeedError as exc:
+        raise SystemExit(f"error reading {path}: {exc}")
+
+
 def enrich(advisories: list[dict], kev: dict[str, dict], epss: dict[str, dict],
-           checks: dict[str, list[str]], safety: dict[str, str] | None = None) -> None:
-    """Add exploitation context: known exploited (CISA KEV), likelihood (EPSS) and the checks the
-    image's own templates carry for the CVE. Metadata only; nothing here is executed."""
+           checks: dict[str, list[str]], safety: dict[str, str] | None = None,
+           briefings: dict[str, dict] | None = None) -> None:
+    """Add exploitation context: known exploited (CISA KEV), likelihood (EPSS), the curated
+    briefing naming the CVE and the checks the image's own templates carry for it. Metadata only;
+    nothing here is executed."""
     for item in advisories:
         cve = str(item.get("cve") or "").upper()
+        if briefings and cve in briefings:
+            item["briefing"] = briefings[cve]
         if cve in kev:
             item["known_exploited"] = kev[cve]
         if cve in epss:
@@ -731,6 +824,27 @@ def normalize_snapshot(snapshot: dict) -> dict:
             "titles": titles, "advisories": ranges + list(grouped.values())}
 
 
+def merge_into_base(base_path: str, snapshot: dict) -> dict:
+    """Refresh an existing snapshot instead of rebuilding it: keep every record of ``base_path``
+    and add the newly collected records for CVEs it does not carry yet. A CVE the base already
+    carries keeps the base's records, which came from a product-wide query."""
+    with open(base_path, encoding="utf-8") as handle:
+        base = json.load(handle)
+    if not isinstance(base, dict) or base.get("schema_version") != SCHEMA_VERSION:
+        raise SystemExit(f"error: {base_path} is not a {SCHEMA_VERSION} snapshot")
+    # A vendor-declared range in the base gives way as soon as NVD has analysed the CVE.
+    analysed = {str(item.get("cve") or "") for item in snapshot["advisories"]
+                if item.get("range_source") != VENDOR_RANGE_SOURCE}
+    kept = [item for item in base.get("advisories") or []
+            if not (item.get("range_source") == VENDOR_RANGE_SOURCE and str(item.get("cve") or "") in analysed)]
+    carried = {str(item.get("cve") or "") for item in kept}
+    added = [item for item in snapshot["advisories"] if str(item.get("cve") or "") not in carried]
+    print(f"base carries {len(carried)} CVEs; adding {len({item['cve'] for item in added})} new", file=sys.stderr)
+    return {**snapshot, "source": base.get("source") or snapshot["source"],
+            "titles": {**snapshot["titles"], **(base.get("titles") or {})},
+            "advisories": kept + added}
+
+
 def write_snapshot(snapshot: dict, output_path: str) -> str:
     directory = os.path.dirname(os.path.abspath(output_path))
     if directory:
@@ -798,6 +912,8 @@ def self_check(output_path: str, digest: str) -> None:
                 [record], cpe=query_cpe, product=None, version=version,
                 # The generator validates advisory semantics, not network identity provenance.
                 identity_evidence_tier="signed_firmware_manifest",
+                # A vendor-declared range matches only for a caller that asks for those.
+                vendor_ranges=record.get("range_source") == VENDOR_RANGE_SOURCE,
             )
             if matches and matches[0].get("promotable"):
                 promoted = True
@@ -833,10 +949,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="emit only the built-in curated seed; no network access")
     parser.add_argument("--network-services", action="store_true",
                         help="query every built-in network/web service product (NETWORK_SERVICE_CPE)")
+    parser.add_argument("--base", metavar="PATH", default=None,
+                        help="existing snapshot to refresh: keep its records, add the new CVEs, and "
+                             "re-apply --kev/--epss/--templates/--zero-wire to all of them")
+    parser.add_argument("--vendor-ranges", action="store_true",
+                        help="for a CVE NVD has not analysed, use the affected ranges its publisher "
+                             "declared (marked range_source=cna) until NVD lists a configuration")
     parser.add_argument("--kev", metavar="FILE", default=None,
                         help="CISA KEV catalog JSON to mark known exploited CVEs")
     parser.add_argument("--epss", metavar="FILE", default=None,
                         help="FIRST EPSS CSV (or .csv.gz) to add exploit likelihood")
+    parser.add_argument("--zero-wire", metavar="FILE", default=None,
+                        help="Cloudflare Radar Zero Wire RSS feed: mark the CVEs a briefing names")
     parser.add_argument("--templates", metavar="DIR", default=None,
                         help="nuclei templates directory: name the checks that exist for a CVE")
     parser.add_argument("--self-check", action="store_true",
@@ -879,6 +1003,7 @@ def main(argv: list[str] | None = None) -> int:
         zero_result_cpes: list[str] = []
     else:
         allowed_keys = resolve_allowed_keys(args)
+        vendor_prefixes = curated_cpe_prefixes(args.cpe) if args.vendor_ranges else None
         entries = []
         skipped_unbounded = 0
         skipped_product = 0
@@ -901,7 +1026,7 @@ def main(argv: list[str] | None = None) -> int:
                     wrapper = fetch_cve_by_id(cve_id, args.sleep)
                 except NvdError as exc:
                     raise SystemExit(f"error querying {cve_id}: {exc}")
-            batch, unbounded, product = collect_entries([wrapper], allowed_keys)
+            batch, unbounded, product = collect_entries([wrapper], allowed_keys, vendor_prefixes)
             entries.extend(batch)
             skipped_unbounded += unbounded
             skipped_product += product
@@ -934,7 +1059,7 @@ def main(argv: list[str] | None = None) -> int:
                     vulnerabilities = fetch_cves_for_cpe(cpe, args.sleep, max(1, args.max_per_cpe))
             except NvdError as exc:
                 raise SystemExit(f"error querying {cpe}: {exc}")
-            batch, unbounded, product = collect_entries(vulnerabilities, allowed_keys)
+            batch, unbounded, product = collect_entries(vulnerabilities, allowed_keys, vendor_prefixes)
             entries.extend(batch)
             skipped_unbounded += unbounded
             skipped_product += product
@@ -949,10 +1074,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"collected {len(entries)} bounded advisories; "
           f"skipped {skipped_unbounded} unbounded and {skipped_product} out-of-scope configuration matches",
           file=sys.stderr)
-    snapshot = build_snapshot(entries)
+    snapshot = normalize_snapshot(build_snapshot(entries))
+    if args.base:
+        snapshot = merge_into_base(args.base, snapshot)
+        if args.zero_wire:  # a briefing mark is as current as the feed: none outlives it
+            for item in snapshot["advisories"]:
+                item.pop("briefing", None)
     enrich(snapshot["advisories"], load_kev(args.kev), load_epss(args.epss), load_template_checks(args.templates),
-           load_template_safety(args.templates))
-    snapshot = normalize_snapshot(snapshot)
+           load_template_safety(args.templates), load_zero_wire(args.zero_wire))
     digest = write_snapshot(snapshot, args.output)
     for name, count in per_cve_counts.items():
         print(f"  {count:4d}  {name}", file=sys.stderr)

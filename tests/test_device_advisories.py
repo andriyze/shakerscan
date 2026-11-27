@@ -211,6 +211,7 @@ def test_every_bundled_advisory_is_version_bounded_and_promotable():
             matches = device_advisories.match_advisories(
                 [record], cpe=":".join(components), product=None, version=version,
                 identity_evidence_tier="authenticated_firmware_inventory",
+                vendor_ranges=record.get("range_source") == "cna",
             )
             if matches and matches[0]["promotable"]:
                 promoted = True

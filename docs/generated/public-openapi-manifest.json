@@ -43,7 +43,7 @@
     "AuthorizationInvestigateRequest": "778074cd1b6bd5ee1ea0b27ceb73b76983e363391157c3fe5da04e1a7b2224b5",
     "AuthzReplayExecuteRequest": "371c17d398fc9c0f5c190cc37158ff9ef792e62a281c3075b83257bb6df32542",
     "AuthzReplayPromoteRequest": "2d2377d49ca39f1dff53b16cba5508aa27c6c0386708095b976a1871e16f6ab6",
-    "AutomationSettingsUpdate": "22d1585e657145ce3767aa4b7a82a66206ee35de920b1532a830553a04d35098",
+    "AutomationSettingsUpdate": "dc0c4ee1eb4b132cb7188421a89173bd3251c8e377594917a5e13bb40fdd63d6",
     "BenchmarkFollowupHypothesisItem": "d47685336e0c6c7d34613bf6c4a58493f4bdfdc5c3bf1f0e0371a18aaa086734",
     "BenchmarkHypothesisRequest": "7b4be8e6288b907374e8bb62ff8807e8f24e87aabe5f3d235832078e2a56b348",
     "BrokerActionAuthorityRequest": "143f18e17b7c507197cdd1c49f6c76f8711b635a5800dacc7f2dac8c6cce197e",
@@ -223,7 +223,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "0834fa540ab32f209cd6acbeea1d48b944939e9674130ab02ff2b903f4378f96",
+  "contract_sha256": "a3f711b8ae4ab3866def6b53bcc705c52bf276e324c9ebcb5e0354fadfd08240",
   "openapi": "3.1.0",
   "operation_count": 485,
   "operations": {
@@ -4991,7 +4991,7 @@
       "deprecated": false,
       "operation_id": "start_hunt_hunts_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "bdc9a0c07c7e9fa126f89675c05ba30d11f04e2101ad0c5c1bd1c6294e746689",
+      "request_schema_sha256": "9ed62d89675e3c7fb555b0ad655c4960bd6df6de5d4b758c485dad92fac7fc33",
       "response_schema_sha256": {
         "200": "87f160d6eeb2c1bfa78deaf517c99df762cf0fc7ce99a07a44df48383dcf9421"
       },
