@@ -151,6 +151,20 @@ _SIMPLE_CONTENT_TYPES = ("application/x-www-form-urlencoded", "multipart/form-da
 # Request headers a browser adds on its own or that a cross-site form can carry.
 _CROSS_SITE_KEPT_HEADERS = frozenset({"cookie", "content-type", "accept", "accept-language", "user-agent"})
 _HTML_TYPES = ("text/html", "application/xhtml+xml")
+# What an uploaded file may be served as for a browser to run what it carries.
+_ACTIVE_TYPES = (*_HTML_TYPES, "image/svg+xml")
+_HTML_UPLOAD = "<!doctype html><title>{marker}</title><p>{marker}</p>\n"
+# Harmless: no script. Served as image/svg+xml from the origin, an SVG runs whatever it carries.
+_SVG_UPLOAD = ('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><title>{marker}</title>'
+               '<desc>{marker}</desc></svg>\n')
+# (name, extension, declared Content-Type, content): the plain case, then common filter bypasses
+# (ported from the removed scanner_tools/file_upload_tests: type-only checks, SVG, extension lists).
+_UPLOAD_VARIANTS = (
+    ("html", ".html", "text/html", "html"),
+    ("html_declared_png", ".html", "image/png", "html"),
+    ("svg", ".svg", "image/svg+xml", "svg"),
+    ("htm", ".htm", "text/html", "html"),
+)
 _META_CSP_RE = re.compile(rb"(?i)<meta[^>]{0,200}http-equiv\s*=\s*[\"']?content-security-policy")
 
 
@@ -716,12 +730,13 @@ class RequestVerifier:
         parsed = urllib.parse.urlsplit(self.request.url)
         fields = list(self.options.get("form_fields") or ())
 
-        def upload(label: str) -> tuple[ReplayRequest, str, str]:
+        def upload(label: str, variant: tuple[str, str, str, str]) -> tuple[ReplayRequest, str, str]:
+            _name, extension, declared_type, kind = variant
             marker = _marker(self.seed, f"upload:{label}") + secrets.token_hex(4)
-            filename = f"{marker}.html"
+            filename = f"{marker}{extension}"
             boundary = "----shakerscan" + secrets.token_hex(12)
-            content = (f"<!doctype html><title>{marker}</title><p>{marker}</p>\n").encode()
-            body = _multipart(fields, self.field, filename, content, "text/html", boundary)
+            content = (_SVG_UPLOAD if kind == "svg" else _HTML_UPLOAD).format(marker=marker).encode()
+            body = _multipart(fields, self.field, filename, content, declared_type, boundary)
             request = replace(_with_header(self.request, "Content-Type",
                                            f"multipart/form-data; boundary={boundary}"),
                               body=body, body_mode="raw")
@@ -737,30 +752,45 @@ class RequestVerifier:
         def served(result: ReplayTransportResult, marker: str) -> bool:
             disposition = str(_header(result.response_headers, "content-disposition") or "").lower()
             return (result.status_code == 200 and _contains(result, marker)
-                    and _content_type(result) in _HTML_TYPES and "attachment" not in disposition)
+                    and _content_type(result) in _ACTIVE_TYPES and "attachment" not in disposition)
 
-        request, filename, marker = upload("1")
-        sent = await self.send(request)
-        if not _accepted(sent):
-            return self.observation(not_proven_reason="upload_refused", upload_status=sent.status_code)
-        first = await self.send(fetch(filename))
-        if not served(first, marker):
-            return self.observation(not_proven_reason="not_served_as_html", served_status=first.status_code,
-                                    served_content_type=_content_type(first) or None)
-        request, filename_2, marker_2 = upload("2")
-        await self.send(request)
-        repeat = await self.send(fetch(filename_2))
-        # A file name never uploaded: a route that answers every name with the last upload, or
-        # with the name it was asked for, is not serving what was stored.
-        missing = _marker(self.seed, "upload:missing") + ".html"
-        control = await self.send(fetch(missing))
-        if served(repeat, marker_2) and not _contains(control, marker) and not _contains(control, marker_2):
-            return self.observation(
-                proof_contract=PROOF_CONTRACTS["file_upload"], technique="html_served_from_origin_repeated",
-                served_content_type=_content_type(repeat), uploaded_extension=".html",
-                response_pairs=[_pair(control, first), _pair(control, repeat)],
-            )
-        return self.observation()
+        # The plain HTML upload first, then the ways an upload filter is commonly passed: the
+        # declared type alone checked, an SVG (its script runs when opened at its URL), an
+        # extension a blocklist forgets. The first one stored and served as active content is
+        # repeated with a fresh file and checked against a name never uploaded.
+        reasons: list[str] = []
+        for variant in _UPLOAD_VARIANTS:
+            if self.left() < 5:
+                break
+            request, filename, marker = upload(f"{variant[0]}:1", variant)
+            sent = await self.send(request)
+            if not _accepted(sent):
+                reasons.append(f"{variant[0]}:upload_refused")
+                continue
+            first = await self.send(fetch(filename))
+            if not served(first, marker):
+                reasons.append(f"{variant[0]}:not_served_as_active_content")
+                continue
+            request, filename_2, marker_2 = upload(f"{variant[0]}:2", variant)
+            await self.send(request)
+            repeat = await self.send(fetch(filename_2))
+            # A file name never uploaded: a route that answers every name with the last upload, or
+            # with the name it was asked for, is not serving what was stored.
+            missing = _marker(self.seed, "upload:missing") + variant[1]
+            control = await self.send(fetch(missing))
+            if served(repeat, marker_2) and not _contains(control, marker) and not _contains(control, marker_2):
+                return self.observation(
+                    proof_contract=PROOF_CONTRACTS["file_upload"],
+                    technique="html_served_from_origin_repeated" if variant[0] == "html" else
+                    f"active_content_served_from_origin_repeated:{variant[0]}",
+                    served_content_type=_content_type(repeat), uploaded_extension=variant[1],
+                    declared_content_type=variant[2],
+                    response_pairs=[_pair(control, first), _pair(control, repeat)],
+                )
+            reasons.append(f"{variant[0]}:repeat_or_control_failed")
+            break
+        return self.observation(not_proven_reason=reasons[0].split(":", 1)[1] if len(reasons) == 1 else
+                                "no_variant_served", attempts=reasons[:6])
 
     async def _rate_limit(self, baseline: ReplayTransportResult) -> dict[str, Any]:
         path = urllib.parse.urlsplit(self.request.url).path or "/"

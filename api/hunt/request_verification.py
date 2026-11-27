@@ -467,9 +467,9 @@ REQUEST_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
     "batch_limit_absent": ("GraphQL batching not limited", "low", "CWE-770",
                            "A batch of operations in one request was answered in full; the same batch "
                            "of an undefined field was rejected"),
-    "file_upload": ("Verified unrestricted file upload (HTML served from the application origin)", "high",
-                    "CWE-434", "Two uploaded HTML files were served back as HTML from the "
-                    "application's origin; a file name never uploaded was not"),
+    "file_upload": ("Verified unrestricted file upload (active content served from the application origin)",
+                    "high", "CWE-434", "Two uploaded HTML or SVG files were served back as active content "
+                    "from the application's origin; a file name never uploaded was not"),
     "rate_limit": ("Sign-in not rate limited or locked out", "medium", "CWE-307",
                    "A run of wrong passwords was refused each time with no lockout, rate-limit "
                    "status or Retry-After"),

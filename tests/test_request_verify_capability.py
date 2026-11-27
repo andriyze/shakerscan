@@ -346,7 +346,7 @@ def _store():
 
     def respond(request):
         if request.method == "POST":
-            match = re.search(rb'filename="([^"]+)"\r\nContent-Type: text/html\r\n\r\n(.*?)\r\n--', request.body, re.S)
+            match = re.search(rb'filename="([^"]+)"\r\nContent-Type: [^\r]+\r\n\r\n(.*?)\r\n--', request.body, re.S)
             stored[match.group(1).decode()] = match.group(2)
             return _answer(request, b'{"ok": true}', content_type="application/json")
         name = urllib.parse.unquote(urllib.parse.urlsplit(request.url).path.rsplit("/", 1)[-1])
@@ -378,12 +378,50 @@ def test_upload_served_as_text_or_any_name_answered_proves_nothing():
 
     def catch_all(request):
         if request.method == "POST":
-            last["body"] = re.search(rb"\r\n\r\n(<!doctype.*?)\r\n--", request.body, re.S).group(1)
+            last["body"] = re.search(rb"\r\n\r\n(<(?:!doctype|svg).*?)\r\n--", request.body, re.S).group(1)
             return _answer(request, b"{}")
         return _answer(request, last.get("body", b""))
     result, _ = _run("file_upload", {"method": "POST", "path": "/upload"}, catch_all, field="file",
                      options={"retrieve_path": "/uploads/{filename}"})
     assert not _verified(result)
+
+
+def _filtered(*, refuse_declared_html=False, refuse_html_extensions=False):
+    """An upload route with a common filter: it refuses a declared text/html, or .html names, and
+    serves each stored file by its extension."""
+    stored: dict[str, bytes] = {}
+    types = {".html": "text/html", ".htm": "text/html", ".svg": "image/svg+xml"}
+
+    def respond(request):
+        if request.method == "POST":
+            name, declared, content = re.search(
+                rb'filename="([^"]+)"\r\nContent-Type: ([^\r]+)\r\n\r\n(.*?)\r\n--', request.body, re.S).groups()
+            name = name.decode()
+            if (refuse_declared_html and declared == b"text/html") or (
+                    refuse_html_extensions and name.endswith((".html", ".htm"))):
+                return _answer(request, b'{"error": "type not allowed"}', status=415, content_type="application/json")
+            stored[name] = content
+            return _answer(request, b'{"ok": true}', content_type="application/json")
+        name = urllib.parse.unquote(urllib.parse.urlsplit(request.url).path.rsplit("/", 1)[-1])
+        if name in stored:
+            return _answer(request, stored[name], content_type=types["." + name.rsplit(".", 1)[-1]])
+        return _answer(request, b"missing", status=404)
+    return respond
+
+
+@pytest.mark.parametrize(("filtered", "technique", "extension"), [
+    ({"refuse_declared_html": True}, "active_content_served_from_origin_repeated:html_declared_png", ".html"),
+    ({"refuse_declared_html": True, "refuse_html_extensions": True},
+     "active_content_served_from_origin_repeated:svg", ".svg"),
+])
+def test_an_upload_filter_that_checks_only_the_type_or_the_html_names_is_passed(filtered, technique, extension):
+    """Ported from the removed scanner_tools/file_upload_tests: a declared type check and an
+    extension list are passed the way testers pass them, and the proof stays the same."""
+    result, transport = _run("file_upload", {"method": "POST", "path": "/upload"}, _filtered(**filtered),
+                             field="file", options={"retrieve_path": "/uploads/{filename}"})
+    proof = _verified(result)[0]
+    assert proof["technique"] == technique and proof["uploaded_extension"] == extension
+    assert all(b"<script" not in item.body.lower() for item in transport.requests if item.method == "POST")
 
 
 def test_upload_needs_a_retrieve_path_with_the_file_name():
