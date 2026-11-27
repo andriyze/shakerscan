@@ -81,6 +81,7 @@ def load_service_intelligence() -> tuple[dict[str, Any], Callable[..., Any]]:
         return device_advisories.match_advisories(
             [records[index] for index in sorted(selected)], cpe=cpe, product=product,
             version=version, identity_evidence_tier="network_service_fingerprint", limit=limit,
+            vendor_ranges=True,  # indexed for all; enrich_service applies the operator's choice
         )
 
     def indexed_matcher(_records, *, cpe, product, version, identity_evidence_tier=None, limit=50):
@@ -323,8 +324,13 @@ def _published_after(records: list[Mapping[str, Any]], observed: Any) -> bool:
     return False
 
 
-def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher: Callable[..., Any]) -> None:
+def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher: Callable[..., Any],
+                   sources: Mapping[str, bool] | None = None) -> None:
     """Attach separate applicability, reference and local-validation dimensions.
+
+    ``sources`` is the operator's opt-in for optional intelligence (``intel_sources``): without
+    ``vendor_declared_ranges`` an advisory matched only through its publisher's own range is left
+    out, and without ``curated_briefings`` no candidate carries or is ranked by a briefing.
 
     The retained inventory is matched against the snapshot loaded now, so a changed advisory
     bundle is applied to every listener already observed without new traffic. Each candidate
@@ -354,6 +360,8 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
             aid = str(row.get("advisory_id") or row.get("cve") or "").upper()
             if CVE_ID.fullmatch(aid):
                 by_id.setdefault(aid, []).append(row)
+    use_vendor_ranges = bool(sources and sources.get("vendor_declared_ranges"))
+    use_briefings = bool(sources and sources.get("curated_briefings"))
     found: dict[str, dict[str, Any]] = {}
     follow: dict[tuple[Any, ...], dict[str, Any]] = {}
     by_component = {item["id"]: item for item in service.get("components") or () if isinstance(item, dict) and item.get("id")}
@@ -370,6 +378,8 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
                 identity_evidence_tier="network_service_fingerprint", limit=MAX_CANDIDATES + 1,
             ):
                 aid = str(match.get("advisory_id") or "").upper()
+                if not use_vendor_ranges and any(row.get("range_source") == "cna" for row in by_id.get(aid, [])):
+                    continue
                 if CVE_ID.fullmatch(aid) and (aid not in component_matches or match.get("match_type") == "exact_cpe_version_range"):
                     component_matches[aid] = match
         not_affected: set[str] = set()
@@ -402,6 +412,8 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
                             "review_status": "not_reviewed_for_execution",
                         }
             context = _exploitation_context(by_id.get(aid, []))
+            if not use_briefings:
+                context["briefing"] = None
             newly = _published_after(by_id.get(aid, []), version_observed)
             candidate = {
                 "id": aid, "title": text(match.get("title"), 500) or aid,

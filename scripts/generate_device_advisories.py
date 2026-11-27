@@ -912,6 +912,8 @@ def self_check(output_path: str, digest: str) -> None:
                 [record], cpe=query_cpe, product=None, version=version,
                 # The generator validates advisory semantics, not network identity provenance.
                 identity_evidence_tier="signed_firmware_manifest",
+                # A vendor-declared range matches only for a caller that asks for those.
+                vendor_ranges=record.get("range_source") == VENDOR_RANGE_SOURCE,
             )
             if matches and matches[0].get("promotable"):
                 promoted = True

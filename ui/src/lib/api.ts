@@ -2660,12 +2660,18 @@ export interface AutomationSettings {
     planned_high_risk_families_fail_closed: boolean
     approval_receipts_required_for_state_changing_actions: boolean
   }
+  intelligence_sources?: {
+    curated_briefings: boolean
+    vendor_declared_ranges: boolean
+  }
 }
 
 export interface AutomationSettingsUpdate extends ScanExecutionSettingsUpdate {
   default_asm_enabled?: boolean
   default_asm_config?: Partial<AsmAutomationConfig>
   approval_receipts_required_for_state_changing_actions?: boolean
+  intel_curated_briefings?: boolean
+  intel_vendor_declared_ranges?: boolean
 }
 
 export interface AIProbeResponse {
