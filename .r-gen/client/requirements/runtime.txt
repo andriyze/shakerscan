@@ -1,0 +1,6 @@
+# The base install's runtime dependencies (client/pyproject.toml [project] dependencies).
+# It must list exactly what the package declares; scripts/release_sbom.py fails otherwise.
+# Lock: uv pip compile client/requirements/runtime.txt --python-version 3.10 --universal --generate-hashes --output-file client/requirements/runtime.lock
+fido2==2.2.1; sys_platform == "darwin" or (sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64"))
+cryptography>=48.0.1,<49; sys_platform == "darwin" and platform_machine == "x86_64"
+cryptography>=50.0.2,<52; (sys_platform == "darwin" and platform_machine != "x86_64") or (sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64"))

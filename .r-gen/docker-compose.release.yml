@@ -1,0 +1,768 @@
+# ShakerScan release runtime.
+# Used by scanner.sh in prebuilt mode and by https://install.shakerscan.com.
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:18.6-alpine3.23@sha256:885cf05d376c7cf27afef02073e6bdac3841252537f16e244fd1c1e6a7c99fb1}
+    environment:
+      POSTGRES_USER: scanner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required; run ./scanner.sh start}
+      POSTGRES_DB: scanner
+    volumes:
+      # PostgreSQL 18+ keeps each major in /var/lib/postgresql/<major>/docker.
+      - postgres-cluster:/var/lib/postgresql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scanner"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - default
+      - signer-control
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:8.10.3-alpine3.23@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3}
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required; run ./scanner.sh start}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required; run ./scanner.sh start}
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      # A large append-only file takes a while to load after an unclean stop.
+      start_period: 60s
+    restart: unless-stopped
+
+  minio:
+    profiles: ["artifacts"]
+    # Upstream quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z, no longer publicly pullable from
+    # Quay or Docker Hub (#218). Same index digest, so the same bytes, from a public mirror.
+    image: ghcr.io/teableio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-shakerscan}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-shakerscan-local-artifacts}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  minio-init:
+    profiles: ["artifacts"]
+    # Upstream quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z; same digest from a public mirror (#218).
+    image: ghcr.io/teableio/minio-mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        until mc alias set shakerscan http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"; do sleep 2; done;
+        mc mb --ignore-existing "shakerscan/$${MINIO_BUCKET}"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-shakerscan}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-shakerscan-local-artifacts}
+      MINIO_BUCKET: ${EVIDENCE_S3_BUCKET:-shakerscan-artifacts}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  # Opt-in public ingress for HTTPS-broker fleets. fleet init generates the
+  # Caddyfile with a strict route allowlist; the UI and operator API stay local.
+  fleet-gateway:
+    profiles: ["fleet-gateway"]
+    image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    ports:
+      - "${FLEET_GATEWAY_BIND_HOST:-0.0.0.0}:80:80"
+      - "${FLEET_GATEWAY_BIND_HOST:-0.0.0.0}:443:443"
+    volumes:
+      - ./.shakerscan-fleet/control/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  api-storage-init:
+    image: ${API_IMAGE:-shakerscan/shakerscan-api:latest}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ceu"]
+    command:
+      - |
+        api_uid="$${SHAKERSCAN_API_UID}"
+        api_gid="$${SHAKERSCAN_API_GID}"
+        case "$$api_uid:$$api_gid" in
+          *[!0-9:]*|:*|*:) echo "invalid API storage identity" >&2; exit 2 ;;
+        esac
+        chown "$$api_uid:$$api_gid" /results /runner-stage
+        chmod 2770 /results /runner-stage
+        find /results \
+          -path /results/model-intake-sandbox -prune -o \
+          -type d -exec chgrp "$$api_gid" {} + -exec chmod g+rws {} +
+        for secret in /results/.credential_enc.key /results/.credential_enc.key.lock; do
+          if [ -e "$$secret" ]; then chown "$$api_uid:$$api_gid" "$$secret"; fi
+        done
+        cd /app
+        python3 -c 'import os; from secret_store import initialize_storage_owner; initialize_storage_owner(int(os.environ["SHAKERSCAN_API_UID"]), int(os.environ["SHAKERSCAN_API_GID"]))'
+    environment:
+      - SHAKERSCAN_API_UID=${SHAKERSCAN_API_UID:-10002}
+      - SHAKERSCAN_API_GID=${SHAKERSCAN_API_GID:-10002}
+    volumes:
+      - ./results:/results
+      - ./.shakerscan-model-intake-runner-stage:/runner-stage
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      # chmod g+s on a directory whose group is the API's, not root's, needs FSETID; without it
+      # the kernel silently drops the setgid bit, worker-created directories stay root:root and
+      # the API cannot erase files in them.
+      - FSETID
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  api:
+    # The API/control-plane image is deliberately distinct from the worker
+    # image. It contains the checksum-pinned Docker client required to stage
+    # the fixed Model Intake Firecracker guest through the mounted socket.
+    # Workers continue to use SCANNER_IMAGE_REPO and carry no Docker client.
+    image: ${API_IMAGE:-shakerscan/shakerscan-api:latest}
+    # 10002 by default: the Model Intake sandbox runs as 10001, and the web-facing API
+    # must never share an identity with the process that parses untrusted artifacts.
+    user: "${SHAKERSCAN_API_UID:-10002}:${SHAKERSCAN_API_GID:-10002}"
+    group_add:
+      - "${SHAKERSCAN_DOCKER_GID:-0}"
+      # The API stages quarantined artifacts for the Firecracker runner, and the
+      # quarantine is readable only by the sandbox group. scanner.sh renders this as the sandbox
+      # group, or as a harmless distinct group when the sandbox group IS the socket group above:
+      # Compose rejects a group_add list with two equal entries.
+      - "${SHAKERSCAN_API_SANDBOX_GROUP_GID:-10001}"
+    # Resolve host-published services (e2e fixtures / honey targets) from inside
+    # the container on Linux CI too, matching docker-compose.yml. No-op on Docker
+    # Desktop. Without this the exact-manifest E2E cannot reach the fixtures
+    # server and ai_gate/dast/hunt/model_intake fail while fixture-free platform
+    # checks pass.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "shakerscan-fixtures.internal:host-gateway"
+    ports:
+      - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_API_PORT:-8080}:8080"
+    # An API OOM restarts this container instead of taking the host down.
+    mem_limit: ${SHAKERSCAN_API_MEMORY_LIMIT:-4g}
+    environment:
+      # Server guards (api/request_guards.py): per-class statement timeouts, heavy-read
+      # admission (429 + Retry-After), response byte budget, in-flight request ceiling.
+      - DB_STATEMENT_TIMEOUT_MS=${DB_STATEMENT_TIMEOUT_MS:-30000}
+      - SHAKERSCAN_API_READ_STATEMENT_TIMEOUT_MS=${SHAKERSCAN_API_READ_STATEMENT_TIMEOUT_MS:-5000}
+      - SHAKERSCAN_API_HEAVY_STATEMENT_TIMEOUT_MS=${SHAKERSCAN_API_HEAVY_STATEMENT_TIMEOUT_MS:-30000}
+      - SHAKERSCAN_API_EXPORT_STATEMENT_TIMEOUT_MS=${SHAKERSCAN_API_EXPORT_STATEMENT_TIMEOUT_MS:-120000}
+      - SHAKERSCAN_API_HEAVY_CONCURRENCY=${SHAKERSCAN_API_HEAVY_CONCURRENCY:-2}
+      - SHAKERSCAN_API_HEAVY_ADMISSION_WAIT_SECONDS=${SHAKERSCAN_API_HEAVY_ADMISSION_WAIT_SECONDS:-1}
+      - SHAKERSCAN_API_HEAVY_RETRY_AFTER_SECONDS=${SHAKERSCAN_API_HEAVY_RETRY_AFTER_SECONDS:-5}
+      - SHAKERSCAN_API_RESPONSE_MAX_BYTES=${SHAKERSCAN_API_RESPONSE_MAX_BYTES:-52428800}
+      - SHAKERSCAN_API_EXPORT_RESPONSE_MAX_BYTES=${SHAKERSCAN_API_EXPORT_RESPONSE_MAX_BYTES:-536870912}
+      - SHAKERSCAN_API_MAX_IN_FLIGHT_REQUESTS=${SHAKERSCAN_API_MAX_IN_FLIGHT_REQUESTS:-256}
+      - SHAKERSCAN_API_HEAVY_SEND_TIMEOUT_SECONDS=${SHAKERSCAN_API_HEAVY_SEND_TIMEOUT_SECONDS:-30}
+      - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
+      - SHAKERSCAN_NAT64_PREFIXES=${SHAKERSCAN_NAT64_PREFIXES:-}
+      - SHAKERSCAN_NETWORK_WORKER_ENABLED=${SHAKERSCAN_NETWORK_WORKER_ENABLED:-true}
+      - DEVICE_POSTURE_ENABLED=${DEVICE_POSTURE_ENABLED:-true}
+      - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+      - RESULTS_DIR=/results
+      - SCANNER_VERSION=${SCANNER_VERSION:-latest}
+      - SCANNER_EXPECTED_VERSION=${SCANNER_RELEASE_VERSION:-}
+      - GIT_COMMIT=${GIT_COMMIT:-image:latest}
+      - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}
+      - EVIDENCE_STORAGE_BACKEND=${EVIDENCE_STORAGE_BACKEND:-local}
+      - EVIDENCE_S3_ENDPOINT_URL=${EVIDENCE_S3_ENDPOINT_URL:-}
+      - EVIDENCE_S3_BUCKET=${EVIDENCE_S3_BUCKET:-}
+      - EVIDENCE_S3_REGION=${EVIDENCE_S3_REGION:-us-east-1}
+      - EVIDENCE_S3_ACCESS_KEY_ID=${EVIDENCE_S3_ACCESS_KEY_ID:-}
+      - EVIDENCE_S3_SECRET_ACCESS_KEY=${EVIDENCE_S3_SECRET_ACCESS_KEY:-}
+      - EVIDENCE_S3_SESSION_TOKEN=${EVIDENCE_S3_SESSION_TOKEN:-}
+      - EVIDENCE_S3_FORCE_PATH_STYLE=${EVIDENCE_S3_FORCE_PATH_STYLE:-}
+      - ARTIFACT_STORAGE_BACKEND=${ARTIFACT_STORAGE_BACKEND:-}
+      - ARTIFACT_STORAGE_REQUIRED=${ARTIFACT_STORAGE_REQUIRED:-false}
+      - MODEL_INTAKE_ADMISSION_TRUSTED_PUBLIC_KEYS=${MODEL_INTAKE_ADMISSION_TRUSTED_PUBLIC_KEYS:-}
+      - MODEL_INTAKE_ADMISSION_V2_TRUSTED_PUBLIC_KEYS=${MODEL_INTAKE_ADMISSION_V2_TRUSTED_PUBLIC_KEYS:-}
+      - MODEL_INTAKE_ADMISSION_V2_TRUSTED_BUILDERS=${MODEL_INTAKE_ADMISSION_V2_TRUSTED_BUILDERS:-}
+      # POST /public/check: resolver (doh or system) and optional IPinfo token for IP ownership facts.
+      - SHAKERSCAN_POSTURE_RESOLVER=${SHAKERSCAN_POSTURE_RESOLVER:-}
+      - SHAKERSCAN_POSTURE_IPINFO_TOKEN=${SHAKERSCAN_POSTURE_IPINFO_TOKEN:-}
+      - MODEL_INTAKE_SIGNER_URL=http://model-intake-signer:8091/internal/model-intake/admissions/issue
+      - SHAKERSCAN_MODEL_INTAKE_ENABLED=${SHAKERSCAN_MODEL_INTAKE_ENABLED:-true}
+      - MODEL_INTAKE_SIGNER_INTERNAL_TOKEN=${MODEL_INTAKE_SIGNER_INTERNAL_TOKEN:-}
+      - MODEL_INTAKE_OPERATOR_TOKEN=${MODEL_INTAKE_OPERATOR_TOKEN:-}
+      - MODEL_INTAKE_LOCAL_SESSION_SECRET=${MODEL_INTAKE_LOCAL_SESSION_SECRET:-}
+      - MODEL_INTAKE_OPERATOR_ROLES=${MODEL_INTAKE_OPERATOR_ROLES:-}
+      - MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON=${MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON:-}
+      - MODEL_INTAKE_RUNNER_URL=${MODEL_INTAKE_RUNNER_URL:-}
+      - MODEL_INTAKE_RUNNER_INTERNAL_TOKEN=${MODEL_INTAKE_RUNNER_INTERNAL_TOKEN:-}
+      - MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT=${MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT:-}
+      - MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES=${MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES:-137438953472}
+      - MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES=${MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES:-274877906944}
+      - MODEL_INTAKE_RUNNER_STAGE_DIR=/runner-stage
+      - ARTIFACT_S3_PREFIX=${ARTIFACT_S3_PREFIX:-scan-artifacts}
+      - ARTIFACT_RETENTION_DAYS=${ARTIFACT_RETENTION_DAYS:-}
+      - ARTIFACT_RETENTION_RESULT_DAYS=${ARTIFACT_RETENTION_RESULT_DAYS:-365}
+      - ARTIFACT_RETENTION_CHECKPOINT_DAYS=${ARTIFACT_RETENTION_CHECKPOINT_DAYS:-14}
+      - ARTIFACT_RETENTION_DIAGNOSTIC_DAYS=${ARTIFACT_RETENTION_DIAGNOSTIC_DAYS:-30}
+      - ARTIFACT_RETENTION_SCREENSHOT_DAYS=${ARTIFACT_RETENTION_SCREENSHOT_DAYS:-90}
+      - ARTIFACT_RETENTION_ATTACHMENT_DAYS=${ARTIFACT_RETENTION_ATTACHMENT_DAYS:-90}
+      - ARTIFACT_RETENTION_SWEEP_SECONDS=${ARTIFACT_RETENTION_SWEEP_SECONDS:-3600}
+      # Browser/API origin contract. Keep this in sync with docker-compose.yml.
+      - SHAKERSCAN_UI_PORT=${SHAKERSCAN_UI_PORT:-3000}
+      - SHAKERSCAN_BIND_HOST=${SHAKERSCAN_BIND_HOST:-127.0.0.1}
+      - SHAKERSCAN_AUTHENTICATED_ASSURANCE=${SHAKERSCAN_AUTHENTICATED_ASSURANCE:-0}
+      - SHAKERSCAN_PUBLIC_HOST=${SHAKERSCAN_PUBLIC_HOST:-}
+      - SHAKERSCAN_RUNTIME_DIR=${SHAKERSCAN_RUNTIME_DIR:-}
+      - SHAKERSCAN_INSTALL_KIND=${SHAKERSCAN_INSTALL_KIND:-}
+      - SHAKERSCAN_HOST_PLATFORM=${SHAKERSCAN_HOST_PLATFORM:-unknown}
+      - SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT=${SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT:-}
+      - SHAKERSCAN_CORS_ALLOW_ORIGINS=${SHAKERSCAN_CORS_ALLOW_ORIGINS:-}
+      - SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX=${SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX:-}
+      - SHAKERSCAN_ALLOWED_HOSTS=${SHAKERSCAN_ALLOWED_HOSTS:-}
+      - SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=${SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR:-}
+      - SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES=${SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES:-}
+      - FLEET_OVERLAY_CIDR=${FLEET_OVERLAY_CIDR:-}
+      - FLEET_CONTROL_PLANE_OVERLAY_URL=${FLEET_CONTROL_PLANE_OVERLAY_URL:-}
+      - FLEET_WIREGUARD_PUBLIC_KEY=${FLEET_WIREGUARD_PUBLIC_KEY:-}
+      - FLEET_WIREGUARD_ENDPOINT=${FLEET_WIREGUARD_ENDPOINT:-}
+      - FLEET_WORKER_IMAGE_DIGEST=${FLEET_WORKER_IMAGE_DIGEST:-}
+      - FLEET_DESIRED_WORKER_COUNT=${FLEET_DESIRED_WORKER_COUNT:-1}
+      - FLEET_HEARTBEAT_TIMEOUT_SECONDS=${FLEET_HEARTBEAT_TIMEOUT_SECONDS:-300}
+      - FLEET_ALLOW_INSECURE_ENROLLMENT=${FLEET_ALLOW_INSECURE_ENROLLMENT:-false}
+      - FLEET_RECONCILE_MODE=${FLEET_RECONCILE_MODE:-systemd}
+      - FLEET_OPERATOR_TOKEN=${FLEET_OPERATOR_TOKEN:-}
+      - FLEET_GATEWAY_PROXY_SECRET=${FLEET_GATEWAY_PROXY_SECRET:-}
+      - FLEET_JOIN_RATE_LIMIT_PER_MINUTE=${FLEET_JOIN_RATE_LIMIT_PER_MINUTE:-30}
+      - FLEET_CONNECTION_BUNDLE_JSON=${FLEET_CONNECTION_BUNDLE_JSON:-}
+      - FLEET_CONNECTION_BUNDLE_PATH=${FLEET_CONNECTION_BUNDLE_PATH:-}
+      - FLEET_CA_CERT_PATH=/run/shakerscan-fleet/control/ca.crt
+      - AI_URL=${AI_URL:-}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-}
+      - AI_FALLBACK_MODEL=${AI_FALLBACK_MODEL:-}
+      - AI_MASK_HOST=${AI_MASK_HOST:-example.com}
+      - AI_SCAN_CLASSIFICATION_ENABLED=${AI_SCAN_CLASSIFICATION_ENABLED:-false}
+      - AI_CLASSIFY_MIN_SEVERITY=${AI_CLASSIFY_MIN_SEVERITY:-}
+      - AI_CLASSIFY_CHAIN_BUDGET_SECONDS=${AI_CLASSIFY_CHAIN_BUDGET_SECONDS:-120}
+      - AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS=${AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS:-300}
+      - AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD=${AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD:-5}
+      - AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS=${AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS:-180}
+      - AI_VERIFY_ENABLED=${AI_VERIFY_ENABLED:-false}
+      - AI_VERIFY_MIN_SEVERITY=${AI_VERIFY_MIN_SEVERITY:-high}
+      - AUTO_RETEST_ON_SCAN_COMPLETE=${AUTO_RETEST_ON_SCAN_COMPLETE:-true}
+      - AUTO_RETEST_MIN_SEVERITY=${AUTO_RETEST_MIN_SEVERITY:-medium}
+      - AUTO_RETEST_MAX_PER_SCAN=${AUTO_RETEST_MAX_PER_SCAN:-25}
+      - AI_DEMO_MODE_ENABLED=${AI_DEMO_MODE_ENABLED:-false}
+      - AI_DEMO_HONEY_PUBLIC_URL=${AI_DEMO_HONEY_PUBLIC_URL:-}
+      - AI_DEMO_HONEY_SCANNER_URL=${AI_DEMO_HONEY_SCANNER_URL:-}
+      - AI_OPS_ROUTER_EXECUTE_ENABLED=${AI_OPS_ROUTER_EXECUTE_ENABLED:-true}
+      - RETEST_AI_BUDGET_SECONDS=${RETEST_AI_BUDGET_SECONDS:-120}
+      - RETEST_AI_CIRCUIT_WINDOW_SECONDS=${RETEST_AI_CIRCUIT_WINDOW_SECONDS:-300}
+      - RETEST_AI_CIRCUIT_ERROR_THRESHOLD=${RETEST_AI_CIRCUIT_ERROR_THRESHOLD:-5}
+      - RETEST_AI_CIRCUIT_COOLDOWN_SECONDS=${RETEST_AI_CIRCUIT_COOLDOWN_SECONDS:-180}
+      - RETEST_STALE_CHECK_INTERVAL_SECONDS=${RETEST_STALE_CHECK_INTERVAL_SECONDS:-30}
+      - SHAKERSCAN_TRAFFIC_ATTRIBUTION=${SHAKERSCAN_TRAFFIC_ATTRIBUTION:-}
+      - SHAKERSCAN_TRAFFIC_USER_AGENT_TOKEN=${SHAKERSCAN_TRAFFIC_USER_AGENT_TOKEN:-}
+      - SHAKERSCAN_HUNT_IDLE_EXPIRY_HOURS=${SHAKERSCAN_HUNT_IDLE_EXPIRY_HOURS:-}
+      - SHAKERSCAN_HUNT_DEFAULT_CREDENTIALS=${SHAKERSCAN_HUNT_DEFAULT_CREDENTIALS:-true}
+      - RETEST_RUNNING_STALE_SECONDS=${RETEST_RUNNING_STALE_SECONDS:-600}
+      - RETEST_STALE_BATCH_SIZE=${RETEST_STALE_BATCH_SIZE:-25}
+      - RETEST_STALE_REQUEUE_LIMIT=${RETEST_STALE_REQUEUE_LIMIT:-1}
+    volumes:
+      - ./results:/results
+      - ./:/workspace:ro
+      - ./.shakerscan-model-intake-runner-stage:/runner-stage
+      - ./.shakerscan-fleet:/run/shakerscan-fleet:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["python3", "/app/api.py"]
+    depends_on:
+      api-storage-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - default
+      - signer-control
+
+  model-intake-signer-db-init:
+    profiles: ["model-intake"]
+    image: ${MODEL_INTAKE_SIGNER_POSTGRES_IMAGE:-postgres:18.6-alpine3.23@sha256:885cf05d376c7cf27afef02073e6bdac3841252537f16e244fd1c1e6a7c99fb1}
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - MODEL_INTAKE_SIGNER_DATABASE_PASSWORD=${MODEL_INTAKE_SIGNER_DATABASE_PASSWORD:?MODEL_INTAKE_SIGNER_DATABASE_PASSWORD is required; run ./scanner.sh start}
+    volumes:
+      - ./db/configure-model-intake-signer-role.sh:/configure-model-intake-signer-role.sh:ro
+    command: ["/bin/sh", "/configure-model-intake-signer-role.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - signer-control
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  model-intake-signer:
+    profiles: ["model-intake"]
+    image: ${SIGNER_IMAGE:-shakerscan/shakerscan-model-intake-signer:latest}
+    environment:
+      - DATABASE_URL=postgresql://model_intake_signer:${MODEL_INTAKE_SIGNER_DATABASE_PASSWORD:?MODEL_INTAKE_SIGNER_DATABASE_PASSWORD is required}@postgres:5432/scanner
+      - MODEL_INTAKE_SIGNER_INTERNAL_TOKEN=${MODEL_INTAKE_SIGNER_INTERNAL_TOKEN:-}
+      - MODEL_INTAKE_SIGNER_BACKEND=${MODEL_INTAKE_SIGNER_BACKEND:-}
+      - MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID=${MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID:-}
+      - MODEL_INTAKE_SIGNER_AWS_REGION=${MODEL_INTAKE_SIGNER_AWS_REGION:-}
+      - MODEL_INTAKE_SIGNER_ALLOW_LOCAL_PEM=${MODEL_INTAKE_SIGNER_ALLOW_LOCAL_PEM:-false}
+      - MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM=${MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM:-}
+      - MODEL_INTAKE_ADMISSION_BUILDER_ID=${MODEL_INTAKE_ADMISSION_BUILDER_ID:-https://shakerscan.dev/builders/model-admission/v2}
+    command: ["uvicorn", "model_intake_signer_service:app", "--host", "0.0.0.0", "--port", "8091"]
+    depends_on:
+      model-intake-signer-db-init:
+        condition: service_completed_successfully
+    networks:
+      - signer-control
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  fleet-edge:
+    profiles: ["fleet"]
+    network_mode: host
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
+    environment:
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}/scanner
+      - RESULTS_DIR=/results
+      - FLEET_EDGE_MODE=true
+      - SHAKERSCAN_BIND_HOST=${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}
+      - FLEET_OVERLAY_CIDR=${FLEET_OVERLAY_CIDR:-}
+      - FLEET_CONTROL_PLANE_OVERLAY_URL=${FLEET_CONTROL_PLANE_OVERLAY_URL:-}
+      - FLEET_WIREGUARD_PUBLIC_KEY=${FLEET_WIREGUARD_PUBLIC_KEY:-}
+      - FLEET_WIREGUARD_ENDPOINT=${FLEET_WIREGUARD_ENDPOINT:-}
+      - FLEET_WORKER_IMAGE_DIGEST=${FLEET_WORKER_IMAGE_DIGEST:-}
+      - FLEET_DESIRED_WORKER_COUNT=${FLEET_DESIRED_WORKER_COUNT:-1}
+      - FLEET_HEARTBEAT_TIMEOUT_SECONDS=${FLEET_HEARTBEAT_TIMEOUT_SECONDS:-300}
+      - FLEET_ALLOW_INSECURE_ENROLLMENT=false
+      - FLEET_RECONCILE_MODE=${FLEET_RECONCILE_MODE:-systemd}
+      - FLEET_OPERATOR_TOKEN=${FLEET_OPERATOR_TOKEN:-}
+      - MODEL_INTAKE_OPERATOR_TOKEN=${MODEL_INTAKE_OPERATOR_TOKEN:-}
+      - MODEL_INTAKE_OPERATOR_ROLES=${MODEL_INTAKE_OPERATOR_ROLES:-}
+      - MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON=${MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON:-}
+      - FLEET_GATEWAY_PROXY_SECRET=${FLEET_GATEWAY_PROXY_SECRET:-}
+      - FLEET_JOIN_RATE_LIMIT_PER_MINUTE=${FLEET_JOIN_RATE_LIMIT_PER_MINUTE:-30}
+      - FLEET_CONNECTION_BUNDLE_JSON=${FLEET_CONNECTION_BUNDLE_JSON:-}
+      - FLEET_CONNECTION_BUNDLE_PATH=${FLEET_CONNECTION_BUNDLE_PATH:-}
+      - FLEET_CA_CERT_PATH=/run/shakerscan-fleet/control/ca.crt
+      - EVIDENCE_STORAGE_BACKEND=${EVIDENCE_STORAGE_BACKEND:-local}
+      - EVIDENCE_S3_ENDPOINT_URL=${EVIDENCE_S3_ENDPOINT_URL:-}
+      - EVIDENCE_S3_BUCKET=${EVIDENCE_S3_BUCKET:-}
+      - EVIDENCE_S3_REGION=${EVIDENCE_S3_REGION:-us-east-1}
+      - EVIDENCE_S3_ACCESS_KEY_ID=${EVIDENCE_S3_ACCESS_KEY_ID:-}
+      - EVIDENCE_S3_SECRET_ACCESS_KEY=${EVIDENCE_S3_SECRET_ACCESS_KEY:-}
+      - EVIDENCE_S3_SESSION_TOKEN=${EVIDENCE_S3_SESSION_TOKEN:-}
+      - EVIDENCE_S3_FORCE_PATH_STYLE=${EVIDENCE_S3_FORCE_PATH_STYLE:-}
+      - ARTIFACT_STORAGE_BACKEND=${ARTIFACT_STORAGE_BACKEND:-}
+      - ARTIFACT_STORAGE_REQUIRED=${ARTIFACT_STORAGE_REQUIRED:-false}
+      - ARTIFACT_S3_PREFIX=${ARTIFACT_S3_PREFIX:-scan-artifacts}
+    volumes:
+      - ./results:/results
+      - ./.shakerscan-fleet:/run/shakerscan-fleet:ro
+    command:
+      - uvicorn
+      - api:app
+      - --host
+      - ${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}
+      - --port
+      - ${FLEET_TLS_PORT:-8443}
+      - --ssl-keyfile
+      - /run/shakerscan-fleet/control/server.key
+      - --ssl-certfile
+      - /run/shakerscan-fleet/control/server.crt
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    init: true
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "shakerscan-fixtures.internal:host-gateway"
+    environment:
+      - SHAKERSCAN_HEAVY_SCANNER_SLOTS=${SHAKERSCAN_HEAVY_SCANNER_SLOTS:-}
+      - SHAKERSCAN_TRAFFIC_ATTRIBUTION=${SHAKERSCAN_TRAFFIC_ATTRIBUTION:-}
+      - SHAKERSCAN_TRAFFIC_USER_AGENT_TOKEN=${SHAKERSCAN_TRAFFIC_USER_AGENT_TOKEN:-}
+      - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
+      - SHAKERSCAN_NAT64_PREFIXES=${SHAKERSCAN_NAT64_PREFIXES:-}
+      - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
+      # Optional subfinder provider keys (docs/functionality-reference.md, section 10); never logged.
+      - SHAKERSCAN_SUBFINDER_PROVIDERS=${SHAKERSCAN_SUBFINDER_PROVIDERS:-}
+      - SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG=${SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG:-}
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+      - RESULTS_DIR=/results
+      - MODEL_INTAKE_SANDBOX_UID=${MODEL_INTAKE_SANDBOX_UID:-10001}
+      - MODEL_INTAKE_SANDBOX_GID=${MODEL_INTAKE_SANDBOX_GID:-10001}
+      - SCANNER_VERSION=${SCANNER_VERSION:-latest}
+      - SCANNER_EXPECTED_VERSION=${SCANNER_RELEASE_VERSION:-}
+      - GIT_COMMIT=${GIT_COMMIT:-image:latest}
+      - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}
+      - SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS=${SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS:-300}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS:-30}
+      - SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS=${SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS:-5}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT:-3}
+      - EVIDENCE_STORAGE_BACKEND=${EVIDENCE_STORAGE_BACKEND:-local}
+      - EVIDENCE_S3_ENDPOINT_URL=${EVIDENCE_S3_ENDPOINT_URL:-}
+      - EVIDENCE_S3_BUCKET=${EVIDENCE_S3_BUCKET:-}
+      - EVIDENCE_S3_REGION=${EVIDENCE_S3_REGION:-us-east-1}
+      - EVIDENCE_S3_ACCESS_KEY_ID=${EVIDENCE_S3_ACCESS_KEY_ID:-}
+      - EVIDENCE_S3_SECRET_ACCESS_KEY=${EVIDENCE_S3_SECRET_ACCESS_KEY:-}
+      - EVIDENCE_S3_SESSION_TOKEN=${EVIDENCE_S3_SESSION_TOKEN:-}
+      - EVIDENCE_S3_FORCE_PATH_STYLE=${EVIDENCE_S3_FORCE_PATH_STYLE:-}
+      - ARTIFACT_STORAGE_BACKEND=${ARTIFACT_STORAGE_BACKEND:-}
+      - ARTIFACT_STORAGE_REQUIRED=${ARTIFACT_STORAGE_REQUIRED:-false}
+      - ARTIFACT_S3_PREFIX=${ARTIFACT_S3_PREFIX:-scan-artifacts}
+      - ARTIFACT_RETENTION_DAYS=${ARTIFACT_RETENTION_DAYS:-}
+      - ARTIFACT_RETENTION_RESULT_DAYS=${ARTIFACT_RETENTION_RESULT_DAYS:-365}
+      - ARTIFACT_RETENTION_CHECKPOINT_DAYS=${ARTIFACT_RETENTION_CHECKPOINT_DAYS:-14}
+      - ARTIFACT_RETENTION_DIAGNOSTIC_DAYS=${ARTIFACT_RETENTION_DIAGNOSTIC_DAYS:-30}
+      - ARTIFACT_RETENTION_SCREENSHOT_DAYS=${ARTIFACT_RETENTION_SCREENSHOT_DAYS:-90}
+      - ARTIFACT_RETENTION_ATTACHMENT_DAYS=${ARTIFACT_RETENTION_ATTACHMENT_DAYS:-90}
+      - AI_URL=${AI_URL:-}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-}
+      - AI_FALLBACK_MODEL=${AI_FALLBACK_MODEL:-}
+      - AI_MASK_HOST=${AI_MASK_HOST:-example.com}
+      - AI_SCAN_CLASSIFICATION_ENABLED=${AI_SCAN_CLASSIFICATION_ENABLED:-false}
+      - AI_CLASSIFY_MIN_SEVERITY=${AI_CLASSIFY_MIN_SEVERITY:-}
+      - AI_CLASSIFY_CHAIN_BUDGET_SECONDS=${AI_CLASSIFY_CHAIN_BUDGET_SECONDS:-120}
+      - AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS=${AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS:-300}
+      - AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD=${AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD:-5}
+      - AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS=${AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS:-180}
+      - AI_VERIFY_ENABLED=${AI_VERIFY_ENABLED:-false}
+      - AI_VERIFY_MIN_SEVERITY=${AI_VERIFY_MIN_SEVERITY:-high}
+      - AUTO_RETEST_ON_SCAN_COMPLETE=${AUTO_RETEST_ON_SCAN_COMPLETE:-true}
+      - AUTO_RETEST_MIN_SEVERITY=${AUTO_RETEST_MIN_SEVERITY:-medium}
+      - AUTO_RETEST_MAX_PER_SCAN=${AUTO_RETEST_MAX_PER_SCAN:-25}
+      - AI_DEMO_MODE_ENABLED=${AI_DEMO_MODE_ENABLED:-false}
+      - AI_DEMO_HONEY_PUBLIC_URL=${AI_DEMO_HONEY_PUBLIC_URL:-}
+      - AI_DEMO_HONEY_SCANNER_URL=${AI_DEMO_HONEY_SCANNER_URL:-}
+      - RETEST_AI_BUDGET_SECONDS=${RETEST_AI_BUDGET_SECONDS:-120}
+      - RETEST_AI_CIRCUIT_WINDOW_SECONDS=${RETEST_AI_CIRCUIT_WINDOW_SECONDS:-300}
+      - RETEST_AI_CIRCUIT_ERROR_THRESHOLD=${RETEST_AI_CIRCUIT_ERROR_THRESHOLD:-5}
+      - RETEST_AI_CIRCUIT_COOLDOWN_SECONDS=${RETEST_AI_CIRCUIT_COOLDOWN_SECONDS:-180}
+      - RETEST_STALE_CHECK_INTERVAL_SECONDS=${RETEST_STALE_CHECK_INTERVAL_SECONDS:-30}
+      - RETEST_RUNNING_STALE_SECONDS=${RETEST_RUNNING_STALE_SECONDS:-600}
+      - RETEST_STALE_BATCH_SIZE=${RETEST_STALE_BATCH_SIZE:-25}
+      - RETEST_STALE_REQUEUE_LIMIT=${RETEST_STALE_REQUEUE_LIMIT:-1}
+    volumes:
+      - ./results:/results
+    command: ["python3", "/app/worker.py"]
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  agent-tool-worker:
+    init: true
+    hostname: shakerscan-agent-tool-worker
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "shakerscan-fixtures.internal:host-gateway"
+    environment:
+      - SHAKERSCAN_HEAVY_SCANNER_SLOTS=${SHAKERSCAN_HEAVY_SCANNER_SLOTS:-}
+      - SHAKERSCAN_TRAFFIC_ATTRIBUTION=${SHAKERSCAN_TRAFFIC_ATTRIBUTION:-}
+      - SHAKERSCAN_TRAFFIC_USER_AGENT_TOKEN=${SHAKERSCAN_TRAFFIC_USER_AGENT_TOKEN:-}
+      - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
+      - SHAKERSCAN_NAT64_PREFIXES=${SHAKERSCAN_NAT64_PREFIXES:-}
+      - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
+      # Optional subfinder provider keys (docs/functionality-reference.md, section 10); never logged.
+      - SHAKERSCAN_SUBFINDER_PROVIDERS=${SHAKERSCAN_SUBFINDER_PROVIDERS:-}
+      - SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG=${SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG:-}
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+      - RESULTS_DIR=/results
+      - SCANNER_VERSION=${SCANNER_VERSION:-latest}
+      - SCANNER_EXPECTED_VERSION=${SCANNER_RELEASE_VERSION:-}
+      - GIT_COMMIT=${GIT_COMMIT:-image:latest}
+      - AGENT_TOOL_ONLY_WORKER=true
+      - AGENT_TOOL_QUEUE_NAME=${AGENT_TOOL_QUEUE_NAME:-agent_tool_jobs}
+      - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}
+      - SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS=${SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS:-300}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS:-30}
+      - SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS=${SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS:-5}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT:-3}
+    volumes:
+      - ./results:/results
+    command: ["python3", "/app/worker.py"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Model Intake artifact scanning runs its own toolchain in a dedicated worker, isolated from Web
+  # DAST slots. On the scanner image for now; the Model Intake image split points this at
+  # ${MODEL_INTAKE_IMAGE}.
+  model-intake-worker:
+    profiles: ["model-intake"]
+    init: true
+    hostname: shakerscan-model-intake-worker
+    image: ${MODEL_INTAKE_IMAGE:-shakerscan/shakerscan-model-intake:latest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "shakerscan-fixtures.internal:host-gateway"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+      - RESULTS_DIR=/results
+      - SCANNER_VERSION=${SCANNER_VERSION:-latest}
+      - SCANNER_EXPECTED_VERSION=${SCANNER_RELEASE_VERSION:-}
+      - GIT_COMMIT=${GIT_COMMIT:-image:latest}
+      - MODEL_INTAKE_ONLY_WORKER=true
+      - MODEL_INTAKE_SANDBOX_UID=${MODEL_INTAKE_SANDBOX_UID:-10001}
+      - MODEL_INTAKE_SANDBOX_GID=${MODEL_INTAKE_SANDBOX_GID:-10001}
+      - MODEL_INTAKE_QUEUE_NAME=${MODEL_INTAKE_QUEUE_NAME:-model_intake_jobs}
+      - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}
+      - SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS=${SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS:-300}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS:-30}
+      - SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS=${SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS:-5}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT:-3}
+    volumes:
+      - ./results:/results
+    command: ["python3", "/app/worker.py"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Opt-in connected-device capacity. It uses a separate queue and health
+  # registry so enabling it cannot change Web DAST fleet freshness or slots.
+  device-worker:
+    profiles: ["devices"]
+    init: true
+    hostname: shakerscan-device-worker
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "shakerscan-fixtures.internal:host-gateway"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+      - RESULTS_DIR=/results
+      - SCANNER_VERSION=${SCANNER_VERSION:-latest}
+      - SCANNER_EXPECTED_VERSION=${SCANNER_RELEASE_VERSION:-}
+      - GIT_COMMIT=${GIT_COMMIT:-image:latest}
+      - DEVICE_ONLY_WORKER=true
+      - DEVICE_POSTURE_ENABLED=${DEVICE_POSTURE_ENABLED:-true}
+      - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
+      - SHAKERSCAN_NAT64_PREFIXES=${SHAKERSCAN_NAT64_PREFIXES:-}
+      - DEVICE_QUEUE_NAME=${DEVICE_QUEUE_NAME:-device_scan_jobs}
+      - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}
+      - SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS=${SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS:-1800}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS:-30}
+      - SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS=${SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS:-5}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT:-3}
+      - AUTO_RETEST_ON_SCAN_COMPLETE=false
+      - EVIDENCE_STORAGE_BACKEND=${EVIDENCE_STORAGE_BACKEND:-local}
+      - EVIDENCE_S3_ENDPOINT_URL=${EVIDENCE_S3_ENDPOINT_URL:-}
+      - EVIDENCE_S3_BUCKET=${EVIDENCE_S3_BUCKET:-}
+      - EVIDENCE_S3_REGION=${EVIDENCE_S3_REGION:-us-east-1}
+      - EVIDENCE_S3_ACCESS_KEY_ID=${EVIDENCE_S3_ACCESS_KEY_ID:-}
+      - EVIDENCE_S3_SECRET_ACCESS_KEY=${EVIDENCE_S3_SECRET_ACCESS_KEY:-}
+      - EVIDENCE_S3_SESSION_TOKEN=${EVIDENCE_S3_SESSION_TOKEN:-}
+      - EVIDENCE_S3_FORCE_PATH_STYLE=${EVIDENCE_S3_FORCE_PATH_STYLE:-}
+      - ARTIFACT_STORAGE_BACKEND=${ARTIFACT_STORAGE_BACKEND:-}
+      - ARTIFACT_STORAGE_REQUIRED=${ARTIFACT_STORAGE_REQUIRED:-false}
+      - ARTIFACT_S3_PREFIX=${ARTIFACT_S3_PREFIX:-scan-artifacts}
+    volumes:
+      - ./results:/results
+    command: ["python3", "/app/worker.py"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  model-intake-sandbox:
+    profiles: ["model-intake"]
+    init: true
+    image: ${MODEL_INTAKE_IMAGE:-shakerscan/shakerscan-model-intake:latest}
+    user: "${MODEL_INTAKE_SANDBOX_UID:-10001}:${MODEL_INTAKE_SANDBOX_GID:-10001}"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MODEL_INTAKE_SANDBOX_NETWORK_MODE=none
+      - MODEL_INTAKE_SANDBOX_READ_ONLY=1
+      - MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES=1
+      - MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON=${MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON:-}
+      - MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS=${MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS:-90}
+      - HOME=/tmp
+    volumes:
+      - ./results/model-intake-quarantine:/results/model-intake-quarantine:ro
+      - ./results/model-intake-sandbox:/results/model-intake-sandbox
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=256m
+    command: ["python3", "/app/scanner_tools/model_intake_sandbox.py", "--serve"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+          pids: 64
+    restart: unless-stopped
+
+  gungnir-worker:
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
+    environment:
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+    command: ["python3", "/app/gungnir_worker.py"]
+    profiles:
+      - gungnir
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  ui:
+    image: ${UI_IMAGE:-shakerscan/shakerscan-ui:latest}
+    ports:
+      - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_UI_PORT:-3000}:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=${SHAKERSCAN_PUBLIC_API_URL:-}
+      - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-latest}
+      - MODEL_INTAKE_LOCAL_SESSION_SECRET=${MODEL_INTAKE_LOCAL_SESSION_SECRET:-}
+      - SHAKERSCAN_README_PATH=/docs/README.md
+    volumes:
+      - ./README.md:/docs/README.md:ro
+    depends_on:
+      - api
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  postgres-cluster:
+  redis-data:
+  minio-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  signer-control:
+    internal: true

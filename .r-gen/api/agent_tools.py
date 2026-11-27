@@ -1,0 +1,2922 @@
+"""Tool guards kept from the retired autonomous ReAct loop.
+
+Canonical Hunt planners receive semantic capability contracts from the shared registry. What
+remains here serves fixed adapter construction; it is not a planner-facing capability catalog.
+This module holds the **pure guards**: target-host origin/path validation,
+request-header allowlisting (so the model can never inject an auth header — real auth
+comes only from a server-resolved ``as_principal``), method classification, and result
+shaping. The async execution (httpx, DB, tool_receipts, principal resolution) lives in
+api.py, which owns those dependencies; this layer stays dependency-free and host-testable.
+
+Containment is enforced in code, before every handler (borrow T3MP3ST ``execute()``):
+scope (same target host) and approval (write methods are gated) are checked server-side, never
+left to the model.
+"""
+from __future__ import annotations
+
+import hashlib
+import base64
+import binascii
+import json
+import ipaddress
+import math
+import os
+import re
+import urllib.parse
+from typing import Any, Mapping, Optional, Sequence
+
+from runtime.auth_refusal import BASELINE_RECORD_KIND, is_login_location
+from runtime.capability_registry import CAPABILITY_REGISTRY
+from runtime.hunt_scanner_contract import SCANNER_HEADER_MARKERS, hunt_body_input
+from runtime.product_templates import product_hold, product_request, resolve_product_window
+from runtime.request_shape import (
+    json_field_leaf_name, nested_json_body, public_request_body_shape,
+)
+from scan.negative_control import is_negative_control_url
+from scan.auth_endpoint_probe import AUTH_ENDPOINT_PROBE_PROFILE, AUTH_ENDPOINT_SECONDS_PER_REQUEST
+from scan.external_process import (
+    BATCH_ATTEMPT_FLOORS,
+    BATCH_ATTEMPT_REQUEST_HEADROOM,
+    EnforcedProcessPlan,
+    ExternalProcessContractError,
+    MAXIMUM_MEASURED_LATENCY_SECONDS,
+    PROCESS_BUDGET_PROOF_SCHEMA,
+    paced_request_delay,
+)
+from scan.work_manifests import (
+    CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
+    canonical_passive_nuclei_template_pack_digest,
+    canonical_passive_nuclei_request_upper_bound,
+)
+from target_address_policy import MAX_FROZEN_ADDRESSES, primary_frozen_address
+
+try:
+    from scanner_tools.url_redaction import redact_client_route, redact_url
+    from scanner_tools.unsafe_actions import navigation_exclusion_expression
+    from scanner_tools import traffic_attribution
+except ModuleNotFoundError:  # package import in host-side tests
+    from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
+    from scanner.scanner_tools.unsafe_actions import navigation_exclusion_expression
+    from scanner.scanner_tools import traffic_attribution
+
+# Methods the model may request. Reads are read-only; writes are credential/active-gated.
+READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
+WRITE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+ALL_METHODS: frozenset[str] = READ_METHODS | WRITE_METHODS
+
+# Headers the planner may never set, whatever the operator authorizes, because real auth
+# comes only from a server-resolved principal (as_principal). Letting a planner supply one
+# would put a credential outside the credential store and outside the evidence chain.
+_CREDENTIAL_HEADERS: frozenset[str] = frozenset(
+    {"authorization", "cookie", "proxy-authorization"}
+)
+# Message framing and routing owned by the executor. A planner-set value here does not test
+# anything; it produces a malformed or misrouted request. Deliberate framing manipulation is
+# request smuggling, which belongs to its own raw single-connection capability with its own
+# approval, not to a header field on a normal request.
+_TRANSPORT_HEADERS: frozenset[str] = frozenset(
+    {
+        "host", "content-length", "connection", "transfer-encoding",
+        "keep-alive", "te", "trailer", "upgrade",
+        # These alter the effective route or method while the canonical receipt continues
+        # to describe the bound path/method. They require a dedicated capability and proof
+        # contract rather than a normal request header, even with identity-forgery approval.
+        "x-original-url", "x-rewrite-url", "x-http-method-override",
+        "x-http-method", "x-method-override",
+    }
+)
+# Headers that assert who the client is. Forging one is a legitimate and important test --
+# an origin that trusts them while reachable outside its edge is exploitable -- but it is
+# also identity forgery, so it requires explicit operator authority rather than being
+# available by default.
+#
+# The Cloudflare and Akamai names belong here for the same reason as X-Forwarded-For. They
+# were previously absent, so the two headers an origin behind a major edge is most likely to
+# trust were the two a planner could always set.
+IDENTITY_HEADERS: frozenset[str] = frozenset(
+    {
+        "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded",
+        "cf-connecting-ip", "true-client-ip", "x-client-ip", "x-originating-ip",
+        "x-cluster-client-ip", "x-remote-addr", "x-remote-ip",
+        "client-ip", "x-forwarded", "fastly-client-ip", "x-azure-clientip",
+    }
+)
+_FORBIDDEN_HEADERS: frozenset[str] = (
+    _CREDENTIAL_HEADERS | _TRANSPORT_HEADERS | IDENTITY_HEADERS
+)
+_SENSITIVE_HEADER_SUBSTR: tuple[str, ...] = (
+    "token", "secret", "auth", "session", "cookie", "password", "api-key", "apikey",
+    "api_key", "access-key", "access_key", "private-key", "private_key",
+    "signing-key", "signing_key", "client-key", "client_key", "credential", "bearer",
+)
+
+# query_kb read-only surfaces (each maps to a bounded SELECT in api.py).
+QUERY_KB_KINDS: frozenset[str] = frozenset(
+    {
+        "endpoints", "findings", "hypotheses", "principals",
+        "graph_nodes", "graph_edges", "tool_receipts", "notes",
+    }
+)
+
+NOTE_KINDS: frozenset[str] = frozenset({"hypothesis", "observation", "todo"})
+
+AGENT_TOOL_NAMES: frozenset[str] = frozenset({"http_request", "query_kb", "diff", "note"})
+# The retired loop must never regain external scanner selection. Canonical Hunt exposes registry
+# names such as ``web.probe`` and ``sqli.verify`` through ``/hunts/*/capabilities/*``.
+CALLABLE_TOOL_NAMES: frozenset[str] = AGENT_TOOL_NAMES
+
+
+# --------------------------------------------------------------------------------------
+# Function-call schemas (shape expected by render_tool_contract / native tool APIs).
+# The optional ``risk`` field is used by the server gate, ignored by the renderer.
+# --------------------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------------------
+# run_tool — external scanners via hardcoded argv templates (port of T3MP3ST
+# adapter-tools.ts ARG_TEMPLATES). The LLM picks tool + target ONLY; every flag is baked
+# into build(); only regex-gated tunables are read by name. No arbitrary shell.
+# --------------------------------------------------------------------------------------
+
+_SEV_RE = re.compile(r"^(critical|high|medium|low|info)(,(critical|high|medium|low|info))*$")
+_TAGS_RE = re.compile(r"^[a-z0-9][a-z0-9,\-]{0,80}$")
+_CANONICAL_PASSIVE_NUCLEI_IDS = ",".join(sorted(
+    row[0] for row in CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+))
+# nmap -oN - human output: one row per scanned port, e.g. "8443/tcp open  https  nginx 1.25.3".
+_NMAP_SERVICE_LINE_RE = re.compile(r"^(\d{1,5}/(?:tcp|udp))\s+(\S+)\s+(\S+)(?:\s+(.*\S))?\s*$")
+_NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
+# One server-resolved active Nuclei template id. The ids come from the pinned,
+# checksum-verified bundle via scan/nuclei_template_index.py, so this only bounds
+# pathological values defensively before they reach the -id argv.
+_ACTIVE_NUCLEI_TEMPLATE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+_MAX_ACTIVE_NUCLEI_TEMPLATE_IDS = 4_000
+_MAX_ACTIVE_NUCLEI_ALLOWLIST_BYTES = 200_000
+
+
+def _validate_active_nuclei_allowlist(template_ids: str) -> None:
+    """Fail closed on a malformed active Nuclei template id list before argv build."""
+    if len(template_ids) > _MAX_ACTIVE_NUCLEI_ALLOWLIST_BYTES:
+        raise AgentToolError("nuclei active template allowlist is too large")
+    ids = [item for item in template_ids.split(",") if item]
+    if not ids or len(ids) > _MAX_ACTIVE_NUCLEI_TEMPLATE_IDS:
+        raise AgentToolError("nuclei active template allowlist is invalid")
+    for template_id in ids:
+        if not _ACTIVE_NUCLEI_TEMPLATE_ID_RE.match(template_id):
+            raise AgentToolError("nuclei active template id is invalid")
+
+
+def _apply_nuclei_state_changing_hard_budget(
+    hard: dict[str, int],
+    proof_inputs: dict[str, Any],
+    options: Mapping[str, Any],
+    reservation: Mapping[str, int],
+    http: int,
+) -> None:
+    """Add the state-changing wire ceiling to an active Nuclei plan, when it applies.
+
+    The active selection includes non-GET templates only when state-changing HTTP
+    is authorized; the adapter binds the reservation's state-changing hold to its
+    HTTP hold. Conservatively every request the run sends may be a mutation, so the
+    hard ceiling for the dimension equals the HTTP ceiling. The dimension is absent
+    (never reserved, never charged) when the run is GET-only.
+    """
+    if not options.get("nuclei_active_state_changing"):
+        return
+    reserved_state_changing = int(reservation.get("state_changing_requests") or 0)
+    if reserved_state_changing <= 0:
+        return
+    hard["state_changing_requests"] = min(reserved_state_changing, int(http))
+    proof_inputs["state_changing_requests_upper_bound"] = hard["state_changing_requests"]
+    proof_inputs["may_send_non_get_methods"] = True
+
+
+# Minimum reservation an external verifier needs to run its fixed conservative
+# profile. Declared once so the enforcement, the error message, and the tests
+# cannot drift apart; the batch-attempt path reserves per candidate instead and
+# is deliberately not bound by these.
+# The reviewed katana crawl rate. The argv template documents 5 requests per
+# second; the enforced plan may go up to it but never past the reservation.
+_KATANA_MAX_RATE_PER_SECOND = 5
+# The time box a crawl may hold when its reservation funds one. The rate ceiling
+# above is the politeness control; this is only how long that polite rate runs,
+# and every run stays bounded by the reservation the operator authorized.
+_KATANA_MAX_CRAWL_SECONDS = 600
+_BROWSER_MAX_CRAWL_SECONDS = 900
+
+# The image's own Chromium. Katana downloads its own browser when this is absent,
+# which a worker with no general egress cannot do: it then reports a completed
+# crawl with zero endpoints rather than failing, so the path must be explicit.
+_SYSTEM_CHROME_PATH = "/usr/bin/chromium"
+# A browser fetches the subresources of every page it opens, and those are not
+# governed by katana's own crawl rate. This is the reviewed ceiling on total
+# egress per second for a headless crawl at concurrency 4, used to derive a
+# conservative upper bound over the time box rather than counting page assets.
+_BROWSER_MAX_REQUESTS_PER_SECOND = 10
+# Both crawl tools are the same binary with the same compact output, so every
+# branch that parses, meters, or pins katana must cover the headless variant.
+KATANA_TOOLS = frozenset({"katana", "katana_headless"})
+# The crawler's own memory-relevant limits, stated explicitly rather than inherited from
+# katana defaults (unlimited pages per domain, ten parallel inputs). A crawl has one
+# input. A page is at least one request, so these page ceilings equal the most the
+# reviewed rate can fetch in the longest time box: they never cut a crawl the reservation
+# funds (katana ends a capped crawl with exit 0, indistinguishable from a complete one)
+# and bind only if the rate limiter does not. The response ceiling is katana's current
+# default, pinned. The hard memory bound is the process-tree ceiling the worker enforces.
+_KATANA_MAX_DOMAIN_PAGES = _KATANA_MAX_RATE_PER_SECOND * _KATANA_MAX_CRAWL_SECONDS
+_BROWSER_MAX_DOMAIN_PAGES = _BROWSER_MAX_REQUESTS_PER_SECOND * _BROWSER_MAX_CRAWL_SECONDS
+_KATANA_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+# Chromium's own per-renderer bound: one tab whose script heap runs away is ended by V8
+# (the tab crashes and katana moves on) long before it can take the browser with it, and
+# the browser runs no more renderer processes than the crawl has tabs.
+_BROWSER_V8_HEAP_MB = 512
+_BROWSER_HEADLESS_OPTIONS = (
+    f"--js-flags=--max-old-space-size={_BROWSER_V8_HEAP_MB},--renderer-process-limit=4"
+)
+
+# One retained crawl record (URL, method, status, source) is a few hundred bytes
+# of JSONL even with raw request and body omitted. A flat 80 KB cap therefore
+# ended every crawl that used more than ~300 of the 1,500 requests a thorough
+# profile reserves, and ended it as a failure that discarded the records it
+# had. The cap follows the reservation the operator already paid for.
+AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST = 512
+# A crawler is the exception to one record per request: katana writes a JSONL line for every
+# link and JavaScript-extracted endpoint of each page it fetches, most of them repeats of the
+# site's navigation. Measured on a Balanced crawl of a documentation site: the 768 KB allowance
+# a 1,500-request reservation bought at 512 bytes per request filled in 21 of 300 seconds --
+# at most ~105 fetches at 5 requests/second, so over 7 KB of output per page -- and the crawl
+# was stopped `output_truncated` with 93% of its wall unused. Size the crawler's allowance to
+# what a page emits; the ceiling still bounds the retained bytes.
+AGENT_TOOL_OUTPUT_BYTES_PER_CRAWL_REQUEST = 8_192
+AGENT_TOOL_OUTPUT_BYTES_CEILING = 8_000_000
+
+
+def agent_tool_output_bytes(
+    reserved_budget: Mapping[str, Any] | None, *, floor: int, tool: str | None = None,
+) -> int:
+    """Bytes of tool output to retain for a reservation, never below ``floor``."""
+    try:
+        requests = int((reserved_budget or {}).get("http_requests") or 0)
+    except (TypeError, ValueError):
+        requests = 0
+    per_request = (
+        AGENT_TOOL_OUTPUT_BYTES_PER_CRAWL_REQUEST
+        if str(tool or "").strip().lower() in KATANA_TOOLS
+        else AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST
+    )
+    return max(
+        int(floor),
+        min(AGENT_TOOL_OUTPUT_BYTES_CEILING, requests * per_request),
+    )
+
+
+# Compact tool output is one short record per line, not katana's JSONL mode with
+# embedded request/response bodies, so these bounds cost little memory. They must
+# stay above a real application's emitted surface: katana fetches static assets
+# first and emits the JavaScript-derived API routes afterwards, so the previous
+# 200-record cap truncated precisely the parameterized endpoints that candidate
+# generation depends on. A single-page application spent its whole record budget
+# on .js chunks and reached the endpoint manifest with almost no query
+# parameters, leaving every active family with no work to do.
+_MAX_TOOL_OUTPUT_LINES = 4_000
+# A crawl's retained output (see AGENT_TOOL_OUTPUT_BYTES_PER_CRAWL_REQUEST) is read whole: the
+# record bound applies to distinct same-host routes, not to raw lines. Cutting the first 1,500
+# lines kept 165 routes from a crawl whose output was mostly repeated navigation links.
+_MAX_CRAWL_OUTPUT_LINES = 60_000
+MAX_TOOL_RECORDS = 1_500
+
+EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
+    "dalfox": {"http_requests": 400, "tool_wall_seconds": 120},
+    "sqlmap": {"http_requests": 900, "tool_wall_seconds": 300},
+}
+# Useful per-call holds for every Hunt profile. The older registry holds (sqli.verify
+# 900 requests / 300 s, xss.verify 400 / 120 s) remain accepted for already-queued work. The argv
+# paces a call the same way on every profile: sqlmap BEUT at --delay 1 with one thread (about
+# 1 request/s), Dalfox at --delay 1000 ms with 3 workers (about 3.3 requests/s). Measured with the
+# pinned sqlmap and this argv, one injection point (a query parameter, or a marked path segment)
+# with no injection costs 432-516 requests (516 on an endpoint that echoes the parameter into its
+# page), about 1.1 s each at that pace: up to about 570 s. A 540 s wall stopped such a call at
+# 490 requests with no verdict. sqli.verify therefore holds twice that: 1,200 s and 1,800
+# requests. Dalfox needs about 1,300 requests (390-430 s) per parameter. These holds raise the
+# wall without touching argv or rate, and keep rate x wall within 90% of the request hold
+# (sqlmap 1 x 1,200 = 1,200 <= 1,620; Dalfox 3.33 x 480 = 1,600 <= 1,620), so the pinned
+# connection ceiling never stops a paced call before its wall does.
+#
+# The crawls size themselves from their hold (rate and duration are derived from it, never past
+# the reviewed 5 requests/s for katana and 10/s of egress for the browser). The registry holds
+# (web.crawl 150 requests / 75 s, web.browser_crawl 600 / 150 s) gave a Hunt about 140 requests
+# over 70 s and a 59-second browser crawl, on profiles that allow 460,000 requests or more: a
+# real application's surface was never mapped. A Hunt's crawl holds the reviewed time box
+# instead (katana 600 s, the browser crawl 600 s) at the same rates, and settles what it used.
+HUNT_THOROUGH_SCANNER_HOLDS: dict[str, dict[str, int]] = {
+    "sqli.verify": {"http_requests": 1_800, "tool_wall_seconds": 1_200},
+    "xss.verify": {
+        "http_requests": 1_800, "tool_wall_seconds": 480, "browser_actions": 2,
+    },
+    "web.crawl": {"http_requests": 3_001, "tool_wall_seconds": 605},
+    "web.browser_crawl": {"http_requests": 6_001, "tool_wall_seconds": 610},
+}
+# Capabilities whose smaller registry hold is still a useful call: a crawl sized to it is a
+# shorter crawl, not an incomplete check. When the Hunt has less left than the profile hold (a
+# person lowered a limit, or the Hunt is near its end) these step down to the registry hold
+# rather than being refused. The verifiers do not: at their registry hold they time out with no
+# verdict, which is traffic spent on nothing.
+HUNT_STEP_DOWN_CAPABILITIES = frozenset({"web.crawl", "web.browser_crawl"})
+# The out-of-band interactions one Hunt template call holds when the Hunt's policy allows them:
+# the policy's OOB authority is used only by a call that reserves it (resolve_hunt_interactsh_config).
+HUNT_TEMPLATE_OOB_HOLD = 1
+# The longer process ceiling a single (non-batch) verification may run under, on the same argv.
+# Only a reservation that covers all of it runs with it; any other reservation at or above the
+# floor runs at the floor, so a paced call only ever runs one of these two reviewed shapes.
+# Headless Dalfox (deep_domxss) runs unpaced with 10 workers, so it stays at its floor.
+_EXTERNAL_VERIFICATION_CEILINGS: dict[str, dict[str, int]] = {
+    tool: {
+        name: HUNT_THOROUGH_SCANNER_HOLDS[capability][name]
+        for name in ("http_requests", "tool_wall_seconds")
+    }
+    for tool, capability in (("dalfox", "xss.verify"), ("sqlmap", "sqli.verify"))
+}
+# The smallest slice on which one batched attempt can still reach a verdict.
+# A batch divided its reservation evenly across every ranked candidate, so a
+# manifest with more candidates gave each of them less: thirteen candidates
+# left sqlmap twelve seconds apiece, every attempt returned partial/unproven,
+# and the family spent its entire budget proving nothing. Below these floors an
+# attempt is not worth starting -- funding the top of a ranked manifest and
+# reporting the rest as unattempted is strictly better than diluting all of it.
+# The fraction of its reserved request ceiling a batched attempt is paced to
+# actually send across the WHOLE wall. Below 1.0 it keeps a headroom margin so
+# scheduling jitter cannot push the tool over the pinned connection/wire ceiling
+# and fail the whole attempt (see _batch_attempt_pacing).
+_BATCH_ATTEMPT_REQUEST_HEADROOM = BATCH_ATTEMPT_REQUEST_HEADROOM
+# The sqlmap technique letters a batched attempt may be confined to: one technique stage of a
+# resumable SQLi verification (scan/sqli_stages.py), or all four together.
+SQLMAP_TECHNIQUES = frozenset({"B", "E", "U", "T", "BEUT"})
+# nuclei's global request rate, as fixed in its argv; batch pacing may lower it, never raise it.
+_NUCLEI_RATE_CEILING = 10
+# The tool-keyed view of the shared per-attempt floors, so argv enforcement can
+# reason in tool terms. scan.external_process owns the numbers: duplicating them
+# is how the planner and the adapter drifted apart in the first place.
+EXTERNAL_BATCH_ATTEMPT_FLOORS: dict[str, dict[str, int]] = {
+    "dalfox": dict(BATCH_ATTEMPT_FLOORS["xss.verify_batch"]),
+    "sqlmap": dict(BATCH_ATTEMPT_FLOORS["sqli.verify_batch"]),
+}
+
+
+def _tmpl_httpx(url: str, opts: dict[str, Any]) -> list[str]:
+    # Passive fingerprint: exactly one URL, with fallback and redirects disabled.
+    return ["-u", url, "-status-code", "-title", "-tech-detect", "-web-server",
+            "-json", "-silent", "-timeout", "10", "-no-color", "-no-stdin",
+            "-retries", "0", "-rate-limit", "1", "-threads", "1",
+            "-no-fallback-scheme", "-disable-update-check"]
+
+
+def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
+    # Bounded template scan. Severity + tags are the ONLY tunables, both regex-gated.
+    template_ids = str(opts.get("template_ids") or "").strip().lower()
+    severity = str(opts.get("severity") or "").strip().lower()
+    if not _SEV_RE.match(severity):
+        severity = "high,critical"
+    args = ["-target", url, "-silent", "-jsonl",
+            "-stats", "-stats-json", "-stats-interval", "5",
+            "-timeout", "5", "-retries", "0", "-no-color", "-disable-update-check",
+            "-disable-redirects", "-no-interactsh", "-type", "http"]
+    if not template_ids:
+        args += ["-severity", severity]
+    args += ["-rate-limit", "10", "-bulk-size", "10", "-concurrency", "10"]
+    profile = str(opts.get("template_profile") or "").strip().lower()
+    if template_ids and profile == "product":
+        # A recognised product's server-resolved window (runtime/product_templates.py). Only the
+        # typed match metadata is kept: the archive records each exchange.
+        _validate_active_nuclei_allowlist(template_ids)
+        return [*args, "-id", template_ids, "-omit-raw", "-omit-template"]
+    if template_ids:
+        if profile == "active":
+            # The server-resolved active allowlist (scan/nuclei_template_index.py)
+            # is an explicit, method-filtered id list derived from the pinned
+            # bundle: it excludes intrusive templates and, unless state-changing
+            # HTTP is authorized, every non-GET template. Feeding it as -id is the
+            # robust method filter -- a template Nuclei would otherwise match by
+            # tag but that is not on this list never runs. Match evidence is
+            # retained (no -omit) exactly as the former tag-based active path did.
+            _validate_active_nuclei_allowlist(template_ids)
+            args += ["-id", template_ids]
+        else:
+            if template_ids != _CANONICAL_PASSIVE_NUCLEI_IDS:
+                raise AgentToolError("nuclei template allowlist is not canonical")
+            # The reviewed passive pack needs only typed match metadata. Nuclei's
+            # default JSONL embeds the complete request/response and encoded
+            # template in every matcher result, which can exceed the worker's hard
+            # output ceiling even for this six-template, seven-request profile.
+            # The reviewed IDs include info/medium templates, so an independently
+            # supplied severity filter would silently select an empty intersection.
+            args += ["-id", template_ids, "-omit-raw", "-omit-template"]
+            if opts.get("filter_template_severity") is True:
+                args += ["-severity", severity]
+    tags = str(opts.get("tags") or "").strip().lower()
+    if _TAGS_RE.match(tags):
+        args += ["-tags", tags]
+    elif not template_ids:
+        # All High/Critical HTTP templates exceed the bounded agent turn on the
+        # pinned bundle. The default remains useful but finite; callers may ask
+        # for broader explicit tags and receive honestly labeled partial output
+        # if the same hard wall is reached.
+        args += ["-tags", _NUCLEI_FOCUSED_TAGS]
+    return args
+
+
+# Bundled small wordlists for content discovery. The model picks a NAME from this map (dict
+# lookup, unknown -> common); it can NEVER pass an arbitrary path, so ffuf's -w is injection-proof.
+_AGENT_FFUF_WORDLISTS: dict[str, str] = {
+    "common": "/app/wordlists/common.txt",
+    "api": "/app/wordlists/api-resources.txt",
+    "admin": "/app/wordlists/admin-common.txt",
+    # Corporate applications and edge appliances; read after ``common`` (see the sources map).
+    "corporate": "/app/wordlists/corporate.txt",
+}
+# A selection may read several bundled lists in order: ``corporate`` keeps the common entries
+# first and then adds the authored corporate paths, within the same exact reservation.
+_AGENT_FFUF_WORDLIST_SOURCES: dict[str, tuple[str, ...]] = {
+    "corporate": (_AGENT_FFUF_WORDLISTS["common"], _AGENT_FFUF_WORDLISTS["corporate"]),
+}
+
+
+# A crawl that carries a session also starts at the scan's seeds on its own origin (the page the
+# sign-in landed on and the GET seed endpoints): an area behind a sign-in is often linked from
+# nowhere the target's root reaches (E1-N3). Each seed is a plain path joined to the crawl's own
+# origin, so a seed can never name another host; katana splits a list flag on commas, so a seed
+# holds none. A seed that is not such a path is left out, never fatal to the crawl. The target
+# keeps its whole time box (``_fit_crawl_inputs``).
+MAX_CRAWL_SEED_PATHS = 20
+_CRAWL_SEED_PATH = re.compile(r"/(?!/)[A-Za-z0-9\-._~!$&'()*+;=:@%/]{0,2047}")
+# The shortest share of the browser crawl's box worth giving the target and one seed each.
+_CRAWL_INPUT_MIN_SECONDS = {"katana": 10, "katana_headless": 15}
+
+
+def crawl_seed_path_is_plain(path: Any) -> bool:
+    """Whether ``path`` can be a crawl seed: a plain, already percent-encoded path."""
+    return isinstance(path, str) and _CRAWL_SEED_PATH.fullmatch(path) is not None
+
+
+def _crawl_seed_urls(url: str, opts: Mapping[str, Any]) -> list[str]:
+    raw = opts.get("crawl_seed_paths") or ()
+    if not raw:
+        return []
+    if not isinstance(raw, (list, tuple)) or len(raw) > MAX_CRAWL_SEED_PATHS:
+        raise AgentToolError(f"a crawl takes at most {MAX_CRAWL_SEED_PATHS} seed paths")
+    parsed = urllib.parse.urlsplit(url)
+    origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    urls: list[str] = []
+    for value in raw:
+        if not crawl_seed_path_is_plain(value):
+            continue
+        seed = origin + value
+        if seed != url and seed not in urls:
+            urls.append(seed)
+    return urls
+
+
+def _crawl_inputs(url: str, opts: Mapping[str, Any]) -> list[str]:
+    inputs = ["-u", url]
+    for seed in _crawl_seed_urls(url, opts):
+        inputs += ["-u", seed]
+    return inputs
+
+
+def _fit_crawl_inputs(argv: list[str], duration: int, *, scanner: str) -> tuple[int, int]:
+    """Fit the crawl's ``-u`` inputs to its time box; return (inputs, seconds each).
+
+    ``-crawl-duration`` bounds each input, not the run. The static crawl runs its inputs side by
+    side (``-parallelism`` one per input), each for the whole box, so the run ends with the box:
+    the target's own crawl keeps the time it had alone, and the process's one rate limiter and
+    the hard request ceiling are shared. While seeds are busy the target gets its share of that
+    rate (one of the inputs), and the requests a seed that finishes does not use return to it.
+    Fewer inputs at a time would not raise the target's share inside the box: each later input
+    would start when an earlier one ended and run its own whole box, so the run would outlast
+    the box (in the scanner image, 20 seeds at ``-parallelism 2`` ran 142 s of a 60 s box). The
+    browser crawl runs one input at a time in one browser (its memory bound is the process
+    tree's), so it adds only its first seed and the target keeps half of the box; a box too small
+    to halve keeps the target alone.
+    """
+    positions = [index for index, value in enumerate(argv) if value == "-u"]
+    if scanner == "katana":
+        _replace_argv_value(argv, "-parallelism", len(positions))
+        return len(positions), max(1, duration)
+    allowed = 2 if duration // 2 >= _CRAWL_INPUT_MIN_SECONDS[scanner] else 1
+    for index in reversed(positions[allowed:]):
+        del argv[index:index + 2]
+    inputs = min(len(positions), allowed)
+    return inputs, max(1, duration // inputs)
+
+
+def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
+    # Same-origin crawl + JS endpoint extraction. Read-only (GET only; form auto-fill stays OFF),
+    # bounded: depth 2, 30s wall cap, 5 req/s, field-scope fqdn (same HOST only — never crosses
+    # origin), 8s per-request timeout. JSONL is required to retain observed methods and
+    # request-body shape. Raw requests, headers, and responses are excluded at the process;
+    # the parser projects any remaining request body into field names before persistence.
+    #
+    # -jsluice and -kb-endpoints parse the JavaScript this crawl already fetched, so they
+    # cost no additional HTTP request and stay inside the rate-derived reservation below.
+    # Plain -js-crawl only follows link-shaped strings, which on a single-page application
+    # yields bare route paths with no query string: candidate generation tests observed
+    # query parameters, so a parameterless surface produced almost no work and every
+    # active family ran empty. Parsing the bundle recovers the parameters the client
+    # actually builds its API calls from. Endpoints extracted this way are observed in the
+    # application's own served code -- the same epistemic standing as -js-crawl output --
+    # never invented by the scanner.
+    return [*_crawl_inputs(url, opts), "-js-crawl", "-jsluice", "-kb-endpoints",
+            "-depth", "2", "-concurrency", "5", "-parallelism", "1",
+            "-max-domain-pages", str(_KATANA_MAX_DOMAIN_PAGES),
+            "-max-response-size", str(_KATANA_MAX_RESPONSE_BYTES),
+            "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
+            "-timeout", "8", "-retry", "0", "-disable-redirects",
+            "-jsonl", "-omit-raw", "-omit-body",
+            "-exclude-output-fields", "headers,response,raw", "-silent", "-disable-update-check"]
+
+
+def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
+    # Same-origin crawl driven by a real browser, so the application's own runtime
+    # requests are observed rather than inferred from its source. A single-page
+    # application builds its API calls in JavaScript at run time: static parsing
+    # recovers the route but not the query the client actually sends, and candidate
+    # generation only tests parameters that were observed. -xhr-extraction records
+    # those requests.
+    #
+    # Read-only and same-host, exactly like the static crawl: GET only, form
+    # auto-fill stays OFF, field-scope fqdn never crosses origin. The browser is the
+    # image's own Chromium (-system-chrome-path) because katana otherwise downloads
+    # one, which a no-egress worker cannot do and which would silently return zero
+    # endpoints. -no-sandbox is required to run Chromium as the container's user; the
+    # page is untrusted content, but it is the same content the scanner already
+    # fetches, and egress stays pinned by the proxy build_scanner_argv attaches.
+    return [*_crawl_inputs(url, opts), "-headless", "-no-sandbox",
+            "-system-chrome-path", _SYSTEM_CHROME_PATH,
+            "-headless-options", _BROWSER_HEADLESS_OPTIONS,
+            "-xhr-extraction", "-js-crawl", "-jsluice", "-kb-endpoints",
+            "-depth", "2", "-concurrency", "4", "-parallelism", "1",
+            "-max-domain-pages", str(_BROWSER_MAX_DOMAIN_PAGES),
+            "-max-response-size", str(_KATANA_MAX_RESPONSE_BYTES),
+            "-rate-limit", "5", "-crawl-duration", "45s", "-field-scope", "fqdn",
+            "-timeout", "10", "-retry", "0", "-disable-redirects",
+            "-jsonl", "-omit-raw", "-omit-body",
+            "-exclude-output-fields", "headers,response,raw", "-silent", "-disable-update-check"]
+
+
+# An inert placeholder for every body field the engine sends. The scanner supplies the attack; a
+# payload here would put attack traffic outside the tool's own accounting and outside its reporting.
+_BODY_PLACEHOLDER_VALUE = "shakerscan"
+
+
+def _injection_body(opts: dict[str, Any]) -> tuple[str, str, list[str]] | None:
+    """Return ``(method, body, fields)`` for a body candidate, or None for a query candidate.
+
+    The body carries every field the endpoint declares so the request is well-formed, all set to an
+    inert placeholder, and every field is offered as an injection point. The tool tests the fields
+    one after another in one run and stops at the first vulnerable one, so a vulnerable first field
+    costs about one field's test, while a negative verdict costs one field's test per field (soak
+    9de6a910: U 103, B 171, E 286 requests over two fields against 53, 87, 144 for one). The
+    returned ``fields`` are exactly the names the tool is handed (``-p``), after a nested JSON
+    body's leaf-name de-duplication.
+    """
+    field = str(opts.get("injection_field") or "").strip()
+    fields = [str(name) for name in opts.get("body_field_names") or () if str(name).strip()]
+    if not field or not fields:
+        return None
+    if field not in fields:
+        # The manifest already validated this field against its endpoint, so a mismatch means the
+        # caller and the manifest disagree. Testing a guessed input is worse than not testing.
+        raise ValueError("injection field is absent from the declared body fields")
+    method = str(opts.get("method") or "POST").strip().upper()
+    if not re.fullmatch(r"[A-Z]{3,12}", method):
+        raise ValueError("injection body method is invalid")
+    content_type = str(opts.get("content_type") or "").strip().lower()
+    if "json" in content_type:
+        # Dotted names describe a nested body. Literal dotted keys send a schema the target
+        # ignores, so a nested field could never be found. The tools name a JSON value by
+        # its own key, so a nested field is offered under its leaf name.
+        body = json.dumps(nested_json_body(fields, placeholder=_BODY_PLACEHOLDER_VALUE),
+                          sort_keys=True, separators=(",", ":"))
+        fields = [
+            name for name in dict.fromkeys(json_field_leaf_name(item) for item in fields) if name
+        ]
+    else:
+        body = "&".join(
+            f"{urllib.parse.quote(name, safe='')}={_BODY_PLACEHOLDER_VALUE}" for name in fields
+        )
+    # Every declared field is handed to the tool, not just the anchor: one candidate covers the
+    # whole body. Staged SQLi verification may narrow ``-p`` to one field per run (see
+    # ``injection_fields`` in ``_tmpl_sqlmap``), so a wall that cannot finish every field still
+    # settles the fields it reached.
+    return method, body, fields
+
+
+def sqlmap_injection_fields(opts: Mapping[str, Any]) -> list[str] | None:
+    """The field names a body candidate hands sqlmap with ``-p``, or None for a query candidate."""
+    injection = _injection_body(dict(opts))
+    return None if injection is None else list(injection[2])
+
+
+def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
+    # Bounded XSS scan of a single URL. GET-based: no blind callback, no WAF evasion,
+    # no parameter mining beyond the URL itself. Headless verification is opt-in and
+    # remains behind the active/browser budget plus the pinned transport.
+    severity = str(opts.get("severity") or "").strip().lower()
+    severity_args: list[str] = []
+    if severity == "low":
+        severity_args = ["--only-poc", "g,r,v"]
+    elif severity == "medium":
+        severity_args = ["--only-poc", "r,v"]
+    else:
+        # With headless disabled Dalfox cannot establish the verified browser
+        # tier. Preserve reflected candidates rather than filtering every PoC.
+        severity_args = ["--only-poc", "v" if opts.get("deep_domxss") is True else "r,v"]
+    # --force-headless-verification alone drives the real browser and settles a
+    # DOM-based finding in seconds. --deep-domxss additionally crawls the DOM
+    # exhaustively and does not converge inside this capability's wall ceiling,
+    # so the tool was cut off before emitting any verdict at all.
+    headless_args = (
+        ["--force-headless-verification"]
+        if opts.get("deep_domxss") is True else ["--skip-headless"]
+    )
+    # Browser verification is a single-URL proof attempt, not a crawl. The
+    # ordinary 1s/3-worker crawl profile repeatedly reaches the 120s supervisor
+    # wall before Dalfox settles. The pinned proxy still enforces the reserved
+    # request ceiling, while this measured profile lets the browser terminate
+    # and return its verdict inside that reservation.
+    headless = opts.get("deep_domxss") is True
+    delay_ms, workers = ("0", "10") if headless else ("1000", "3")
+    # The credential profile's own sign-in endpoint (scan/auth_endpoint_probe.py): one worker, so
+    # the batch pacing is the endpoint's whole rate, Dalfox's own payloads for the request's
+    # body, and a stop at the first verified finding (every request there is a failed sign-in).
+    auth_probe = opts.get("probe_profile") == AUTH_ENDPOINT_PROBE_PROFILE and not headless
+    if auth_probe:
+        workers = "1"
+    args = (["url", url, "--format", "jsonl", "--silence", "--no-color",
+             "--timeout", "8", "--delay", delay_ms, "--worker", workers,
+             "--skip-bav", "--skip-grepping", "--skip-mining-all",
+             # Dalfox records every request it sends in this HAR. The worker binds it into
+             # the job's private scratch directory and settles the wire reservation from
+             # the exact entry count (see SCANNER_WIRE_LOG_FILES).
+             "--har-file-path", "/tmp/shakerscan-dalfox/requests.har"]
+            + headless_args + severity_args)
+    # A Hunt that named one query parameter already supplied the discovery result.
+    # Dalfox otherwise spends much of its fixed 400-request reservation probing
+    # parameters that this action did not ask it to verify.
+    query_pairs = urllib.parse.parse_qsl(
+        urllib.parse.urlsplit(url).query, keep_blank_values=True,
+    )
+    injection = _injection_body(opts)
+    # A body candidate verifies its body's fields: a pair in its URL's query (an action that routes
+    # by its query, index.php?route=account/login) is not the parameter it names, and Dalfox's
+    # custom-payload mode would put every payload there and leave the body untested.
+    if injection is None and len(query_pairs) == 1 and re.fullmatch(
+        r"[A-Za-z0-9_][A-Za-z0-9_.\[\]-]{0,63}", query_pairs[0][0],
+    ):
+        args.extend(["--skip-discovery", "-p", query_pairs[0][0]])
+        if not headless:
+            # This is a verifier of one known parameter, not an open-ended
+            # payload campaign. Dalfox expands each reviewed vector through four
+            # encodings, so four vectors fit comfortably under the wire ceiling.
+            args.extend([
+                "--custom-payload", "/app/payloads/xss/hunt-verify.txt",
+                "--only-custom-payload",
+            ])
+    if injection is not None:
+        method, body, fields = injection
+        args += ["-X", method, "-d", body]
+        for name in fields:
+            args += ["-p", name]
+    if auth_probe:
+        # The first verified finding settles the candidate; the rest would be further failed
+        # sign-ins. An unverified reflection does not stop it.
+        args += ["--limit-result", "1", "--limit-result-type", "v"]
+    return args
+
+
+def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
+    # Bounded single-URL SQLi test. Non-interactive (--batch), boolean/error/union plus
+    # time-based techniques (the widened wall window + wire reservation bound the time-based
+    # payloads), level/risk 2, no crawl, output to a scratch dir the worker owns (replaced
+    # per-job by bind_scanner_runtime_paths); findings surface in stdout ("is vulnerable").
+    # --smart is omitted on purpose: its basic-heuristic prune skips params that later
+    # techniques would confirm (Juice Shop's q returns 500 yet was skipped).
+    # --ignore-redirects keeps redirect containment without an --answers pattern that
+    # substring-matches URLs containing "redirect" and silently declines testing.
+    technique = str(opts.get("technique") or "BEUT").strip().upper()
+    if technique not in SQLMAP_TECHNIQUES:
+        technique = "BEUT"
+    # The credential profile's own sign-in endpoint keeps this ladder; only its pace and its
+    # probe set differ (scan/auth_endpoint_probe.py, the delay floor in build_enforced_scanner_plan).
+    args = ["-u", url, "--batch", "--technique", technique, "--level", "2", "--risk", "2",
+            "--threads", "1", "--timeout", "8", "--retries", "0", "--delay", "1",
+            "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
+            # -t logs every HTTP transaction sqlmap sends. The worker binds it into the
+            # job's private scratch directory and settles the wire reservation from its
+            # exact count instead of retaining the full hold (see SCANNER_WIRE_LOG_FILES).
+            "-t", "/tmp/shakerscan-sqlmap/traffic.log",
+            "--ignore-redirects", "--disable-coloring",
+            "--user-agent", "shakerscan-sqlmap/1.0"]
+    injection = _injection_body(opts)
+    if injection is not None:
+        # sqlmap infers POST from --data; -p names the fields it tests, every declared one by
+        # default. Staged verification narrows it to a subset of them (one field per run) so a
+        # killed run loses one field's progress, not the whole technique's; the request still
+        # carries the whole body.
+        _method, body, fields = injection
+        subset = opts.get("injection_fields")
+        if subset is not None:
+            if (
+                not isinstance(subset, (list, tuple)) or not subset
+                or not all(
+                    isinstance(item, str) and item in fields and "," not in item
+                    for item in subset
+                )
+            ):
+                # sqlmap splits -p on commas: a name containing one cannot be named alone.
+                raise ValueError("injection fields must be a subset of the tested body fields")
+            fields = list(dict.fromkeys(subset))
+        args += ["--data", body, "-p", ",".join(fields)]
+        # An authentication endpoint answers wrong credentials with 401/403, and sqlmap treats that
+        # on its connection test as "not authorized ... skipping to the next target" -- so it
+        # refuses to test the single endpoint class where body injection most often lives. Juice
+        # Shop's login SQLi is unreachable without this and reachable with it. Scoped to the body
+        # path so no existing query-parameter scan changes behaviour.
+        args += ["--ignore-code", "401", "--ignore-code", "403"]
+    return args
+
+
+# Statuses content discovery reports. Every redirect status counts, as the path-lead readers
+# count them (corporate_identity, recon_active): a 303 to a sign-in page is how many applications
+# answer an unauthenticated request for their root. A host that redirects every path the same way
+# is caught by the negative-control probes (scan/negative_control.py), not by this list. A 422 is a
+# route that exists and refused its missing or invalid input (the validation answer of many API
+# frameworks): measured, two routes whose inputs the 422 named were found and then dropped here.
+FFUF_MATCH_CODES = "200,204,301,302,303,307,308,401,403,405,422"
+
+
+def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
+    # Bounded content/dir discovery. Read-only (GET). One tunable: wordlist in {common,api,admin}
+    # -> a small BUNDLED list (unknown/invalid -> common; no arbitrary path). Automatic
+    # calibration stays off because it adds requests outside the exact wordlist count. The
+    # authoritative worker replaces this source with an owner-only exact-size subset of every
+    # source the selection reads; unmaterialized, ffuf takes one list, the selection's first
+    # (``corporate`` starts with the common list, never the corporate tail alone).
+    wordlist = scanner_ffuf_wordlist_source(opts)
+    base = url.split("?", 1)[0].rstrip("/")
+    return ["-u", f"{base}/FUZZ", "-w", wordlist,
+            "-mc", FFUF_MATCH_CODES,
+            "-t", "5", "-rate", "5", "-timeout", "8", "-maxtime", "40", "-s", "-json"]
+
+
+def _tmpl_nmap(url: str, opts: dict[str, Any]) -> list[str]:
+    # Read-only single-port service/version probe of the host behind the target URL. nmap takes
+    # no URL: host+port are extracted from it. Connect scan only (-sT — never raw SYN), NO NSE
+    # scripts, no host discovery (-Pn), no file output (-oN - keeps it on stdout), 60s host
+    # timeout. Service detection may open more than one connection to the selected port, so its
+    # process proof reserves the reviewed 60-attempt upper bound instead of counting only the
+    # distinct port. When pinning is active build_scanner_argv feeds this a URL whose hostname is
+    # the pinned IP, so the positional host is address-frozen.
+    parsed = urllib.parse.urlsplit(url)
+    host = str(parsed.hostname or "")
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    return ["-p", str(port), "-sV", "-sT", "--version-light", "--host-timeout", "60s",
+            "--max-retries", "0", "-T3", "-Pn", "-oN", "-", host]
+
+
+def _tmpl_naabu(url: str, opts: dict[str, Any]) -> list[str]:
+    # Bounded top-100 TCP port sweep of the host behind the target URL. Connect scan
+    # (-scan-type c — no raw SYN), rate 10 + 120s wall cap -> a 1200-request wire ceiling, JSON
+    # lines on stdout for the typed parser. No full-range -p- sweep. Pinned IP substitution is
+    # handled by build_scanner_argv exactly as for nmap.
+    parsed = urllib.parse.urlsplit(url)
+    host = str(parsed.hostname or "")
+    return ["-host", host, "-top-ports", "100", "-Pn", "-scan-type", "c",
+            "-rate", "10", "-c", "10", "-timeout", "1500ms", "-retries", "1",
+            "-json", "-silent", "-no-color", "-disable-update-check", "-no-stdin",
+            "-stats", "-stats-interval", "10"]
+
+
+# Adapter builders remain implementation details here while the canonical registry owns names,
+# risk, budgets, placement, schemas, evidence contracts, binaries, and timeouts.
+_SCANNER_BUILDERS = {
+    "httpx": _tmpl_httpx,
+    "nuclei": _tmpl_nuclei,
+    "katana": _tmpl_katana,
+    "katana_headless": _tmpl_katana_headless,
+    "ffuf": _tmpl_ffuf,
+    "dalfox": _tmpl_dalfox,
+    "sqlmap": _tmpl_sqlmap,
+    "nmap": _tmpl_nmap,
+    "naabu": _tmpl_naabu,
+}
+SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
+    spec.process_tool_name: spec.scanner_template(_SCANNER_BUILDERS[spec.process_tool_name])
+    for spec in CAPABILITY_REGISTRY.process_tools()
+    if spec.process_tool_name in _SCANNER_BUILDERS
+}
+RUN_TOOL_NAMES: frozenset[str] = frozenset(SCANNER_ARG_TEMPLATES)
+
+
+def coerce_run_tool(args: dict[str, Any]) -> tuple[str, Any, dict[str, Any]]:
+    name = str(args.get("name") or "").strip().lower()
+    if name not in RUN_TOOL_NAMES:
+        raise AgentToolError(f"unknown run_tool:{name} (allowed: {sorted(RUN_TOOL_NAMES)})")
+    options = args.get("options") if isinstance(args.get("options"), dict) else {}
+    return name, args.get("target"), options
+
+
+def _pinned_scanner_url(url: str, pinned_address: str) -> tuple[str, str, str]:
+    parsed = urllib.parse.urlsplit(url)
+    try:
+        address = str(ipaddress.ip_address(str(pinned_address or "").strip()))
+    except ValueError as exc:
+        raise AgentToolError("scanner pinned address must be an IP address") from exc
+    hostname = str(parsed.hostname or "").rstrip(".")
+    if not hostname:
+        raise AgentToolError("scanner target is missing a hostname")
+    port = parsed.port
+    display_address = f"[{address}]" if ":" in address else address
+    pinned_netloc = display_address + (f":{port}" if port is not None else "")
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    host_display = f"[{hostname}]" if ":" in hostname else hostname
+    host_header = host_display if port in (None, default_port) else f"{host_display}:{port}"
+    return urllib.parse.urlunsplit((parsed.scheme, pinned_netloc, parsed.path or "/", parsed.query, "")), hostname, host_header
+
+
+# ProjectDiscovery's PUBLIC interactsh servers. A hunt runs against a customer target, so an
+# OOB callback URL reveals target-identifying data to whoever operates the callback server.
+# We therefore NEVER enable the public default; blind OOB detection is available only when an
+# operator explicitly points ShakerScan at their OWN private interactsh server.
+_PUBLIC_INTERACTSH_HOSTS = frozenset({
+    "oast.fun", "oast.online", "oast.pro", "oast.live", "oast.site", "oast.me", "interact.sh",
+})
+
+
+def validate_private_interactsh_server(url: Any) -> str | None:
+    """Return a normalized scheme://host[:port] only for a valid, non-public OOB server.
+
+    Fail-closed: empty, malformed, non-http(s), or any ProjectDiscovery public server returns
+    ``None`` (the caller then keeps ``-no-interactsh``). The path/query/fragment are dropped.
+    """
+    text = str(url or "").strip()
+    if not text or any(ch in text for ch in " \t\r\n"):
+        return None
+    parsed = urllib.parse.urlsplit(text if "://" in text else "https://" + text)
+    scheme = (parsed.scheme or "https").lower()
+    if scheme not in {"http", "https"}:
+        return None
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        return None
+    if any(host == pub or host.endswith("." + pub) for pub in _PUBLIC_INTERACTSH_HOSTS):
+        return None
+    authority = host
+    if parsed.port:
+        if not 1 <= int(parsed.port) <= 65535:
+            return None
+        authority = f"{host}:{int(parsed.port)}"
+    return f"{scheme}://{authority}"
+
+
+def canonical_hunt_scanner_budget(
+    capability_name: str,
+    *,
+    budget_profile: str | None = None,
+    deep_domxss: bool = False,
+    device_target: bool = False,
+    body_test: bool = False,
+    oob_allowed: bool = False,
+    product_checks: str | None = None,
+) -> dict[str, int]:
+    """Admission ceiling for the exact server-owned Hunt scanner selection.
+
+    Every named Hunt profile reserves ``HUNT_THOROUGH_SCANNER_HOLDS`` for ``sqli.verify``
+    and ``xss.verify``. Unprofiled historical work keeps the registry hold, and so do:
+
+    - a call against a device target, whose fragility allowance is charged one point per held
+      request and which is not given a longer paced call;
+    - a headless (``deep_domxss``) ``xss.verify``, which runs unpaced or in the pinned browser.
+
+    An ``xss.verify`` the worker routes to the pinned browser (one URL-fragment parameter) runs
+    inside its own fixed limits under either hold, and settles only what it used.
+
+    A ``body_test`` (a verifier sending POST/PUT/PATCH bodies) also holds its every request as a
+    verifier write (``verifier_write_requests``): the Hunt's own ceiling for verifier writes,
+    shown beside the state-changing ceiling that bounds the planner's writes.
+
+    A ``templates.scan`` of a recognised product's templates (``product_checks``) holds one
+    product window (``runtime/product_templates.py``); its ``state_changing`` checks hold every
+    request as a verifier write too, as a body test does.
+    """
+    budget = dict(CAPABILITY_REGISTRY.require(capability_name).budget_cost)
+    if capability_name == "templates.scan":
+        if product_checks:
+            return product_hold(product_checks)
+        budget["http_requests"] = canonical_passive_nuclei_request_upper_bound()
+        if oob_allowed:
+            # The Hunt's out-of-band authority is used only by a call that reserves it
+            # (resolve_hunt_interactsh_config): without this hold no Hunt template call could
+            # ever enable the operator's private OOB server, whatever the policy allowed.
+            budget["oob_interactions"] = HUNT_TEMPLATE_OOB_HOLD
+        return budget
+    tier = HUNT_THOROUGH_SCANNER_HOLDS.get(capability_name)
+    if (
+        budget_profile in {"fast", "balanced", "thorough"}
+        and tier is not None
+        and not device_target
+        and not (capability_name == "xss.verify" and deep_domxss)
+    ):
+        budget.update(tier)
+    if body_test:
+        budget["verifier_write_requests"] = int(budget.get("http_requests") or 0)
+    return budget
+
+
+def hunt_scanner_budget_context(
+    run: Mapping[str, Any], capability_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    """What sizes a Hunt scanner call's hold, read from the Hunt row and the call input.
+
+    Admission and the worker's re-derivation both read it here: the action digest covers the
+    hold, so the two must derive the same one.
+    """
+    policy = run.get("policy_json")
+    if isinstance(policy, str):
+        try:
+            policy = json.loads(policy)
+        except ValueError:
+            policy = None
+    policy = policy if isinstance(policy, Mapping) else {}
+    return {
+        "budget_profile": run.get("budget_profile"),
+        "deep_domxss": capability_input.get("deep_domxss") is True,
+        "device_target": bool(run.get("device_target_id")),
+        "body_test": hunt_body_input(capability_input),
+        "oob_allowed": bool(policy.get("active_testing") and policy.get("allow_oob_interactions")),
+        **({"product_checks": _product_checks(capability_input)}
+           if _product_checks(capability_input) else {}),
+    }
+
+
+def _product_checks(capability_input: Mapping[str, Any]) -> str | None:
+    try:
+        request = product_request(capability_input)
+    except ValueError:
+        return None  # the input schema refuses it before any hold is derived
+    return request[1] if request else None
+
+
+# The profile holds earlier releases reserved, for calls they queued that a worker of this release
+# may lease after an upgrade: 2.11.1 held sqli.verify at 900 requests / 540 s; 2.11.2 to 2.11.5 at
+# the current holds. Such a call runs at the floor (``_EXTERNAL_VERIFICATION_CEILINGS``: only a
+# hold covering all of the longer ceiling runs at it) and settles what it used.
+RELEASED_HUNT_SCANNER_HOLDS: dict[str, tuple[dict[str, int], ...]] = {
+    "sqli.verify": (
+        {"http_requests": 900, "tool_wall_seconds": 540},
+        {"http_requests": 1_800, "tool_wall_seconds": 1_200},
+    ),
+    "xss.verify": (
+        {"http_requests": 1_800, "tool_wall_seconds": 480, "browser_actions": 2},
+    ),
+}
+
+
+def hunt_scanner_dispatch_budgets(
+    capability_name: str,
+    *,
+    budget_profile: str | None = None,
+    deep_domxss: bool = False,
+    device_target: bool = False,
+    body_test: bool = False,
+    oob_allowed: bool = False,
+    product_checks: str | None = None,
+) -> tuple[dict[str, int], ...]:
+    """The holds a Hunt scanner call may run at, the current one first.
+
+    Then the registry hold, for a call admitted before profile holds changed, and the profile
+    holds earlier releases reserved (``RELEASED_HUNT_SCANNER_HOLDS``) where this call would get
+    a profile hold now. Only the current hold is used for new admission. The worker verifies the
+    action digest against whichever hold the already-queued action reserved.
+    """
+    current = canonical_hunt_scanner_budget(
+        capability_name, budget_profile=budget_profile, deep_domxss=deep_domxss,
+        device_target=device_target, body_test=body_test, oob_allowed=oob_allowed,
+        product_checks=product_checks,
+    )
+    if product_checks:
+        return (current,)
+    legacy = canonical_hunt_scanner_budget(capability_name, body_test=body_test)
+    holds = [current, legacy]
+    if current != legacy and not body_test:
+        # Earlier releases never sent a body test, so none of their holds is one.
+        for released in RELEASED_HUNT_SCANNER_HOLDS.get(capability_name, ()):
+            holds.append({**legacy, **released})
+    unique: list[dict[str, int]] = []
+    for hold in holds:
+        if hold not in unique:
+            unique.append(hold)
+    return tuple(unique)
+
+
+def affordable_hunt_scanner_hold(
+    candidates: Sequence[Mapping[str, int]],
+    *,
+    limits: Mapping[str, int],
+    used: Mapping[str, Any],
+    capability_name: str | None = None,
+) -> dict[str, int]:
+    """The current useful hold; admission reports any shortage through the canonical ledger.
+
+    A capability in ``HUNT_STEP_DOWN_CAPABILITIES`` gets the first hold, largest first, that
+    what is left of every limited dimension can fund; the current one when none can.
+    """
+    if capability_name in HUNT_STEP_DOWN_CAPABILITIES:
+        for candidate in candidates:
+            if all(
+                int(used.get(name) or 0) + int(amount) <= int(limits[name])
+                for name, amount in candidate.items() if int(limits.get(name) or 0) > 0
+            ):
+                return dict(candidate)
+    # Older queued actions may still own the registry hold, which the worker accepts.
+    # New actions must request the useful execution envelope. Admission raises the normal
+    # budget request when it does not fit; silently reverting to the old timeouts spends
+    # traffic on the same incomplete checks these longer holds were introduced to fix.
+    return dict(candidates[0])
+
+
+def admitted_hunt_scanner_hold(
+    stored: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, int]],
+) -> dict[str, int]:
+    """The candidate hold equal to the durable reservation, else the first (current) one."""
+    recorded = {str(name): int(amount) for name, amount in dict(stored).items()}
+    for candidate in candidates:
+        if dict(candidate) == recorded:
+            return dict(candidate)
+    return dict(candidates[0])
+
+
+def hunt_scanner_timeout_ms(
+    default_timeout_ms: int, reserved_budget: Mapping[str, Any],
+) -> int:
+    """How long one Hunt scanner call may run: its spec default, or its reserved wall if longer."""
+    wall = int(reserved_budget.get("tool_wall_seconds") or 0)
+    return max(int(default_timeout_ms), wall * 1_000)
+
+
+def canonical_hunt_scanner_options(
+    capability_name: str,
+    planner_input: Mapping[str, Any],
+    policy: Mapping[str, Any] | None = None,
+    requested_budget: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Derive worker scanner options from the bounded planner projection.
+
+    Body candidates remain available to deterministic Scan through the full
+    capability input schema. Hunt sees only ``planner_input_schema`` and this
+    worker-side projection validates that narrower schema again before a process
+    is built. Nuclei selection is replaced with the reviewed immutable GET-only
+    pack so planner tags can never select mutating or OOB templates.
+    """
+    name = str(capability_name or "").strip().lower()
+    options = CAPABILITY_REGISTRY.validate_hunt_input(name, planner_input)
+    if name != "templates.scan":
+        return options
+    if options.get("product"):
+        return _product_template_options(options, policy or {}, requested_budget or {})
+    return {
+        **options,
+        "severity": options.get("severity") or "critical,high,medium,low,info",
+        **({"filter_template_severity": True} if options.get("severity") else {}),
+        "template_ids": _CANONICAL_PASSIVE_NUCLEI_IDS,
+        "template_pack_digest": canonical_passive_nuclei_template_pack_digest(),
+        "template_request_cost_upper_bound": (
+            canonical_passive_nuclei_request_upper_bound()
+        ),
+    }
+
+
+def _product_template_options(
+    options: Mapping[str, Any], policy: Mapping[str, Any], requested_budget: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The worker's selection for a recognised product's templates (runtime/product_templates.py).
+
+    Resolved from the pinned bundle on the worker; refused (nothing sent) when the window is
+    empty, needs a permission the Hunt lacks, or could send more than the call reserved."""
+    try:
+        product, checks, window = product_request(options)
+    except ValueError as exc:
+        raise AgentToolError(str(exc)) from exc
+    from scan.nuclei_template_index import nuclei_templates_directory
+
+    state_changing = checks == "state_changing"
+    selection = resolve_product_window(
+        nuclei_templates_directory(), product, checks, window,
+        allow_state_changing_http=bool(policy.get("active_testing") and policy.get("allow_state_changing_http")),
+    )
+    if selection.skip_reason:
+        raise AgentToolError(
+            f"product templates {product} {checks} window {window}: {selection.skip_reason}"
+            + (f" (the selection has {selection.windows} windows)" if selection.windows else ""))
+    held = int(requested_budget.get("http_requests") or 0)
+    if state_changing:
+        held = min(held, int(requested_budget.get("verifier_write_requests") or 0))
+    if selection.request_upper_bound > held:
+        raise AgentToolError(
+            f"product templates {product} window {window} may send {selection.request_upper_bound} "
+            f"requests; the call holds {held}")
+    return {
+        **{key: options[key] for key in ("path", "as_principal", "session_ref", "request_bindings")
+           if key in options},
+        "product": product, "product_checks": checks, "product_window": window,
+        "template_ids": ",".join(selection.template_ids),
+        "template_profile": "product",
+        "product_request_upper_bound": selection.request_upper_bound,
+        "nuclei_active_state_changing": state_changing,
+    }
+
+
+def resolve_hunt_interactsh_config(
+    *,
+    allow_active: bool,
+    allow_oob: bool,
+    reserved_oob_interactions: int,
+) -> tuple[str | None, str | None]:
+    """Resolve the operator-configured private OOB server for a gated hunt, or (None, None).
+
+    Active approval, persisted OOB authority, a durable nonzero OOB reservation, and an
+    operator-owned private server are all required. This is off by default, so deployment
+    configuration alone can never grant a Hunt external OOB egress.
+    """
+    if (
+        not allow_active
+        or not allow_oob
+        or int(reserved_oob_interactions) <= 0
+    ):
+        return None, None
+    server = validate_private_interactsh_server(os.environ.get("SHAKERSCAN_HUNT_INTERACTSH_SERVER"))
+    if not server:
+        return None, None
+    token = str(os.environ.get("SHAKERSCAN_HUNT_INTERACTSH_TOKEN") or "").strip() or None
+    if token and (any(ch in token for ch in "\r\n") or len(token) > 512):
+        token = None
+    return server, token
+
+
+def canonical_hunt_scanner_execution(
+    capability_name: str,
+    planner_input: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    requested_budget: Mapping[str, Any],
+) -> tuple[dict[str, Any], str | None, str | None]:
+    """Return the server-derived scanner options and independently gated OOB config."""
+    options = canonical_hunt_scanner_options(capability_name, planner_input, policy, requested_budget)
+    server, token = resolve_hunt_interactsh_config(
+        allow_active=bool(policy.get("active_testing")),
+        allow_oob=bool(policy.get("allow_oob_interactions")),
+        reserved_oob_interactions=int(
+            requested_budget.get("oob_interactions") or 0
+        ),
+    )
+    return options, server, token
+
+
+def _apply_nuclei_interactsh(argv: list[str], server: str | None, token: str | None) -> list[str]:
+    """Enable nuclei OOB against a validated private server; otherwise leave argv unchanged.
+
+    When enabled we also drop ``-proxy-internal`` so nuclei's interactsh client can reach the
+    operator's private OOB server directly. Target scan traffic still rides ``-proxy`` (the pinned
+    loopback SOCKS broker), so egress pinning of the actual scan is preserved.
+    """
+    validated = validate_private_interactsh_server(server)
+    if not validated:
+        return argv
+    result = [flag for flag in argv if flag not in {"-no-interactsh", "-proxy-internal"}]
+    result += ["-interactsh-server", validated]
+    if token:
+        result += ["-interactsh-token", token]
+    return result
+
+
+_TRUSTED_SCANNER_HEADER_NAME = re.compile(
+    r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,120}$"
+)
+_RESERVED_TRUSTED_SCANNER_HEADERS = frozenset({
+    "connection", "content-length", "host", "transfer-encoding",
+})
+# A cookie name sqlmap can be told to skip: a token without the comma its list splits on.
+_COOKIE_NAME_TOKEN = re.compile(r"[!#$%&'+\-.^_`|~0-9A-Za-z]{1,128}")
+_HTTP_HEADER_SCANNER_FLAGS: dict[str, str] = {
+    "httpx": "-H",
+    "nuclei": "-H",
+    "katana": "-H",
+    "katana_headless": "-H",
+    "ffuf": "-H",
+    "dalfox": "--header",
+}
+
+
+def _trusted_scanner_header_args(
+    name: str, trusted_headers: Mapping[str, Any] | None,
+) -> list[str]:
+    """Render worker-resolved headers for fixed HTTP adapters, never planner options.
+
+    A value carrying the tool's own injection marker is refused. sqlmap is also told to skip the
+    session's cookies (``--skip``): from ``--level 2`` it tests every cookie as a parameter, and a
+    signed-in run must not inject into the session it runs as."""
+    if not trusted_headers:
+        return []
+    if not isinstance(trusted_headers, Mapping):
+        raise AgentToolError("trusted scanner headers must be a mapping")
+    rendered: list[tuple[str, str]] = []
+    normalized_names: set[str] = set()
+    for raw_name, raw_value in trusted_headers.items():
+        header_name = str(raw_name or "").strip()
+        header_value = str(raw_value or "")
+        normalized_name = header_name.lower()
+        if (
+            not _TRUSTED_SCANNER_HEADER_NAME.fullmatch(header_name)
+            or normalized_name in _RESERVED_TRUSTED_SCANNER_HEADERS
+            or normalized_name in normalized_names
+            or not header_value
+            or not header_value.isascii()
+            or len(header_value.encode("ascii")) > 8_192
+            or any(ord(character) < 32 or ord(character) == 127
+                   for character in header_value)
+        ):
+            raise AgentToolError("trusted scanner headers are invalid")
+        if any(marker in header_name or marker in header_value
+               for marker in SCANNER_HEADER_MARKERS.get(name, ())):
+            raise AgentToolError(
+                f"{name} cannot run with this identity: a header value carries the tool's own "
+                "injection marker")
+        normalized_names.add(normalized_name)
+        rendered.append((header_name, header_value))
+    rendered.sort(key=lambda item: item[0].lower())
+    lines = [f"{header_name}: {header_value}" for header_name, header_value in rendered]
+    if name == "sqlmap":
+        cookies = sorted({
+            part.split("=", 1)[0].strip()
+            for header_name, header_value in rendered if header_name.lower() == "cookie"
+            for part in header_value.split(";") if "=" in part and part.split("=", 1)[0].strip()
+        })
+        if any(not _COOKIE_NAME_TOKEN.fullmatch(cookie) for cookie in cookies):
+            raise AgentToolError("sqlmap cannot run with this identity: a cookie name is invalid")
+        return ["--headers", "\n".join(lines), *(["--skip", ",".join(cookies)] if cookies else [])]
+    flag = _HTTP_HEADER_SCANNER_FLAGS.get(name)
+    if not flag:
+        raise AgentToolError(f"{name} does not accept HTTP credential headers")
+    return [value for line in lines for value in (flag, line)]
+
+
+def httpx_credential_config_bytes(trusted_headers: Mapping[str, Any]) -> bytes:
+    """Serialize only validated header values, never arbitrary tool configuration."""
+    lines = _trusted_scanner_header_args("httpx", trusted_headers)[1::2]
+    encoded = json.dumps({"header": lines}, ensure_ascii=True, separators=(",", ":")).encode()
+    if not lines or len(encoded) > 65_536:
+        raise AgentToolError("HTTP probe configuration is invalid")
+    return encoded
+
+
+# A credential piece shorter than this is not masked on its own in scanner output: it protects
+# nothing (a few thousand guesses find it), and masking every occurrence of a value such as a
+# target's ``sess=1`` cookie rewrote each "1" in every URL, host and port of the output, so a
+# port read as ``***8999`` and the Scan's finalization failed.
+MIN_REDACTION_PIECE = 6
+
+
+def scanner_credential_redaction_values(headers: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Worker-local reflection redaction, including supported Authorization and Cookie forms."""
+    values = set()
+    for name, value in (headers or {}).items():
+        value = str(value)
+        values.add(value)
+        if str(name).lower() in {"authorization", "proxy-authorization"} and " " in value:
+            scheme, material = value.split(" ", 1)
+            values.add(material)
+            if scheme.lower() == "basic":
+                try:
+                    values.update(base64.b64decode(material, validate=True).decode().split(":", 1))
+                except (ValueError, UnicodeError, binascii.Error):
+                    pass
+        if str(name).lower() == "cookie":
+            values.update(part.partition("=")[2].strip().strip('"') for part in value.split(";"))
+    return tuple(value for value in values if len(value) >= MIN_REDACTION_PIECE)
+
+
+def build_scanner_argv(
+    name: str,
+    url: str,
+    options: dict[str, Any],
+    *,
+    pinned_address: str | None = None,
+    pinned_proxy_url: str | None = None,
+    oob_interactsh_server: str | None = None,
+    oob_interactsh_token: str | None = None,
+    trusted_headers: Mapping[str, Any] | None = None,
+    attribution_label: str | None = None,
+) -> tuple[str, list[str], int]:
+    """Return (binary, argv, timeout_ms) for a scanner run. The binary name is NOT in argv
+    (passed separately to the subprocess); every flag is hardcoded in the template.
+
+    ``attribution_label`` (``scan:<id>``/``hunt:<id>``) adds the run's declared identification
+    header (``traffic_attribution``); None uses the run bound to the calling task, if any."""
+    if name == "httpx" and trusted_headers:
+        _trusted_scanner_header_args(name, trusted_headers)
+        raise AgentToolError("httpx credentials require sealed worker configuration")
+    template = SCANNER_ARG_TEMPLATES[name]
+    execution_url = url
+    pin_args: list[str] = []
+    if name in ("nmap", "naabu") and pinned_address:
+        # Host/port posture tools support neither SOCKS proxies nor Host/SNI overrides, so
+        # pinning replaces the scan HOST with the pinned IP itself: the template extracts
+        # host+port from this URL. The hostname is intentionally dropped (no SNI needed for
+        # port/service posture); egress stays frozen to the authorized address. This branch
+        # takes precedence over the SOCKS broker, which these tools cannot ride.
+        execution_url, _hostname, _host_header = _pinned_scanner_url(url, pinned_address)
+    elif pinned_proxy_url:
+        if not re.fullmatch(r"socks5://127\.0\.0\.1:\d{1,5}", pinned_proxy_url):
+            raise AgentToolError("scanner pinned proxy must be a loopback SOCKS5 URL")
+        if name in ("nmap", "naabu"):
+            raise AgentToolError(
+                f"{name} cannot ride the SOCKS pinning broker without a pinned address to scan directly"
+            )
+        proxy_flags = {
+            "httpx": ["-http-proxy", pinned_proxy_url],
+            "nuclei": ["-proxy", pinned_proxy_url, "-proxy-internal"],
+            "katana": ["-proxy", pinned_proxy_url],
+            "katana_headless": ["-proxy", pinned_proxy_url],
+            "ffuf": ["-x", pinned_proxy_url],
+            "dalfox": ["--proxy", pinned_proxy_url],
+            "sqlmap": [f"--proxy={pinned_proxy_url}"],
+        }
+        pin_args = proxy_flags[name]
+    elif pinned_address:
+        execution_url, hostname, host_header = _pinned_scanner_url(url, pinned_address)
+        if name == "httpx":
+            pin_args = ["-H", f"Host: {host_header}", "-sni-name", hostname]
+        elif name == "nuclei":
+            pin_args = ["-H", f"Host: {host_header}", "-sni", hostname]
+        elif name in KATANA_TOOLS:
+            pin_args = ["-H", f"Host: {host_header}"]
+        elif name == "ffuf":
+            pin_args = ["-H", f"Host: {host_header}", "-sni", hostname]
+        elif name == "dalfox":
+            pin_args = ["--header", f"Host: {host_header}"]
+        elif name == "sqlmap":
+            pin_args = ["--host", host_header]
+    argv = (
+        template["build"](execution_url, options or {})
+        + pin_args
+        + _trusted_scanner_header_args(name, trusted_headers)
+    )
+    argv = _with_attribution(name, argv, attribution_label)
+    if name in KATANA_TOOLS and trusted_headers:
+        # A crawl carrying a session must not follow an action link: /logout ends the session
+        # and /account/delete changes the account, which the anonymous crawl cannot do.
+        argv += ["-crawl-out-scope", navigation_exclusion_expression()]
+    if name == "nuclei":
+        argv = _apply_nuclei_interactsh(argv, oob_interactsh_server, oob_interactsh_token)
+    return (
+        template["binary"],
+        argv,
+        int(template["default_timeout_ms"]),
+    )
+
+
+def _with_attribution(name: str, argv: list[str], label: str | None) -> list[str]:
+    """``argv`` plus the run's identification header; sqlmap takes it inside its one
+    ``--headers`` value, every other HTTP tool as an extra header flag."""
+    headers = traffic_attribution.headers(label)
+    if not headers:
+        return argv
+    line = f"{traffic_attribution.HEADER}: {headers[traffic_attribution.HEADER]}"
+    if name == "sqlmap":
+        out = list(argv)
+        if "--headers" in out[:-1]:
+            index = out.index("--headers") + 1
+            out[index] = f"{out[index]}\n{line}" if out[index] else line
+            return out
+        return [*out, "--headers", line]
+    return [*argv, *traffic_attribution.tool_arguments(name, headers[traffic_attribution.HEADER])]
+
+
+def _batch_attempt_pacing(
+    http: int, wall: int, *, minimum_seconds: float, latency_seconds: float = 0.0,
+) -> tuple[float, int]:
+    """Pace one batched attempt so its reservation bounds its traffic over the whole wall.
+
+    Nothing counts requests at run time for these tools, and the process runs until the
+    wall kills it, so the inter-request delay is the only thing that keeps actual traffic
+    inside the reservation over that entire window. The delay must therefore bound the
+    request count across the FULL wall.
+
+    Pacing across only a fraction of the wall (an earlier attempt to leave process
+    start-up headroom) made the delay too small: over the full wall the tool kept issuing
+    requests and sent ~1/fraction times its reserved count -- e.g. a 400-request / 180s
+    attempt paced at 0.6 of the wall ran ~666 requests, tripped the pinned
+    connection/wire ceiling at request 401, and failed as ``adapter_failed`` with the
+    full request hold consumed and nothing proven. On the benchmark this is exactly how
+    every injectable SQLi candidate came back partial: sqlmap did real work, overran the
+    ceiling, and its verdict was discarded. Higher-latency remote targets keep the tool
+    busy longer and trip it even more reliably.
+
+    A verdict needs far fewer requests than the reservation grants (sqlmap reaches one on
+    an obvious injection in about a hundred), so pacing the reserved count across the full
+    wall still reaches the verdict early while keeping the reservation a true upper bound.
+    ``_BATCH_ATTEMPT_REQUEST_HEADROOM`` keeps the paced rate strictly under the ceiling so
+    scheduling jitter cannot cross it.
+    """
+    # Pace the reserved count (less a headroom margin) across the WHOLE wall, so
+    # requests_sent = wall / delay stays below the ceiling however long the tool runs. A
+    # latency measured on an earlier attempt shortens the delay (scan.external_process).
+    return paced_request_delay(
+        http, wall, minimum_seconds=minimum_seconds, latency_seconds=latency_seconds,
+    )
+
+
+def _auth_probe_minimum(options: Mapping[str, Any], minimum_seconds: float) -> float:
+    """The least delay between requests: the paced rate on a sign-in endpoint probe.
+
+    A parallel child of a split Scan paces the endpoint slower (``probe_pace_seconds``); nothing
+    paces it faster than one request per ``AUTH_ENDPOINT_SECONDS_PER_REQUEST``.
+    """
+    if options.get("probe_profile") != AUTH_ENDPOINT_PROBE_PROFILE:
+        return minimum_seconds
+    raw = options.get("probe_pace_seconds")
+    pace = (
+        float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0
+        else 0.0
+    )
+    return max(minimum_seconds, float(AUTH_ENDPOINT_SECONDS_PER_REQUEST), min(pace, 600.0))
+
+
+def _replace_argv_value(argv: list[str], flag: str, value: Any) -> None:
+    try:
+        index = argv.index(flag)
+        argv[index + 1] = str(value)
+    except (ValueError, IndexError) as exc:
+        raise AgentToolError(f"scanner command is missing required flag: {flag}") from exc
+
+
+def scanner_ffuf_wordlist_sources(options: Mapping[str, Any] | None = None) -> tuple[str, ...]:
+    """The bundled source paths a selection reads, in order (never a caller-supplied path)."""
+    selected = str(dict(options or {}).get("wordlist") or "").strip().lower()
+    return _AGENT_FFUF_WORDLIST_SOURCES.get(selected) or (
+        _AGENT_FFUF_WORDLISTS.get(selected, _AGENT_FFUF_WORDLISTS["common"]),
+    )
+
+
+def scanner_ffuf_wordlist_source(options: Mapping[str, Any] | None = None) -> str:
+    """The first bundled source a selection reads; callers can never supply a filesystem path."""
+    return scanner_ffuf_wordlist_sources(options)[0]
+
+
+def _external_verification_hard(
+    tool: str, reservation: Mapping[str, int], *, headless: bool = False,
+) -> dict[str, int]:
+    """Process ceiling of one non-batch verification reserved at or above its floor.
+
+    A reservation that covers the whole reviewed ceiling runs with it (a thorough Hunt hold keeps
+    its longer wall). Any other one runs exactly at the floor, as every reservation did before, so
+    a registry-sized hold keeps the floor profile. The paced rate times either wall stays within
+    the request hold; a shape in between, such as 400 requests over 480 s, would not.
+    """
+    floor = EXTERNAL_VERIFICATION_FLOORS[tool]
+    ceiling = floor if headless else _EXTERNAL_VERIFICATION_CEILINGS[tool]
+    covered = all(
+        int(reservation.get(name) or 0) >= int(amount) for name, amount in ceiling.items()
+    )
+    return dict(ceiling if covered else floor)
+
+
+def build_enforced_scanner_plan(
+    name: str,
+    url: str,
+    options: dict[str, Any],
+    *,
+    reserved_budget: Mapping[str, Any],
+    pinned_address: str | None = None,
+    pinned_proxy_url: str | None = None,
+    oob_interactsh_server: str | None = None,
+    oob_interactsh_token: str | None = None,
+    trusted_headers: Mapping[str, Any] | None = None,
+    runtime_paths: Mapping[str, Any] | None = None,
+) -> EnforcedProcessPlan:
+    """Build and prove a command whose worst-case wire use fits ``reserved_budget``.
+
+    This is the sole authoritative builder used by worker process creation. The
+    older tuple builder remains a compatibility renderer for inspection/tests;
+    it is not sufficient authority to launch a process.
+    """
+    scanner = str(name or "").strip().lower()
+    reservation: dict[str, int] = {}
+    for raw_name, raw_amount in dict(reserved_budget or {}).items():
+        try:
+            amount = int(raw_amount)
+        except (TypeError, ValueError) as exc:
+            raise AgentToolError("scanner reservation must contain integers") from exc
+        if amount > 0:
+            reservation[str(raw_name)] = amount
+    wall = int(reservation.get("tool_wall_seconds") or 0)
+    if wall < 1:
+        raise AgentToolError("scanner reservation has no wall-clock capacity")
+    runtime = dict(runtime_paths or {})
+    internal_options = dict(options or {})
+    batch_attempt = internal_options.pop("_batch_attempt", False) is True
+    raw_latency = internal_options.pop("_measured_latency_seconds", None)
+    measured_latency = 0.0
+    if raw_latency is not None:
+        if isinstance(raw_latency, bool) or not isinstance(raw_latency, (int, float)) or not (
+            0.0 <= float(raw_latency) <= MAXIMUM_MEASURED_LATENCY_SECONDS
+        ):
+            raise AgentToolError("measured scanner latency is invalid")
+        measured_latency = float(raw_latency)
+    # The target's health sets this attempt's share of its planned rate (runtime.target_pacing):
+    # 1 as planned, 0.5 or 0.25 while the target degrades. Never above the planned rate.
+    raw_factor = internal_options.pop("_pacing_factor", None)
+    pacing_factor = 1.0
+    if raw_factor is not None:
+        if isinstance(raw_factor, bool) or not isinstance(raw_factor, (int, float)) or not (
+            0.0 < float(raw_factor) <= 1.0
+        ):
+            raise AgentToolError("scanner pacing factor is invalid")
+        pacing_factor = float(raw_factor)
+
+    def paced_rate(rate: int) -> int:
+        return max(1, int(rate * pacing_factor))
+
+    if scanner == "ffuf" and runtime.get("ffuf_wordlist"):
+        internal_options["wordlist"] = "common"
+
+    httpx_config_fd = None
+    if scanner == "httpx" and trusted_headers:
+        httpx_credential_config_bytes(trusted_headers)
+        httpx_config_fd = runtime.get("httpx_config_fd")
+        if type(httpx_config_fd) is not int or httpx_config_fd < 3:
+            raise AgentToolError("httpx credentials require sealed worker configuration")
+    binary, argv, template_timeout_ms = build_scanner_argv(
+        scanner,
+        url,
+        internal_options,
+        pinned_address=pinned_address,
+        pinned_proxy_url=pinned_proxy_url,
+        # The executable contract is self-contained. OOB traffic cannot be
+        # counted by the target-bound limiter, so it is always disabled here.
+        oob_interactsh_server=None,
+        oob_interactsh_token=None,
+        trusted_headers=None if httpx_config_fd is not None else trusted_headers,
+    )
+    if httpx_config_fd is not None:
+        argv.extend(["-config", f"/proc/self/fd/{httpx_config_fd}"])
+    timeout_seconds = max(1, min(wall, int(math.ceil(template_timeout_ms / 1000))))
+    timeout_ms = timeout_seconds * 1_000
+    proof_inputs: dict[str, Any]
+
+    if scanner == "httpx":
+        if reservation.get("http_requests", 0) < 1:
+            raise AgentToolError("httpx requires one reserved HTTP request")
+        hard = {"http_requests": 1, "tool_wall_seconds": timeout_seconds}
+        mode, method = "exact", "exact_request_count"
+        proof_inputs = {
+            "targets": 1, "redirects": 0, "fallbacks": 0, "retries": 0,
+        }
+    elif scanner == "katana":
+        http = int(reservation.get("http_requests") or 0)
+        # Katana needs a small process-shutdown window after its internal crawl
+        # duration expires.  Giving the crawler and the supervising worker the
+        # same deadline makes normal teardown race the hard kill and turns a
+        # healthy bounded crawl into a timeout with partial output.
+        if wall < 2:
+            raise AgentToolError(
+                "katana requires two reserved wall-clock seconds"
+            )
+        # A flat 30-second box spent 150 of a thorough Scan's 60,000 authorized
+        # requests and returned one route from a real site. The reservation is
+        # already the ceiling -- rate is derived from it below -- so the crawl
+        # runs for the wall time it actually holds. More budget buys a longer
+        # look at the same polite rate, never a louder one.
+        # Reserve the teardown window first. Sizing the crawl to the whole wall
+        # and taking the grace from what is left gives the crawler and its
+        # supervisor the same deadline, which is the race this grace exists to
+        # avoid; a longer crawl must not buy itself a shorter shutdown.
+        shutdown_grace = min(5, max(1, wall // 10))
+        desired_duration = min(_KATANA_MAX_CRAWL_SECONDS, max(0, http - 1))
+        duration = min(desired_duration, wall - shutdown_grace)
+        if duration < 1:
+            raise AgentToolError("katana requires two reserved HTTP requests")
+        # Spend the reserved request budget instead of throttling to one request
+        # per second and discarding it. A crawl that reserves 150 requests but
+        # emits ~31 cannot enumerate a real application's surface: against an
+        # SPA it returned paths with no query parameters, so candidate
+        # generation produced nothing and every active family had no work.
+        # The rate is derived from the reservation so the hard ceiling stays
+        # exactly within it: rate * duration + 1 <= reserved http_requests.
+        rate = paced_rate(max(1, min(_KATANA_MAX_RATE_PER_SECOND, (http - 1) // max(1, duration))))
+        _replace_argv_value(argv, "-rate-limit", rate)
+        _replace_argv_value(argv, "-concurrency", rate)
+        inputs, per_input = _fit_crawl_inputs(argv, duration, scanner=scanner)
+        _replace_argv_value(argv, "-crawl-duration", f"{per_input}s")
+        timeout_seconds = duration + shutdown_grace
+        timeout_ms = timeout_seconds * 1_000
+        # One initial token plus the rate for each elapsed second.
+        hard = {
+            "http_requests": rate * duration + 1,
+            "tool_wall_seconds": timeout_seconds,
+        }
+        mode, method = "conservative", "rate_time_upper_bound"
+        proof_inputs = {
+            "rate_per_second": rate, "duration_seconds": duration,
+            "startup_burst": 1, "redirects": 0, "form_fill": False,
+            "depth": 2, "concurrency": rate,
+            "shutdown_grace_seconds": shutdown_grace,
+            **({"inputs": inputs, "input_duration_seconds": per_input} if inputs > 1 else {}),
+        }
+    elif scanner == "katana_headless":
+        http = int(reservation.get("http_requests") or 0)
+        chrome_data_dir = str(runtime.get("chrome_data_dir") or "")
+        if chrome_data_dir:
+            try:
+                profile_stat = os.stat(chrome_data_dir, follow_symlinks=False)
+            except OSError as exc:
+                raise AgentToolError(
+                    "headless browser profile must be a worker-owned directory"
+                ) from exc
+            if (
+                not os.path.isabs(chrome_data_dir)
+                or not os.path.isdir(chrome_data_dir)
+                or os.path.islink(chrome_data_dir)
+                or profile_stat.st_uid != os.geteuid()
+                or profile_stat.st_mode & 0o077
+            ):
+                raise AgentToolError(
+                    "headless browser profile must be a worker-owned directory"
+                )
+            argv.extend([
+                "-no-incognito", "-chrome-data-dir", chrome_data_dir,
+            ])
+        # A browser needs a longer teardown window than the bare crawler: it has
+        # a Chromium process group to close before katana can exit cleanly.
+        if wall < 12:
+            raise AgentToolError(
+                "headless crawl requires twelve reserved wall-clock seconds"
+            )
+        shutdown_grace = 10
+        # The bound is egress over the time box, not a count of page assets. A
+        # browser fetches every subresource of every page it opens and katana's
+        # crawl rate does not govern those, so counting only crawl requests would
+        # understate real traffic and let the run exceed its own reservation.
+        # Deriving the duration from the reservation keeps the ceiling inside it:
+        # rate_per_second * duration + 1 <= reserved http_requests.
+        affordable = (http - 1) // _BROWSER_MAX_REQUESTS_PER_SECOND
+        duration = min(_BROWSER_MAX_CRAWL_SECONDS, affordable, wall - shutdown_grace)
+        if duration < 1:
+            raise AgentToolError(
+                "headless crawl requires a reservation covering one bounded second"
+            )
+        inputs, per_input = _fit_crawl_inputs(argv, duration, scanner=scanner)
+        _replace_argv_value(argv, "-crawl-duration", f"{per_input}s")
+        timeout_seconds = duration + shutdown_grace
+        timeout_ms = timeout_seconds * 1_000
+        hard = {
+            "http_requests": _BROWSER_MAX_REQUESTS_PER_SECOND * duration + 1,
+            "tool_wall_seconds": timeout_seconds,
+        }
+        mode, method = "conservative", "browser_rate_time_upper_bound"
+        proof_inputs = {
+            "rate_per_second": _BROWSER_MAX_REQUESTS_PER_SECOND,
+            "duration_seconds": duration, "startup_burst": 1,
+            "redirects": 0, "form_fill": False, "depth": 2, "concurrency": 4,
+            "shutdown_grace_seconds": shutdown_grace,
+            "browser": "system_chromium",
+            "browser_profile_seeded": bool(chrome_data_dir),
+            **({"inputs": inputs, "input_duration_seconds": per_input} if inputs > 1 else {}),
+        }
+    elif scanner == "ffuf":
+        wordlist_path = str(runtime.get("ffuf_wordlist") or "")
+        try:
+            entry_count = int(runtime.get("ffuf_word_count") or 0)
+        except (TypeError, ValueError) as exc:
+            raise AgentToolError("ffuf bounded wordlist count is invalid") from exc
+        if (
+            not wordlist_path
+            or not os.path.isabs(wordlist_path)
+            or entry_count < 1
+            or entry_count > int(reservation.get("http_requests") or 0)
+        ):
+            raise AgentToolError("ffuf requires a bounded worker-owned wordlist")
+        _replace_argv_value(argv, "-w", wordlist_path)
+        # The wordlist, not rate*time, is the exact request ceiling.  Scale
+        # throughput so the immutable list can finish inside the reservation;
+        # forcing one request per second made the 108-entry bundled list time
+        # out after only 39 requests despite a 75-second action hold.
+        maxtime = wall
+        usable_seconds = max(1, maxtime - 2)
+        rate = paced_rate(max(1, int(math.ceil(entry_count / usable_seconds))))
+        _replace_argv_value(argv, "-t", min(5, rate))
+        _replace_argv_value(argv, "-rate", rate)
+        _replace_argv_value(argv, "-maxtime", maxtime)
+        timeout_seconds = maxtime
+        timeout_ms = maxtime * 1_000
+        hard = {"http_requests": entry_count, "tool_wall_seconds": maxtime}
+        mode, method = "exact", "exact_wordlist"
+        proof_inputs = {
+            "entries": entry_count, "auto_calibration_requests": 0,
+            "redirects": 0, "recursion": False,
+            "threads": min(5, rate), "rate_per_second": rate,
+        }
+    elif scanner == "nuclei":
+        http = int(reservation.get("http_requests") or 0)
+        passive_cost = internal_options.get(
+            "template_request_cost_upper_bound"
+        )
+        product_cost = internal_options.get("product_request_upper_bound")
+        if str(internal_options.get("template_profile") or "") == "product":
+            # The window's static request bound (runtime/product_templates.py) is the ceiling:
+            # no retries, no redirects, no OOB, every template's requests counted once per
+            # payload combination.
+            if (
+                isinstance(product_cost, bool) or not isinstance(product_cost, int)
+                or not 1 <= product_cost <= http
+            ):
+                raise AgentToolError("nuclei product template request ceiling exceeds the reservation")
+            rate = paced_rate(_NUCLEI_RATE_CEILING)
+            _replace_argv_value(argv, "-rate-limit", rate)
+            _replace_argv_value(argv, "-bulk-size", min(10, rate))
+            _replace_argv_value(argv, "-concurrency", min(10, rate))
+            timeout_seconds, timeout_ms = wall, wall * 1_000
+            hard = {"http_requests": product_cost, "tool_wall_seconds": wall}
+            mode, method = "exact", "reviewed_template_allowlist"
+            proof_inputs = {
+                "profile": "product_templates",
+                "template_count": len([item for item in str(internal_options.get("template_ids") or "").split(",") if item]),
+                "template_request_upper_bound": product_cost,
+                "state_changing": bool(internal_options.get("nuclei_active_state_changing")),
+                "retries": 0, "redirects": 0, "public_oob": False,
+            }
+        elif passive_cost is not None:
+            if (
+                isinstance(passive_cost, bool)
+                or not isinstance(passive_cost, int)
+                or passive_cost != canonical_passive_nuclei_request_upper_bound()
+                or internal_options.get("template_ids")
+                != _CANONICAL_PASSIVE_NUCLEI_IDS
+                or passive_cost > http
+            ):
+                raise AgentToolError(
+                    "nuclei passive template request ceiling is not canonical"
+                )
+            _replace_argv_value(argv, "-rate-limit", paced_rate(min(10, passive_cost)))
+            _replace_argv_value(argv, "-bulk-size", 1)
+            _replace_argv_value(argv, "-concurrency", 1)
+            timeout_seconds, timeout_ms = wall, wall * 1_000
+            hard = {
+                "http_requests": passive_cost,
+                "tool_wall_seconds": wall,
+            }
+            mode, method = "exact", "reviewed_template_allowlist"
+            proof_inputs = {
+                "profile": "passive_read_only",
+                "template_count": len(CANONICAL_PASSIVE_NUCLEI_TEMPLATES),
+                "template_request_upper_bound": passive_cost,
+                "methods": ["GET"],
+                "retries": 0,
+                "redirects": 0,
+                "public_oob": False,
+            }
+        elif batch_attempt and http >= 1:
+            # Re-pace to the reservation, as every other batched tool already is. nuclei was
+            # the exception: its argv fixes `-rate-limit 10`, so a 45-second attempt holding
+            # 120 requests planned ~450 -- about 3.75x. It tripped the wire ceiling
+            # ("external_process_contract:wire limiter reported traffic above the hard
+            # ceiling"), was charged its whole reservation anyway, and surfaced as the
+            # catch-all `adapter_failed`, repeatedly and expensively.
+            #
+            # nuclei's knob is a rate, not a per-request delay, and the tool may run for the
+            # whole wall, so the bound is rate x wall <= hold across the entire wall. The
+            # delay-based _batch_attempt_pacing used by sqlmap/dalfox paces against a
+            # fraction of the wall, which would overshoot here.
+            # Derive the rate from the hold, but never above the rate this argv has always
+            # used: a large reservation must not become a way to send more than 10/s as a
+            # side effect of a throttling fix. Raising the ceiling is a separate decision.
+            rate_per_second = paced_rate(min(_NUCLEI_RATE_CEILING, max(1, http // max(1, wall))))
+            paced_wall = wall
+            if rate_per_second * paced_wall > http:
+                # One request per second is nuclei's floor: a hold thinner than the wall has
+                # to shorten the wall rather than let the rate outrun the hold.
+                paced_wall = max(1, http // rate_per_second)
+            burst = max(1, min(10, rate_per_second))
+            _replace_argv_value(argv, "-rate-limit", rate_per_second)
+            _replace_argv_value(argv, "-bulk-size", burst)
+            _replace_argv_value(argv, "-concurrency", burst)
+            hard = {"http_requests": http, "tool_wall_seconds": paced_wall}
+            timeout_seconds, timeout_ms = paced_wall, paced_wall * 1_000
+            mode, method = "conservative", "runtime_transport_wall_limiter"
+            proof_inputs = {
+                "profile": "batch_attempt", "targets": 1,
+                "connection_ceiling": http, "wall_seconds": paced_wall,
+                "rate_per_second": rate_per_second, "burst": burst,
+                "retries": 0, "redirects": 0, "public_oob": False,
+            }
+            _apply_nuclei_state_changing_hard_budget(
+                hard, proof_inputs, internal_options, reservation, http,
+            )
+        elif http >= 4_000 and wall >= 300:
+            hard = {"http_requests": 4_000, "tool_wall_seconds": 300}
+            timeout_seconds, timeout_ms = 300, 300_000
+            mode, method = "conservative", "fixed_conservative_profile"
+            proof_inputs = {
+                "profile": "full", "rate_per_second": 10,
+                "duration_seconds": 300, "startup_and_engine_overhead": 1_000,
+                "retries": 0, "redirects": 0, "public_oob": False,
+            }
+            _apply_nuclei_state_changing_hard_budget(
+                hard, proof_inputs, internal_options, reservation, 4_000,
+            )
+        else:
+            raise AgentToolError(
+                "nuclei active profile requires 4000 HTTP requests and 300 seconds"
+            )
+    elif scanner == "dalfox":
+        # Bind the HAR into the job's private scratch directory when the worker supplied one.
+        # Plan-construction callers that only validate the reservation pass none and keep the
+        # template default; the worker always supplies it (see SCANNER_WIRE_LOG_FILES).
+        dalfox_scratch = str(runtime.get("scratch_dir") or "")
+        if dalfox_scratch:
+            argv = bind_scanner_runtime_paths("dalfox", argv, scratch_dir=dalfox_scratch)
+        http = int(reservation.get("http_requests") or 0)
+        deep_domxss = bool(options.get("deep_domxss"))
+        dalfox_workers = 10 if deep_domxss else 3
+        if batch_attempt and http >= 1:
+            delay_seconds, affordable = _batch_attempt_pacing(
+                http, wall, minimum_seconds=_auth_probe_minimum(internal_options, 0.05),
+            )
+            delay_seconds = min(float(wall), delay_seconds / pacing_factor)
+            _replace_argv_value(argv, "--delay", str(max(1, int(delay_seconds * 1_000))))
+            hard = {"http_requests": affordable, "tool_wall_seconds": wall}
+            timeout_seconds, timeout_ms = wall, wall * 1_000
+            mode, method = "conservative", "runtime_transport_wall_limiter"
+            proof_inputs = {
+                "profile": "batch_attempt", "targets": 1,
+                "connection_ceiling": affordable, "wall_seconds": wall,
+                "delay_ms": max(1, int(delay_seconds * 1_000)),
+                "workers": dalfox_workers, "headless": deep_domxss,
+                "blind_oob": False,
+            }
+        elif (
+            http >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["http_requests"]
+            and wall >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["tool_wall_seconds"]
+        ):
+            hard = _external_verification_hard(
+                "dalfox", reservation, headless=deep_domxss,
+            )
+            timeout_seconds = hard["tool_wall_seconds"]
+            timeout_ms = timeout_seconds * 1_000
+            mode, method = "conservative", "fixed_conservative_profile"
+            proof_inputs = {
+                "profile": "full", "targets": 1, "workers": dalfox_workers,
+                "delay_ms": 0 if deep_domxss else 1_000,
+                "headless": deep_domxss,
+                "parameter_mining": False, "blind_oob": False,
+            }
+        else:
+            floor = EXTERNAL_VERIFICATION_FLOORS["dalfox"]
+            raise AgentToolError(
+                f"dalfox verification requires {floor['http_requests']} HTTP "
+                f"requests and {floor['tool_wall_seconds']} seconds"
+            )
+    elif scanner == "sqlmap":
+        sqlmap_output_dir = str(runtime.get("sqlmap_output_dir") or "")
+        argv = bind_scanner_runtime_paths(
+            "sqlmap", argv, scratch_dir=sqlmap_output_dir,
+        )
+        _replace_argv_value(argv, "--threads", 1)
+        _replace_argv_value(argv, "--retries", 0)
+        http = int(reservation.get("http_requests") or 0)
+        technique = argv[argv.index("--technique") + 1]
+        delay_seconds = 1.0
+        if batch_attempt and http >= 1:
+            delay_seconds, affordable = _batch_attempt_pacing(
+                http, wall, minimum_seconds=_auth_probe_minimum(internal_options, 0.05),
+                latency_seconds=measured_latency,
+            )
+            delay_seconds = min(float(wall), delay_seconds / pacing_factor)
+            _replace_argv_value(argv, "--delay", f"{delay_seconds:.3f}")
+            hard = {"http_requests": affordable, "tool_wall_seconds": wall}
+            timeout_seconds, timeout_ms = wall, wall * 1_000
+            mode, method = "conservative", "runtime_transport_wall_limiter"
+            techniques, profile = technique, "batch_attempt"
+        elif (
+            http >= EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["http_requests"]
+            and wall >= EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["tool_wall_seconds"]
+        ):
+            hard = _external_verification_hard("sqlmap", reservation)
+            timeout_seconds = hard["tool_wall_seconds"]
+            timeout_ms = timeout_seconds * 1_000
+            mode, method = "conservative", "fixed_conservative_profile"
+            techniques, profile = technique, "full"
+        else:
+            floor = EXTERNAL_VERIFICATION_FLOORS["sqlmap"]
+            raise AgentToolError(
+                f"sqlmap verification requires {floor['http_requests']} HTTP "
+                f"requests and {floor['tool_wall_seconds']} seconds"
+            )
+        proof_inputs = {
+            "profile": profile, "targets": 1, "candidate_requests": 1,
+            "connection_ceiling": http if batch_attempt else None,
+            "crawl_depth": 0, "retries": 0, "threads": 1,
+            "delay_ms": int(round(delay_seconds * 1_000)), "startup_burst": 1,
+            "measured_latency_ms": int(round(measured_latency * 1_000)),
+            "techniques": techniques, "shell": False, "file_read": False,
+            "dump": False,
+        }
+    elif scanner == "nmap":
+        if reservation.get("tcp_ports_attempted", 0) < 60:
+            raise AgentToolError(
+                "nmap single-port version profile requires 60 TCP-attempt units"
+            )
+        hard = {"tcp_ports_attempted": 60, "tool_wall_seconds": timeout_seconds}
+        mode, method = "conservative", "version_probe_upper_bound"
+        proof_inputs = {
+            "targets": 1,
+            "ports": 1,
+            "connect_scan_attempts": 1,
+            "version_probe_attempts_upper_bound": 59,
+            "version_intensity": 2,
+            "retries": 0,
+            "scripts": 0,
+        }
+    elif scanner == "naabu":
+        if reservation.get("tcp_ports_attempted", 0) < 200:
+            raise AgentToolError("naabu top-100 profile requires 200 TCP-attempt units")
+        hard = {"tcp_ports_attempted": 200, "tool_wall_seconds": timeout_seconds}
+        mode, method = "conservative", "port_retry_upper_bound"
+        proof_inputs = {"targets": 1, "ports": 100, "attempts_per_port": 2}
+    else:
+        raise AgentToolError(f"scanner has no wire-budget proof builder: {scanner}")
+
+    proof = {
+        "schema_version": PROCESS_BUDGET_PROOF_SCHEMA,
+        "tool_name": scanner,
+        "accounting_mode": mode,
+        "method": method,
+        "inputs": proof_inputs,
+        "upper_bound": hard,
+    }
+    try:
+        parser_version = str(CAPABILITY_REGISTRY.for_process_tool(scanner).output_schema)
+    except KeyError:
+        parser_version = "scanner-output/v1"
+    try:
+        plan = EnforcedProcessPlan(
+            tool_name=scanner,
+            binary=binary,
+            argv=tuple(argv),
+            env=(("NO_COLOR", "1"),),
+            timeout_ms=timeout_ms,
+            hard_budget=tuple(sorted(hard.items())),
+            budget_proof=proof,
+            parser_version=parser_version,
+        )
+        plan.validate_reservation(reservation)
+    except ExternalProcessContractError as exc:
+        raise AgentToolError(str(exc)) from exc
+    return plan
+
+
+def bind_scanner_runtime_paths(
+    name: str,
+    argv: list[str],
+    *,
+    scratch_dir: str | None,
+) -> list[str]:
+    """Bind worker-owned ephemeral paths after the fixed argv is constructed."""
+    bound = list(argv)
+    scanner = str(name or "").strip().lower()
+    if scanner not in SCANNER_WIRE_LOG_FILES:
+        return bound
+    if not scratch_dir or not os.path.isabs(scratch_dir):
+        raise AgentToolError(f"{scanner} requires an absolute worker-owned scratch directory")
+    bindings: tuple[tuple[str, str | None], ...] = (
+        (("--output-dir", None), ("-t", SCANNER_WIRE_LOG_FILES["sqlmap"]))
+        if scanner == "sqlmap"
+        else (("--har-file-path", SCANNER_WIRE_LOG_FILES["dalfox"]),)
+    )
+    for flag, filename in bindings:
+        try:
+            index = bound.index(flag) + 1
+        except ValueError as exc:
+            raise AgentToolError(f"{scanner} {flag} contract is missing") from exc
+        if index >= len(bound):
+            raise AgentToolError(f"{scanner} {flag} contract is missing")
+        bound[index] = (
+            os.path.join(scratch_dir, filename) if filename else scratch_dir
+        )
+    return bound
+
+
+# Exact wire logs the worker binds into each job's private scratch directory. sqlmap's -t
+# traffic file and Dalfox's HAR record every HTTP transaction the tool sends: measured
+# against a counting origin that answered 200, sqlmap logged 471 of 471 requests and Dalfox
+# 1,225 of 1,225. sqlmap logs a request answered with a redirect twice under its one number.
+# Their counts therefore settle the wire reservation exactly (a refund of the unused hold,
+# or the recorded overrun) instead of retaining the full conservative hold. Katana's JSONL
+# is a discovery feed, not a wire log, and stays conservative on purpose.
+SCANNER_WIRE_LOG_FILES: dict[str, str] = {"sqlmap": "traffic.log", "dalfox": "requests.har"}
+_MAX_WIRE_LOG_BYTES = 256 * 1024 * 1024
+_SQLMAP_TRAFFIC_MARKER = re.compile(r"^HTTP request \[#(\d{1,9})\]", re.MULTILINE)
+
+
+def sqlmap_traffic_request_count(text: str) -> int | None:
+    """Exact request count from a sqlmap ``-t`` traffic log, or None when it proves nothing."""
+    markers = [int(value) for value in _SQLMAP_TRAFFIC_MARKER.findall(str(text or ""))]
+    if not markers:
+        return None
+    # sqlmap numbers each request it sends once, sequentially. A request answered 30x is logged
+    # twice under its number (its redirect, then its response), so the count is of distinct
+    # numbers: exact while sqlmap follows no redirect (--ignore-redirects, pinned in
+    # _tmpl_sqlmap), where a followed hop would be a second request under the same number. A gap
+    # means blocks were lost, so the highest number is the larger, safe count.
+    return max(len(set(markers)), max(markers))
+
+
+_SQLMAP_RESPONSE_MARKER = re.compile(
+    r"^HTTP response \[#\d{1,9}\] \((\d{3})[^\n]*\):[ \t]*\r?\n(?P<headers>(?:[^\r\n]+\r?\n)*)",
+    re.MULTILINE,
+)
+
+
+def _baseline(status: Any, location: Any, challenge: bool = False) -> dict[str, Any] | None:
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return None
+    if not 100 <= code <= 599:
+        return None
+    return {
+        "status": code,
+        "login_redirect": bool(location) and is_login_location(location),
+        "www_authenticate": bool(challenge),
+    }
+
+
+def sqlmap_traffic_baseline(text: str) -> dict[str, Any] | None:
+    """The first response of a sqlmap ``-t`` traffic log (its connection check), or None."""
+    match = _SQLMAP_RESPONSE_MARKER.search(str(text or ""))
+    if match is None:
+        return None
+    headers = match.group("headers").splitlines()
+    location = next((
+        line.split(":", 1)[1].strip() for line in headers if line.lower().startswith("location:")
+    ), None)
+    challenge = any(line.lower().startswith("www-authenticate:") for line in headers)
+    return _baseline(match.group(1), location, challenge)
+
+
+def har_baseline(text: str) -> dict[str, Any] | None:
+    """The first response of a HAR document (Dalfox's original-URL request), or None."""
+    try:
+        response = json.loads(str(text or ""))["log"]["entries"][0]["response"]
+    except (TypeError, ValueError, KeyError, IndexError, json.JSONDecodeError):
+        return None
+    if not isinstance(response, Mapping):
+        return None
+    names = {
+        str(item.get("name") or "").lower(): item.get("value")
+        for item in response.get("headers") or () if isinstance(item, Mapping)
+    }
+    location = response.get("redirectURL") or names.get("location")
+    return _baseline(response.get("status"), location, "www-authenticate" in names)
+
+
+def har_request_count(text: str) -> int | None:
+    """Exact request count from a HAR document, or None when it is not a HAR."""
+    try:
+        entries = json.loads(str(text or ""))["log"]["entries"]
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    return len(entries)
+
+
+def scanner_file_request_counter(name: str, scratch_dir: str | None) -> dict[str, Any] | None:
+    """Read the tool's own wire log from the job scratch directory before it is removed.
+
+    Returns ``{"actual": n, "source": ...}`` only when the log exists and parses; every
+    other case returns None so the caller keeps the conservative reservation.
+    """
+    scanner = str(name or "").strip().lower()
+    filename = SCANNER_WIRE_LOG_FILES.get(scanner)
+    if not filename or not scratch_dir:
+        return None
+    path = os.path.join(str(scratch_dir), filename)
+    try:
+        if os.path.getsize(path) > _MAX_WIRE_LOG_BYTES:
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    actual = (
+        sqlmap_traffic_request_count(text) if scanner == "sqlmap"
+        else har_request_count(text)
+    )
+    if actual is None:
+        return None
+    baseline = (
+        sqlmap_traffic_baseline(text) if scanner == "sqlmap" else har_baseline(text)
+    )
+    return {
+        "actual": actual,
+        "source": "sqlmap_traffic_log" if scanner == "sqlmap" else "dalfox_har",
+        # The first response the tool received (its baseline), status and whether a redirect
+        # went to a sign-in page: no header value, body or URL is kept.
+        **({"baseline": baseline} if baseline is not None else {}),
+    }
+
+
+def scanner_wire_log_transactions(
+    name: str, scratch_dir: str | None, *, origin: str,
+) -> tuple[list[dict[str, Any]], int] | None:
+    """The transactions the tool's own wire log recorded to ``origin`` (``tool_wire_log``), with
+    the count left out past the bound, or None without a readable log."""
+    scanner = str(name or "").strip().lower()
+    filename = SCANNER_WIRE_LOG_FILES.get(scanner)
+    if not filename or not scratch_dir:
+        return None
+    path = os.path.join(str(scratch_dir), filename)
+    try:
+        if os.path.getsize(path) > _MAX_WIRE_LOG_BYTES:
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    try:
+        from scanner_tools.tool_wire_log import wire_log_transactions
+    except ModuleNotFoundError:  # package import in host-side tests
+        from scanner.scanner_tools.tool_wire_log import wire_log_transactions
+    return wire_log_transactions(scanner, text, origin)
+
+
+def validate_scanner_execution_target(registered_target: str, execution_target: str) -> str:
+    """Revalidate the worker-side scanner destination against the durable web target.
+
+    The control plane resolves an allowed origin before enqueueing, but queue contents are
+    untrusted at execution time.  Workers therefore independently require HTTP(S), a concrete
+    hostname, and the exact selected target host.  Ports and paths may differ because Deep Hunt
+    explicitly supports discovered origins on the same registered host.
+    """
+    try:
+        registered = urllib.parse.urlsplit(str(registered_target or "").strip())
+        execution = urllib.parse.urlsplit(str(execution_target or "").strip())
+        registered_host = (registered.hostname or "").lower().rstrip(".")
+        execution_host = (execution.hostname or "").lower().rstrip(".")
+        # Accessing port also rejects malformed authorities such as ``host:bad``.
+        _ = registered.port
+        _ = execution.port
+    except ValueError as exc:
+        raise AgentToolError("scanner execution target has an invalid authority") from exc
+    if registered.scheme.lower() not in {"http", "https"} or not registered_host:
+        raise AgentToolError("registered scanner target must be an absolute HTTP(S) URL")
+    if execution.scheme.lower() not in {"http", "https"} or not execution_host:
+        raise AgentToolError("scanner execution target must be an absolute HTTP(S) URL")
+    if execution.username or execution.password:
+        raise AgentToolError("scanner execution target must not contain user information")
+    if execution_host != registered_host:
+        raise AgentToolError("scanner execution target must use the selected target host")
+    # The fragment is retained deliberately. It never reaches a server and cannot
+    # change the validated destination, but for a browser-driven DOM check it *is*
+    # the vulnerable surface: dropping it reduced every SPA route to the origin
+    # root, so a fragment-routed DOM XSS could not be verified at all.
+    return urllib.parse.urlunsplit((
+        execution.scheme.lower(), execution.netloc,
+        execution.path or "/", execution.query, execution.fragment,
+    ))
+
+
+def validate_pinned_scanner_address(pinned_address: Any, authorized_addresses: Any) -> str:
+    raw_authorized = list(authorized_addresses or [])
+    if len(raw_authorized) > MAX_FROZEN_ADDRESSES:
+        raise AgentToolError("scanner authorized address set exceeds the policy bound")
+    authorized: list[str] = []
+    for raw in raw_authorized:
+        try:
+            address = str(ipaddress.ip_address(str(raw).strip()))
+        except ValueError:
+            continue
+        if address not in authorized:
+            authorized.append(address)
+    if not authorized:
+        raise AgentToolError("scanner job has no authorized address")
+    if pinned_address is None:
+        try:
+            return primary_frozen_address(authorized)
+        except ValueError as exc:
+            raise AgentToolError("scanner job has no valid pinned address") from exc
+    try:
+        pinned = str(ipaddress.ip_address(str(pinned_address or "").strip()))
+    except ValueError as exc:
+        raise AgentToolError("scanner job has no valid pinned address") from exc
+    if pinned not in authorized:
+        raise AgentToolError("scanner pinned address is outside the authorized resolution set")
+    return pinned
+
+
+_REQUEST_COUNTER_KEYS: frozenset[str] = frozenset({
+    "requests", "request_count", "requests_count", "requests_sent",
+    "total_requests", "total_requests_sent", "http_requests",
+})
+
+
+def _explicit_request_counters(value: Any) -> list[int]:
+    counters: list[int] = []
+    if isinstance(value, dict):
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip().lower().replace("-", "_")
+            if key in _REQUEST_COUNTER_KEYS:
+                number: int | None = None
+                if isinstance(raw_value, (int, float)):
+                    number = int(raw_value)
+                elif isinstance(raw_value, str) and re.fullmatch(r"\d{1,18}", raw_value.strip()):
+                    # Nuclei v3.11 serializes stats counters as JSON strings.
+                    number = int(raw_value.strip())
+                if number is not None and number >= 0:
+                    counters.append(number)
+            elif isinstance(raw_value, (dict, list)):
+                counters.extend(_explicit_request_counters(raw_value))
+    elif isinstance(value, list):
+        for item in value:
+            counters.extend(_explicit_request_counters(item))
+    return counters
+
+
+def scanner_request_settlement(
+    name: str, stdout: str, *, file_counter: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Derive honest post-execution wire-request accounting from scanner output.
+
+    An explicit scanner counter is exact and may refund a conservative reservation.  A successful
+    ``httpx`` fingerprint is one request because redirects are not followed by its fixed template.
+    A tool's own complete wire log (``file_counter`` from ``scanner_file_request_counter``) is
+    exact as well.  Other result records are only a lower bound: a crawler/template engine can
+    issue many requests that produce no record, so those observations must never be treated as
+    exact or refunded.
+    """
+    scanner = str(name or "").strip().lower()
+    text = str(stdout or "")
+    if file_counter is not None:
+        try:
+            logged = max(0, int(file_counter.get("actual")))
+        except (AttributeError, TypeError, ValueError):
+            logged = None
+        if logged is not None:
+            return {
+                "mode": "exact",
+                "actual": logged,
+                "observed_minimum": logged,
+                "source": str(file_counter.get("source") or "tool_wire_log"),
+            }
+    decoded: list[Any] = []
+    try:
+        whole = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        whole = None
+    if whole is not None:
+        decoded.append(whole)
+    else:
+        for line in text.splitlines()[:1000]:
+            try:
+                decoded.append(json.loads(line))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+    counters = _explicit_request_counters(decoded)
+    if counters and scanner == "nuclei":
+        # nuclei's stats `requests` is progress through its request plan, not traffic sent.
+        # Measured through the pinned proxy at a counting target: one paced attempt sent 33
+        # requests while the counter read 277 (total 2729, percent 10) -- about eight times the
+        # wire. Taken as exact it failed the hard-ceiling contract on every batch attempt
+        # regardless of pacing and charged each its full hold. It says nothing about the wire;
+        # the worker substitutes what the proxy actually relayed.
+        return {
+            "mode": "unavailable",
+            "actual": None,
+            "observed_minimum": 0,
+            "source": "progress_counter_is_not_wire_evidence",
+        }
+    if counters:
+        # Nested summaries sometimes repeat the same cumulative counter.  The maximum is the final
+        # cumulative total and is safer than summing duplicate snapshots.
+        actual = max(counters)
+        return {
+            "mode": "exact",
+            "actual": actual,
+            "observed_minimum": actual,
+            "source": "scanner_counter",
+        }
+    if scanner in KATANA_TOOLS:
+        # Katana's compact stream is a discovery feed, not a wire log.  In
+        # particular, JavaScript parsing can emit many same-origin routes that
+        # Katana never fetched.  Treating those routes as a lower bound on HTTP
+        # requests can therefore contradict the pre-launch rate/time proof and
+        # falsely turn a safely bounded crawl into a limiter overrun.  Without
+        # an explicit scanner counter we keep the settlement unavailable and
+        # conservatively charge the durable reservation.
+        return {
+            "mode": "unavailable",
+            "actual": None,
+            "observed_minimum": 0,
+            "source": "discovery_records_are_not_wire_evidence",
+        }
+    typed = parse_scanner_output(scanner, text)
+    observed = int(typed.get("record_count") or 0)
+    if scanner == "httpx" and observed > 0:
+        return {"mode": "exact", "actual": 1, "observed_minimum": 1, "source": "fixed_httpx_contract"}
+    if observed > 0:
+        return {
+            "mode": "observed_lower_bound",
+            "actual": None,
+            "observed_minimum": observed,
+            "source": "typed_result_records",
+        }
+    return {"mode": "unavailable", "actual": None, "observed_minimum": 0, "source": None}
+
+
+def agent_scanner_request_settlement(
+    scanner_name: str, stdout: str, stderr: bytes | str | None,
+    *, file_counter: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Settle scanner traffic without exposing diagnostic stderr to the planner."""
+    normalized = str(scanner_name or "").strip().lower()
+    settlement_input = str(stdout or "")
+    if normalized == "nuclei" and stderr:
+        diagnostics = (
+            stderr.decode("utf-8", "replace")
+            if isinstance(stderr, bytes)
+            else str(stderr)
+        )
+        settlement_input = f"{settlement_input}\n{diagnostics}"
+    return scanner_request_settlement(
+        normalized, settlement_input, file_counter=file_counter,
+    )
+
+
+def wire_evidence_settlement(settlement: Mapping[str, Any], pinned_proxy: Any) -> dict[str, Any]:
+    """Prefer what the pinned proxy relayed over a tool's own non-exact accounting.
+
+    The proxy counts HTTP request lines toward the target: close to exact for plaintext, a lower
+    bound under TLS. A tool's exact counter from its own complete wire log is kept. Otherwise,
+    when the proxy saw requests, they become the lower bound the hard-ceiling contract checks --
+    real traffic, so a paced attempt passes its hold and an overrun still fails it.
+    """
+    current = dict(settlement or {})
+    observed = int(getattr(pinned_proxy, "http_requests_observed", 0) or 0) if pinned_proxy is not None else 0
+    if str(current.get("mode") or "") == "exact" or observed <= 0:
+        return current
+    return {"mode": "observed_lower_bound", "actual": None, "observed_minimum": observed,
+            "source": "proxy_request_lines"}
+
+
+def _redirect_preserves_request_target(raw_url: Any, raw_location: Any) -> bool | None:
+    """Whether a redirect changed only the origin, judged before redaction.
+
+    Returns None when either side is missing or unparsable, so a caller can tell
+    "not a pure origin move" apart from "could not be determined".
+    """
+    request = str(raw_url or "").strip()
+    location = str(raw_location or "").strip()
+    if not request or not location:
+        return None
+    try:
+        probed = urllib.parse.urlsplit(request)
+        moved = urllib.parse.urlsplit(urllib.parse.urljoin(request, location))
+    except ValueError:
+        return None
+    if not moved.netloc or not probed.netloc:
+        return None
+    return (
+        (moved.path or "/") == (probed.path or "/")
+        and moved.query == probed.query
+        and moved.fragment == probed.fragment
+    )
+
+
+def _public_observed_url(value: Any) -> str | None:
+    """Retain route shape while removing secrets from untrusted scanner output."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return redact_url(text, max_length=2_000)
+    except ValueError:
+        return None
+
+
+def _public_discovered_url(value: Any) -> str | None:
+    """Retain a value-free SPA route for discovery while applying normal URL redaction."""
+    public_url = _public_observed_url(value)
+    if public_url is None:
+        return None
+    client_route = redact_client_route(value)
+    return f"{public_url}#{client_route}" if client_route else public_url
+
+
+def _template_metadata(info: Mapping[str, Any], item: Mapping[str, Any]) -> dict[str, Any]:
+    """Template description, tags, references and classification (CVE/CWE/CVSS/EPSS/CPE), plus
+    extractor value lengths. Extracted values and their prefixes are never copied."""
+    classification = info.get("classification") if isinstance(info.get("classification"), Mapping) else {}
+
+    def bounded(value: Any, limit: int, chars: int) -> list[str] | str | None:
+        if isinstance(value, str):
+            return value[:chars] or None
+        if isinstance(value, (list, tuple)):
+            return [str(entry)[:chars] for entry in value[:limit] if entry not in (None, "")] or None
+        return None
+
+    metadata = {
+        "description": bounded(info.get("description"), 1, 600),
+        "tags": bounded(info.get("tags"), 12, 40),
+        "reference": bounded(info.get("reference"), 5, 300),
+        "template_remediation": bounded(info.get("remediation"), 1, 600),
+        "cve_id": bounded(classification.get("cve-id"), 5, 30),
+        "cwe_id": bounded(classification.get("cwe-id"), 5, 12),
+        "cvss_score": classification.get("cvss-score"),
+        "cvss_metrics": bounded(classification.get("cvss-metrics"), 1, 120),
+        "epss_score": classification.get("epss-score"),
+        "epss_percentile": classification.get("epss-percentile"),
+        "cpe": bounded(classification.get("cpe"), 1, 200),
+        # Extractor values may be credentials. Keep only bounded lengths, never prefixes.
+        "extracted_result_lengths": [len(str(value)) for value in
+            (item.get("extracted-results") or item.get("extracted_results") or ())[:5]]
+            if isinstance(item.get("extracted-results") or item.get("extracted_results"), (list, tuple)) else None,
+    }
+    if isinstance(metadata["tags"], str):
+        metadata["tags"] = [tag.strip() for tag in metadata["tags"].split(",") if tag.strip()][:12]
+    return {key: value for key, value in metadata.items() if value not in (None, "", [])}
+
+
+# The verifiers whose baseline response is recorded (``parse_scanner_output``).
+BASELINE_RECORDING_TOOLS = frozenset({"sqlmap", "dalfox"})
+# sqlmap raises this on a 401 to its connection test and skips the target.
+_SQLMAP_NOT_AUTHORIZED = "not authorized, try to provide right HTTP authentication"
+# sqlmap's summary line names the DBMS ("back-end DBMS: SQLite", optionally after log tags). Other
+# lines also mention it: the --batch prompt "it looks like the back-end DBMS is 'X'. Do you want
+# ...", "the back-end DBMS is not X" and "back-end DBMS operating system: ...".
+_SQLMAP_DBMS_LINE_RE = re.compile(r"^(?:\[[^\]]*\]\s*)*back-end DBMS:\s*(\S.*)$")
+
+
+def parse_scanner_output(
+    name: str, stdout: str, *, allowed_host: str | None = None,
+    wire_log: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Parse bounded scanner output into records safe for hunt reasoning.
+
+    Raw output remains receipt evidence; these records are observations, never finding proof.
+    ``wire_log`` is the tool's own wire-log summary (``scanner_file_request_counter``): its
+    baseline response is recorded so a verifier can tell a target that refused the request
+    (401/403, a redirect to sign-in) from one that answered it.
+    """
+    scanner = str(name or "").strip().lower()
+    decoded: list[dict[str, Any]] = []
+    text = str(stdout or "")
+    lines_dropped = 0
+    try:
+        whole = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        whole = None
+    if isinstance(whole, dict) and isinstance(whole.get("results"), list):
+        decoded.extend(item for item in whole["results"] if isinstance(item, dict))
+    elif isinstance(whole, list):
+        decoded.extend(item for item in whole if isinstance(item, dict))
+    elif isinstance(whole, dict):
+        decoded.append(whole)
+    else:
+        line_window = (
+            _MAX_CRAWL_OUTPUT_LINES if scanner in KATANA_TOOLS else _MAX_TOOL_OUTPUT_LINES
+        )
+        lines = text.splitlines()
+        # Output beyond the parse window is retained evidence the records never examined.
+        lines_dropped = sum(1 for line in lines[line_window:] if line.strip())
+        for line in lines[:line_window]:
+            try:
+                item = json.loads(line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(item, dict):
+                decoded.append(item)
+        if scanner in KATANA_TOOLS and not decoded:
+            # Compact Katana mode emits one absolute URL per line. Preserve only URL-shaped
+            # records; banners and diagnostics are not route observations.
+            for line in lines[:line_window]:
+                candidate = line.strip()
+                try:
+                    parsed_candidate = urllib.parse.urlsplit(candidate)
+                except ValueError:
+                    continue
+                if parsed_candidate.scheme in {"http", "https"} and parsed_candidate.hostname:
+                    decoded.append({"url": candidate, "method": "GET"})
+
+    records: list[dict[str, Any]] = []
+    seen_katana_requests: set[
+        tuple[str, str, str | None, tuple[str, ...]]
+    ] = set()
+    # A crawl is read whole and bounded by distinct routes (every one is still counted);
+    # other tools are bounded by the items they emitted.
+    items_dropped = 0 if scanner in KATANA_TOOLS else max(0, len(decoded) - MAX_TOOL_RECORDS)
+    for item in decoded if scanner in KATANA_TOOLS else decoded[:MAX_TOOL_RECORDS]:
+        if scanner == "nuclei":
+            info = item.get("info") if isinstance(item.get("info"), dict) else {}
+            template_id = str(item.get("template-id") or item.get("template_id") or "")[:200] or None
+            matched_at = _public_observed_url(
+                item.get("matched-at") or item.get("matched_at") or item.get("url")
+            )
+            # Stats/progress JSON is accounting evidence, not a template match.
+            if not template_id and not matched_at:
+                continue
+            records.append({
+                "kind": "template_match",
+                "template_id": template_id,
+                "name": str(info.get("name") or item.get("name") or "")[:300] or None,
+                "severity": str(info.get("severity") or item.get("severity") or "").lower()[:20] or None,
+                "matched_at": matched_at,
+                "matcher_name": str(item.get("matcher-name") or item.get("matcher_name") or "")[:200] or None,
+                **_template_metadata(info, item),
+                "proof_state": "candidate",
+            })
+        elif scanner in KATANA_TOOLS:
+            request = item.get("request") if isinstance(item.get("request"), dict) else {}
+            observed_url = _public_discovered_url(
+                item.get("url") or item.get("endpoint") or request.get("endpoint")
+            )
+            if not observed_url:
+                continue
+            if allowed_host:
+                try:
+                    observed_host = (urllib.parse.urlsplit(observed_url).hostname or "").lower().rstrip(".")
+                except ValueError:
+                    continue
+                if observed_host != str(allowed_host).lower().rstrip("."):
+                    continue
+            method = str(item.get("method") or request.get("method") or "GET").upper()[:16]
+            content_type, body_field_names = public_request_body_shape(
+                request.get("body")
+            )
+            request_identity = (
+                observed_url, method, content_type, body_field_names,
+            )
+            if request_identity in seen_katana_requests:
+                continue
+            seen_katana_requests.add(request_identity)
+            if len(records) >= MAX_TOOL_RECORDS:
+                continue
+            record = {
+                "kind": "discovered_route",
+                "url": observed_url,
+                "method": method,
+                "source": _public_observed_url(item.get("source") or item.get("from")),
+            }
+            if body_field_names:
+                record.update({
+                    "content_type": content_type,
+                    "body_field_names": list(body_field_names),
+                })
+            records.append(record)
+        elif scanner == "ffuf":
+            observed = _public_observed_url(item.get("url") or item.get("input", {}).get("FUZZ") if isinstance(item.get("input"), dict) else item.get("url"))
+            records.append({
+                "kind": "content_discovery",
+                "url": observed,
+                "status": item.get("status"),
+                "length": item.get("length"),
+                "redirect_location": _public_observed_url(item.get("redirectlocation") or item.get("redirect_location")),
+                # Whether the redirect only moved the origin, decided on the raw
+                # pair before redaction. Redaction is not injective -- it strips
+                # the fragment outright and collapses every query value and
+                # secret-shaped path segment to one marker -- so this fact cannot
+                # be recovered downstream. One boolean carries it and leaks
+                # nothing: a route-specific redirect stays distinguishable from a
+                # blanket origin rewrite.
+                "redirect_preserves_request_target": _redirect_preserves_request_target(
+                    item.get("url") or (item.get("input", {}) or {}).get("FUZZ")
+                    if isinstance(item.get("input"), dict) else item.get("url"),
+                    item.get("redirectlocation") or item.get("redirect_location"),
+                ),
+                # How this host answers a path that cannot exist. Retained as an
+                # observation so the calibration is evidence in the receipt, not a
+                # filter applied out of band.
+                **({"negative_control": True} if is_negative_control_url(observed) else {}),
+            })
+        elif scanner == "httpx":
+            technologies = item.get("tech") or item.get("technologies") or []
+            records.append({
+                "kind": "http_fingerprint",
+                "url": _public_observed_url(item.get("url") or item.get("input")),
+                "status": item.get("status_code") or item.get("status-code"),
+                "title": str(item.get("title") or "")[:300] or None,
+                "webserver": str(item.get("webserver") or item.get("web_server") or "")[:200] or None,
+                "technologies": [str(value)[:100] for value in list(technologies or [])[:50]],
+            })
+        elif scanner == "dalfox":
+            data = item.get("data") if isinstance(item.get("data"), dict) else item
+            observed_url = (
+                data.get("address") or data.get("url") or data.get("target")
+                or (item.get("data") if isinstance(item.get("data"), str) else None)
+            )
+            payload_material = str(data.get("payload") or "")
+            if not payload_material and str(data.get("type") or "").lower() == "v":
+                # Dalfox 2.13 emits verified headless PoCs with the injected URL in
+                # the top-level `data` string and an empty payload field. Hash that
+                # private URL as the proof receipt while exposing only the redacted URL.
+                payload_material = str(item.get("data") or "")
+            message = str(data.get("message") or data.get("poc") or "")[:500] or None
+            record = {
+                "kind": "xss_alert",
+                "alert_type": str(data.get("type") or item.get("type") or "")[:40] or None,
+                "url": _public_observed_url(observed_url),
+                "param": str(data.get("param") or "")[:200] or None,
+                # Payload text is receipt-side only; hunt reasoning gets its shape, not the body.
+                "payload_sha256": hashlib.sha256(payload_material.encode()).hexdigest() if payload_material else None,
+                "message": message,
+                "proof_state": "verified" if str(data.get("type") or "").lower() == "v" else "candidate",
+            }
+            client_route = redact_client_route(observed_url)
+            if client_route:
+                record["client_route"] = client_route
+            records.append(record)
+        elif scanner == "naabu":
+            # JSON lines: {"host":"10.0.0.4","port":8443,"protocol":"tcp"} (port may be a
+            # string). Stats/banner lines carry no port and are dropped.
+            text_port = str(item.get("port") or "").strip()
+            if not text_port.isdigit():
+                continue
+            records.append({
+                "kind": "open_port",
+                "host": str(item.get("host") or item.get("ip") or "")[:200] or None,
+                "port": int(text_port),
+                "protocol": str(item.get("protocol") or "tcp")[:16],
+                "proof_state": "candidate",
+            })
+    if scanner == "sqlmap":
+        for line in text.splitlines()[:_MAX_TOOL_OUTPUT_LINES]:
+            line = line.strip()
+            if "is vulnerable" in line:
+                parameter_match = re.search(
+                    r"(?:\b(GET|POST|PUT|PATCH|DELETE)\s+)?parameter\s+['\"]([^'\"]+)['\"]\s+is vulnerable",
+                    line,
+                    re.I,
+                )
+                records.append({
+                    "kind": "sqli_finding",
+                    "message": line.split("Do you want")[0].strip()[:500],
+                    "param": parameter_match.group(2)[:200] if parameter_match else None,
+                    "method": (
+                        parameter_match.group(1).upper()
+                        if parameter_match and parameter_match.group(1) else None
+                    ),
+                    "proof_state": "candidate",
+                })
+            elif _SQLMAP_DBMS_LINE_RE.match(line):
+                records.append({
+                    "kind": "sqli_dbms_fingerprint",
+                    "message": line[:300],
+                    "proof_state": "candidate",
+                })
+    if scanner == "nmap":
+        # -oN - human output; only "PORT STATE SERVICE [VERSION]" table rows are observations.
+        for line in text.splitlines()[:_MAX_TOOL_OUTPUT_LINES]:
+            match = _NMAP_SERVICE_LINE_RE.match(line.strip())
+            if not match:
+                continue
+            records.append({
+                "kind": "port_service",
+                "port": match.group(1),
+                "state": match.group(2)[:32],
+                "service": match.group(3)[:64],
+                "version": (match.group(4) or "")[:200] or None,
+                "proof_state": "candidate",
+            })
+    if scanner in BASELINE_RECORDING_TOOLS:
+        baseline = dict((wire_log or {}).get("baseline") or {})
+        if not baseline and scanner == "sqlmap" and _SQLMAP_NOT_AUTHORIZED in text:
+            # No traffic log: sqlmap's own connection-test refusal names the 401.
+            baseline = {"status": 401, "login_redirect": False, "www_authenticate": False}
+        if baseline.get("status"):
+            # First, so the record cap (MAX_TOOL_RECORDS) can never drop it.
+            records.insert(0, {
+                "kind": BASELINE_RECORD_KIND,
+                "http_status": int(baseline["status"]),
+                "login_redirect": bool(baseline.get("login_redirect")),
+                "www_authenticate": bool(baseline.get("www_authenticate")),
+            })
+    records = [record for record in records if any(value not in (None, "", [], {}) for key, value in record.items() if key != "kind")]
+    kept = min(len(records), MAX_TOOL_RECORDS)
+    seen = (
+        len(seen_katana_requests) if scanner in KATANA_TOOLS
+        else len(records) + items_dropped
+    )
+    truncated = seen > kept or lines_dropped > 0
+    return {
+        "parser": f"{scanner}-typed-v1",
+        "parser_status": "parsed" if records else ("partial" if decoded else "not_applicable"),
+        "records": records[:MAX_TOOL_RECORDS],
+        "record_count": len(records),
+        # The record bound is explicit, never silent: a capped set must not read as the
+        # complete surface (a crawl that found 4,000 routes kept 1,500 and settled success).
+        "record_limit": {
+            "kept": kept, "seen": max(seen, kept), "limit": MAX_TOOL_RECORDS,
+            "lines_dropped": lines_dropped, "truncated": truncated,
+        },
+        "records_truncated": truncated,
+    }
+
+
+def scanner_truncation_error(error: Any, typed_output: Any) -> Any:
+    """The error a finished tool reports when its parsed records were cut at a bound.
+
+    The worker settles `output_truncated` as partial, exactly as it does for the byte
+    allowance: the retained records are trustworthy, the remainder was never examined.
+    """
+    if error or not (isinstance(typed_output, Mapping) and typed_output.get("records_truncated")):
+        return error
+    return "output_truncated"
+
+
+# --------------------------------------------------------------------------------------
+# Pure guards (host-testable).
+# --------------------------------------------------------------------------------------
+
+
+class AgentToolError(ValueError):
+    """Raised by a guard when a tool argument is unsafe or malformed. The loop feeds the
+    message back to the model (error-recovery) rather than crashing."""
+
+
+def coerce_method(method: Any) -> str:
+    value = str(method or "GET").strip().upper()
+    if value not in ALL_METHODS:
+        raise AgentToolError(f"unsupported_method:{value} (allowed: {sorted(ALL_METHODS)})")
+    return value
+
+
+def is_write_method(method: str) -> bool:
+    return method.strip().upper() in WRITE_METHODS
+
+
+def validate_same_origin_path(path: Any) -> str:
+    """A same-origin absolute path: starts with a single '/', no control chars, bounded.
+    Rejects protocol-relative ('//host') and absolute URLs (SSRF)."""
+    text = str(path or "")
+    if not text.startswith("/") or text.startswith("//"):
+        raise AgentToolError("path must be an absolute same-origin path starting with a single '/'")
+    if len(text.encode("utf-8")) > 4000:
+        raise AgentToolError("path exceeds size limit")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+        raise AgentToolError("path contains control characters")
+    return text
+
+
+def classify_request_headers(
+    headers: Any, *, allow_identity_headers: bool = False,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return accepted headers plus value-free rejection reasons.
+
+    ``allow_identity_headers`` is the operator's explicit decision that forging a client
+    address against this target is in scope. It never unlocks credential or transport
+    headers: those are refused because of how ShakerScan handles secrets and frames
+    requests, which is not the operator's to waive.
+    """
+    out: dict[str, str] = {}
+    rejected: dict[str, str] = {}
+    if not isinstance(headers, dict):
+        return out, rejected
+    refused = (
+        _CREDENTIAL_HEADERS | _TRANSPORT_HEADERS
+        if allow_identity_headers else _FORBIDDEN_HEADERS
+    )
+    for name, value in headers.items():
+        lname = str(name).strip().lower()
+        if not lname:
+            continue
+        if lname in _CREDENTIAL_HEADERS:
+            rejected[lname] = "managed_principal_required"
+            continue
+        if lname in _TRANSPORT_HEADERS:
+            rejected[lname] = "executor_owned_header"
+            continue
+        if lname in IDENTITY_HEADERS and lname in refused:
+            rejected[lname] = "identity_header_approval_required"
+            continue
+        if any(sub in lname for sub in _SENSITIVE_HEADER_SUBSTR):
+            rejected[lname] = "sensitive_header_name_forbidden"
+            continue
+        sval = str(value)
+        if not lname.isascii() or not sval.isascii():
+            rejected[lname] = "non_ascii_header_forbidden"
+            continue
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name + sval):
+            rejected[lname] = "control_character_forbidden"
+            continue
+        if len(sval.encode("utf-8")) > 2000:
+            rejected[lname] = "header_value_too_large"
+            continue
+        out[str(name)] = sval
+    return out, rejected
+
+
+def normalize_principal_slot(value: Any) -> str:
+    """A principal slot the model may request. 'anonymous' (or empty) means no auth."""
+    slot = str(value or "").strip().lower()
+    if slot in ("", "anonymous", "anon", "none"):
+        return "anonymous"
+    return slot
+
+
+# --------------------------------------------------------------------------------------
+# SUSPECTED -> VERIFIED bridge (Gap B): derive the concrete targets for a BOLA family_proof
+# verification workflow from a suspected finding's route + each principal's captured object
+# references. Pure/host-testable; the workflow assembly + dispatch (the moat) live in api.py.
+# --------------------------------------------------------------------------------------
+
+_ID_SEGMENT = re.compile(r"^(\d+|\{[^}]+\}|[0-9a-fA-F-]{8,})$")
+
+
+def _bola_collection_and_segment(route: Any) -> tuple[Optional[str], str]:
+    """Split a finding route into its collection route + the collection's last path segment,
+    dropping a trailing object-id segment (numeric, uuid-ish, or ``{id}``)."""
+    path = str(route or "").split("?", 1)[0].rstrip("/")
+    parts = [p for p in path.split("/") if p]
+    if not parts:
+        return None, ""
+    collection_parts = parts[:-1] if (len(parts) >= 2 and _ID_SEGMENT.match(parts[-1])) else parts
+    if not collection_parts:
+        return None, ""
+    return "/" + "/".join(collection_parts), collection_parts[-1].lower()
+
+
+def _singularize(segment: str) -> str:
+    """Best-effort singular of a REST collection segment so a plural collection matches a singular
+    captured-ref key (``products`` -> ``product`` so ``product_id`` matches). Conservative: keeps
+    ``address`` (``ss``), ``basket`` (already singular)."""
+    s = str(segment or "").lower()
+    if s.endswith("ies") and len(s) > 3:
+        return s[:-3] + "y"           # categories -> category
+    if s.endswith("ses") and len(s) > 3:
+        return s[:-2]                 # addresses -> address, statuses -> status
+    if s.endswith("s") and not s.endswith("ss") and len(s) > 1:
+        return s[:-1]                 # products -> product, baskets -> basket, users -> user
+    return s
+
+
+def _pick_object_ref(refs: Any, segment: str) -> tuple[Optional[str], Optional[str]]:
+    """Choose a principal's own object reference for ``segment`` from its captured references, but
+    ONLY when the ref key SEMANTICALLY matches the collection under test. Returns ``(key, value)`` —
+    the ORIGINAL captured-ref key (to bind a server-resolved principal_variable) and its value.
+
+    Zero-FP fail-closed: a captured ref is accepted only if its key is one of the collection's
+    singular/plural forms (``{sing|plur}_id`` / ``{sing|plur}id`` / ``{sing|plur}``). There is NO
+    generic ``object_id``/``id`` match and NO single-ref fallback — binding an UNRELATED ref (e.g.
+    ``basket_id`` to a ``/api/Products`` route) fabricated the "owned object" premise the moat's
+    ownership predicate trusts, which could false-VERIFY a BOLA on an auth-gated shared resource.
+    No matching ref -> ``(None, None)`` -> the finding stays SUSPECTED (external-audit BUG 1)."""
+    if not isinstance(refs, dict) or not refs:
+        return None, None
+    lower = {str(k).lower(): (k, v) for k, v in refs.items()}
+    forms: list[str] = []
+    for form in (_singularize(segment), str(segment or "").lower()):
+        if form and form not in forms:
+            forms.append(form)
+    candidates = [c for form in forms for c in (f"{form}_id", f"{form}id", form)]
+    for candidate in candidates:
+        pair = lower.get(candidate)
+        if pair is not None and str(pair[1]).strip():
+            return str(pair[0]), str(pair[1]).strip()
+    return None, None
+
+
+def derive_bola_verification_targets(
+    finding_route: Any, user1_refs: Any, user2_refs: Any
+) -> Optional[dict[str, Any]]:
+    """Return targets for a BOLA verification workflow, or ``None`` when the inputs cannot support
+    a SOUND proof:
+    ``{collection, owner_object_id, attacker_object_id, owner_ref_key, attacker_ref_key, ref_segment}``.
+
+    The ``*_ref_key`` fields name each principal's captured-ref key so the workflow can bind a
+    ``principal_variable`` that resolves the id server-side (a managed reference) — the only form the
+    ownership predicate accepts. Requires two *distinct* owned object references (owner=user1,
+    attacker=user2); equal or missing refs yield None (the finding stays SUSPECTED)."""
+    collection, segment = _bola_collection_and_segment(finding_route)
+    if not collection or collection == "/":
+        return None
+    owner_key, owner_value = _pick_object_ref(user1_refs, segment)
+    attacker_key, attacker_value = _pick_object_ref(user2_refs, segment)
+    if not owner_value or not attacker_value or owner_value == attacker_value:
+        return None
+    return {
+        "collection": collection,
+        "owner_object_id": owner_value,
+        "attacker_object_id": attacker_value,
+        "owner_ref_key": owner_key,
+        "attacker_ref_key": attacker_key,
+        "ref_segment": segment,
+    }

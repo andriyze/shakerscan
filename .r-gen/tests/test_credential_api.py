@@ -1,0 +1,580 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+import json
+import uuid
+
+import pytest
+
+pytest.importorskip("fastapi")
+
+from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
+
+import api.credential_api as credential_api
+from tests.test_credential_store import MemoryCredentialConn, TARGET_ID
+
+
+class ApiCredentialConn(MemoryCredentialConn):
+    def __init__(self):
+        super().__init__()
+        self.legacy_web = None
+        self.legacy_device = None
+
+    async def fetchval(self, query, *args):
+        if "app_schema_migrations" in query:
+            return None  # This fixture exercises the pre-conversion compatibility writer.
+        return await super().fetchval(query, *args)
+
+    def transaction(self):
+        @asynccontextmanager
+        async def transaction_context():
+            yield
+
+        return transaction_context()
+
+    grant_target_facts: dict = {}
+
+    async def fetchrow(self, query, *args):
+        if "AS serves_http" in query:
+            return self.grant_target_facts.get(args[0])
+        if query.lstrip().startswith("SELECT id FROM targets"):
+            return {"id": args[0]} if args[0] == TARGET_ID else None
+        if query.lstrip().startswith("SELECT id FROM device_targets"):
+            return {"id": args[0]} if args[0] == TARGET_ID else None
+        if "FROM target_credential_profiles WHERE id" in query:
+            if self.legacy_web and self.legacy_web["id"] == args[0]:
+                return dict(self.legacy_web)
+            return None
+        if "FROM device_credential_profiles WHERE id" in query:
+            if self.legacy_device and self.legacy_device["id"] == args[0]:
+                return dict(self.legacy_device)
+            return None
+        return await super().fetchrow(query, *args)
+
+    async def execute(self, query, *args):
+        if "UPDATE device_credential_profiles" in query:
+            assert self.legacy_device and self.legacy_device["id"] == args[0]
+            self.legacy_device.update({
+                "name": args[1],
+                "expires_at": args[2],
+                "is_active": args[3],
+                "secret_value": args[4] or self.legacy_device["secret_value"],
+                "username": args[5] if args[4] else self.legacy_device["username"],
+                "login_path": args[6] if args[4] else self.legacy_device["login_path"],
+                "rotated_at": args[7] if args[4] else self.legacy_device["rotated_at"],
+                "updated_at": args[7],
+            })
+            return "UPDATE 1"
+        if "UPDATE target_principals" in query:
+            assert self.legacy_web and self.legacy_web["target_id"] == args[0]
+            self.legacy_web["principal_profile_name"] = args[2]
+            return "UPDATE 1"
+        if "UPDATE target_credential_profiles" in query:
+            assert self.legacy_web and self.legacy_web["id"] == args[0]
+            self.legacy_web.update({
+                "name": args[1],
+                "expires_at": args[2],
+                "is_active": args[3],
+                "secret_value": args[4] or self.legacy_web["secret_value"],
+                "rotated_at": args[5] if args[4] else self.legacy_web["rotated_at"],
+                "updated_at": args[5],
+            })
+            return "UPDATE 1"
+        return await super().execute(query, *args)
+
+
+class ApiCredentialPool:
+    def __init__(self):
+        self.conn = ApiCredentialConn()
+
+    def acquire(self):
+        conn = self.conn
+
+        @asynccontextmanager
+        async def acquire_context():
+            yield conn
+
+        return acquire_context()
+
+
+@pytest.fixture
+def client(monkeypatch):
+    # API tests prove the boundary and public shape; real Fernet and PostgreSQL are
+    # covered separately. Never make test ciphertext include its plaintext input.
+    monkeypatch.setattr(
+        credential_api, "encrypt_secret", lambda _value: "enc:fernet:opaque-ciphertext"
+    )
+    monkeypatch.setattr(credential_api, "encryption_enabled", lambda: True)
+    async def validate_approval(_conn, receipt_id, **kwargs):
+        if receipt_id != "11111111-1111-4111-8111-111111111111":
+            raise HTTPException(status_code=400, detail="Approval receipt is required")
+        assert kwargs["require_target_binding"] is True
+        assert kwargs["risk_tier"] == "credential"
+
+    credential_api.configure_credential_api(approval_validator=validate_approval)
+    app = FastAPI()
+    app.state.db_pool = ApiCredentialPool()
+    app.include_router(credential_api.router)
+
+    @app.exception_handler(RequestValidationError)
+    async def safe_credential_validation(_request, exc):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": credential_api.public_credential_validation_errors(exc.errors())
+            },
+        )
+
+    return TestClient(app), app.state.db_pool
+
+
+def _create_payload(**updates):
+    payload = {
+        "target_kind": "api",
+        "target_id": str(TARGET_ID),
+        "name": "Primary API",
+        "auth_kind": "bearer_token",
+        "principal_label": "primary-user",
+        "principal_slot": "primary",
+        "secret": "never-return-this-secret",
+        "expires_at": "2027-08-22T12:00:00Z",
+        "allowed_capabilities": ["http.request"],
+    }
+    payload.update(updates)
+    return payload
+
+
+def test_capability_catalog_keeps_ssh_and_http_protocols_separate(client):
+    http,_ = client
+    ssh = http.get('/credential-profiles/capabilities',params={'target_kind':'network','auth_kind':'ssh_password'}).json()
+    assert 'ssh.connect' in {row['name'] for row in ssh['capabilities']}
+    assert 'http.request' not in {row['name'] for row in ssh['capabilities']}
+    web = http.get('/credential-profiles/capabilities',params={'target_kind':'network','auth_kind':'bearer_token'}).json()
+    assert 'ssh.connect' not in {row['name'] for row in web['capabilities']}
+
+
+def test_metadata_only_crud_and_rotation_never_return_secret_material(client):
+    http, pool = client
+
+    created = http.post("/credential-profiles", json=_create_payload())
+    assert created.status_code == 201, created.text
+    profile = created.json()["profile"]
+    profile_id = profile["id"]
+    assert profile["auth_kind"] == "bearer_token"
+    assert profile["configuration"]["username_configured"] is False
+    assert profile["allowed_capabilities"] == ["http.request"]
+    assert profile["secret_values_visible"] is False
+    assert profile["storage_encrypted"] is True
+    assert "never-return-this-secret" not in created.text
+    assert "opaque-ciphertext" not in created.text
+
+    listed = http.get(
+        "/credential-profiles",
+        params={"target_kind": "api", "target_id": str(TARGET_ID)},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["count"] == 1
+    assert listed.json()["profiles"][0]["id"] == profile_id
+    assert "opaque-ciphertext" not in listed.text
+
+    fetched = http.get(f"/credential-profiles/{profile_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["profile"]["id"] == profile_id
+
+    patched = http.patch(
+        f"/credential-profiles/{profile_id}",
+        json={
+            "expected_record_version": 1,
+            "name": "Primary API renamed",
+            "allowed_capabilities": ["http.request", "web.probe"],
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["profile"]["record_version"] == 2
+    assert patched.json()["profile"]["allowed_capabilities"] == [
+        "http.request", "web.probe"
+    ]
+
+    stale = http.patch(
+        f"/credential-profiles/{profile_id}",
+        json={"expected_record_version": 1, "name": "stale"},
+    )
+    assert stale.status_code == 409
+
+    rotated = http.post(
+        f"/credential-profiles/{profile_id}/rotate",
+        json={
+            "expected_record_version": 2,
+            "secret": "new-secret-must-not-return",
+            "clear_expiry": True,
+        },
+    )
+    assert rotated.status_code == 200, rotated.text
+    assert rotated.json()["profile"]["current_version"] == 2
+    assert rotated.json()["profile"]["record_version"] == 3
+    assert "new-secret-must-not-return" not in rotated.text
+    assert len(pool.conn.versions) == 2
+
+    deleted = http.delete(f"/credential-profiles/{profile_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["profile"]["status"] == "inactive"
+    assert pool.conn.binding["is_active"] is False
+
+
+# What a blank allowlist grants an HTTP identity: the request primitive, the read-only Scan
+# producers that reach pages behind the sign-in, and the bounded browser. Every active verifier
+# still needs explicit elevation.
+HTTP_IDENTITY_DEFAULTS = (
+    "browser.navigate",
+    "collections.replay_safe",
+    "http.request",
+    "templates.passive_batch",
+    "templates.passive_scan",
+    "web.browser_crawl",
+    "web.content_discover",
+    "web.crawl",
+    "web.probe",
+    "web.spec_ingest",
+)
+
+
+@pytest.mark.parametrize("auth_kind", ["form_login", "json_login", "cookie", "bearer_token"])
+def test_a_default_http_identity_authenticates_the_scan_producers_and_the_browser(auth_kind):
+    """A credential made with the defaults must sign the crawl in, not only the baseline request.
+
+    The defaults granted only ``http.request`` (plus the session lifecycle for a sign-in form).
+    Scan applies the profile per action, so a scan that signed in successfully still crawled,
+    browser-crawled and discovered content anonymously and never reached a page behind the
+    sign-in; a Hunt's browser could not open a page with its own established session.
+    """
+    from runtime.scan_credentials import scan_credential_allows_capability
+
+    allowed = credential_api._credential_capabilities(
+        [], target_kind="web", auth_kind=auth_kind, allow_active=False,
+    )
+    for capability in ("web.crawl", "web.browser_crawl", "web.content_discover",
+                       "browser.navigate", "http.request"):
+        assert scan_credential_allows_capability(allowed, capability), capability
+    # Active verification is still an explicit, approved elevation.
+    for capability in ("xss.verify_batch", "sqli.verify_batch", "authz.verify",
+                       "collections.replay_active"):
+        assert not scan_credential_allows_capability(allowed, capability), capability
+    interactive = auth_kind in {"form_login", "json_login"}
+    assert ("auth.session.establish" in allowed) is interactive
+
+
+def test_the_capability_catalog_offers_what_scan_and_the_browser_can_authenticate(client):
+    """The catalog listed only capabilities flagged as resolving credentials server-side.
+
+    The crawlers and verifiers that Scan authenticates per action were missing, so an operator
+    building an allowlist could not find the capabilities that make a Scan authenticated.
+    """
+    http, _ = client
+    catalog = http.get(
+        "/credential-profiles/capabilities",
+        params={"target_kind": "web", "auth_kind": "form_login"},
+    )
+    assert catalog.status_code == 200, catalog.text
+    offered = {item["name"]: item for item in catalog.json()["capabilities"]}
+    for name in ("web.crawl", "web.browser_crawl", "xss.verify_batch", "sqli.verify_batch",
+                 "collections.replay_active", "browser.navigate", "browser.interact"):
+        assert name in offered, name
+    assert offered["xss.verify_batch"]["requires_active_approval"] is True
+    assert offered["xss.verify_batch"]["default"] is False
+    assert offered["web.browser_crawl"]["default"] is True
+    ssh = http.get(
+        "/credential-profiles/capabilities",
+        params={"target_kind": "device", "auth_kind": "ssh_password"},
+    )
+    assert "web.crawl" not in {item["name"] for item in ssh.json()["capabilities"]}
+
+
+def test_capability_registry_defaults_validate_names_and_require_active_elevation(client):
+    http, _ = client
+
+    catalog = http.get(
+        "/credential-profiles/capabilities",
+        params={"target_kind": "api", "auth_kind": "bearer_token"},
+    )
+    assert catalog.status_code == 200, catalog.text
+    assert catalog.json()["blank_semantics"] == "safe_server_defaults"
+    assert catalog.json()["safe_defaults"] == list(HTTP_IDENTITY_DEFAULTS)
+
+    defaulted = http.post(
+        "/credential-profiles",
+        json=_create_payload(name="Defaulted", allowed_capabilities=[]),
+    )
+    assert defaulted.status_code == 201, defaulted.text
+    assert sorted(defaulted.json()["profile"]["allowed_capabilities"]) == list(
+        HTTP_IDENTITY_DEFAULTS
+    )
+
+    inert_ssh = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            target_kind="device", auth_kind="ssh_password",
+            principal_slot="ssh", username="root", allowed_capabilities=[],
+        ),
+    )
+    assert inert_ssh.status_code == 422
+    assert "has no safe default" in inert_ssh.text
+
+    unknown = http.post(
+        "/credential-profiles",
+        json=_create_payload(name="Unknown", allowed_capabilities=["made.up.capability"]),
+    )
+    assert unknown.status_code == 422
+    assert "unknown capability" in unknown.text
+
+    active = http.post(
+        "/credential-profiles",
+        json=_create_payload(name="Active", allowed_capabilities=["authz.verify"]),
+    )
+    assert active.status_code == 422
+    assert "explicit active-capability elevation" in active.text
+
+    self_asserted = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            name="Self asserted",
+            allowed_capabilities=["authz.verify"],
+            allow_active_capabilities=True,
+        ),
+    )
+    assert self_asserted.status_code == 400
+    assert "Approval receipt is required" in self_asserted.text
+
+    elevated = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            name="Elevated",
+            allowed_capabilities=["authz.verify"],
+            allow_active_capabilities=True,
+            approval_receipt_id="11111111-1111-4111-8111-111111111111",
+        ),
+    )
+    assert elevated.status_code == 201, elevated.text
+
+def test_creation_is_fail_closed_for_unknown_target_and_unsafe_material(client):
+    http, pool = client
+
+    missing = http.post(
+        "/credential-profiles",
+        json=_create_payload(target_id="99999999-9999-4999-8999-999999999999"),
+    )
+    assert missing.status_code == 404
+    assert pool.conn.profile is None
+
+    split = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            auth_kind="api_key_header",
+            header_name="X-API-Key",
+            secret="token\r\nX-Escape: yes",
+        ),
+    )
+    assert split.status_code == 422
+    assert "line breaks" in split.text
+    assert pool.conn.profile is None
+
+
+def test_request_and_response_models_do_not_serialize_secret_values(client):
+    http, _pool = client
+    body = _create_payload(
+        auth_kind="basic_auth",
+        username="private-user",
+        secret="private-password",
+    )
+    response = http.post("/credential-profiles", json=body)
+    assert response.status_code == 201, response.text
+    serialized = json.dumps(response.json())
+    assert "private-user" not in serialized
+    assert "private-password" not in serialized
+    assert response.json()["profile"]["configuration"]["username_configured"] is True
+
+
+def test_query_parameter_profile_exposes_name_but_never_value(client):
+    http, _pool = client
+    response = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            auth_kind="query_parameter",
+            parameter_name="access_key",
+            secret="private-query-value",
+        ),
+    )
+    assert response.status_code == 201, response.text
+    profile = response.json()["profile"]
+    assert profile["configuration"]["parameter_name"] == "access_key"
+    assert "private-query-value" not in response.text
+
+
+def test_unknown_fields_are_rejected_before_secret_storage(client):
+    http, pool = client
+    response = http.post(
+        "/credential-profiles",
+        json={**_create_payload(), "raw_headers": {"Authorization": "leak"}},
+    )
+    assert response.status_code == 422
+    assert "leak" not in response.text
+    assert pool.conn.profile is None
+
+
+def test_migrated_web_profile_changes_stay_synchronized_with_legacy_execution(client):
+    http, pool = client
+    created = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            target_kind="web",
+            name="Legacy primary",
+            auth_kind="authorization_header",
+            secret="Bearer original",
+        ),
+    )
+    assert created.status_code == 201, created.text
+    profile = created.json()["profile"]
+    pool.conn.legacy_web = {
+        "id": uuid.UUID(profile["id"]),
+        "target_id": TARGET_ID,
+        "auth_kind": "authorization_header",
+        "name": "Legacy primary",
+        "secret_value": "enc:fernet:legacy-original",
+        "is_active": True,
+        "expires_at": None,
+        "rotated_at": datetime.now(timezone.utc),
+    }
+
+    patched = http.patch(
+        f"/credential-profiles/{profile['id']}",
+        json={
+            "expected_record_version": profile["record_version"],
+            "name": "Canonical primary",
+            "clear_expiry": True,
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    assert pool.conn.legacy_web["name"] == "Canonical primary"
+    assert pool.conn.legacy_web["principal_profile_name"] == "Canonical primary"
+
+    rotated = http.post(
+        f"/credential-profiles/{profile['id']}/rotate",
+        json={
+            "expected_record_version": patched.json()["profile"]["record_version"],
+            "secret": "Bearer canonical-rotation",
+            "clear_expiry": True,
+        },
+    )
+    assert rotated.status_code == 200, rotated.text
+    assert pool.conn.legacy_web["secret_value"] == "enc:fernet:opaque-ciphertext"
+
+    deleted = http.delete(f"/credential-profiles/{profile['id']}")
+    assert deleted.status_code == 200, deleted.text
+    assert pool.conn.legacy_web["is_active"] is False
+
+
+def test_migrated_device_profile_rotation_stays_synchronized_with_legacy_execution(client):
+    http, pool = client
+    created = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            target_kind="device",
+            name="Device SSH",
+            auth_kind="ssh_password",
+            principal_slot="ssh",
+            username="root",
+            secret="original-password",
+            allowed_capabilities=["device.ssh.propose"],
+            allow_active_capabilities=True,
+            approval_receipt_id="11111111-1111-4111-8111-111111111111",
+        ),
+    )
+    assert created.status_code == 201, created.text
+    profile = created.json()["profile"]
+    pool.conn.legacy_device = {
+        "id": uuid.UUID(profile["id"]),
+        "device_target_id": TARGET_ID,
+        "auth_kind": "ssh_password",
+        "name": "Device SSH",
+        "username": "root",
+        "login_path": None,
+        "secret_value": "enc:fernet:legacy-original",
+        "is_active": True,
+        "expires_at": None,
+        "rotated_at": datetime.now(timezone.utc),
+    }
+
+    rotated = http.post(
+        f"/credential-profiles/{profile['id']}/rotate",
+        json={
+            "expected_record_version": profile["record_version"],
+            "username": "root",
+            "secret": "canonical-password",
+            "clear_expiry": True,
+        },
+    )
+    assert rotated.status_code == 200, rotated.text
+    assert pool.conn.legacy_device["secret_value"] == "enc:fernet:opaque-ciphertext"
+    assert pool.conn.legacy_device["username"] == "root"
+
+    deleted = http.delete(f"/credential-profiles/{profile['id']}")
+    assert deleted.status_code == 200, deleted.text
+    assert pool.conn.legacy_device["is_active"] is False
+
+
+DEVICE_HOST = uuid.UUID("55555555-5555-4555-8555-555555555555")
+WEB_ORIGIN = uuid.UUID("66666666-6666-4666-8666-666666666666")
+WEB_HOST = uuid.UUID("77777777-7777-4777-8777-777777777777")
+
+
+# facts: (http_origin, serves_http, services_observed, device)
+@pytest.mark.parametrize(("declared", "auth_kind", "facts", "refused"), [
+    # Soak N6: a web basic-auth profile granted to the client VPS, whose full port scan saw SSH
+    # only, as device and as web.
+    ("device", "basic_auth", (False, False, True, True), True),
+    ("web", "basic_auth", (False, False, True, True), True),
+    # ...and to the honey web origin labelled as a network host.
+    ("network", "basic_auth", (True, True, False, False), True),
+    ("web", "basic_auth", (True, True, False, False), False),
+    ("network", "bearer_token", (False, True, True, False), False),  # a host with a web origin
+    ("device", "bearer_token", (False, True, True, False), True),    # a host that is not a device
+    # A device with no service observations yet: absence of evidence is not "no HTTP".
+    ("device", "bearer_token", (False, False, False, True), False),
+    ("device", "ssh_password", (False, False, True, True), False),
+    ("network", "ssh_password", (False, False, False, False), False),
+    ("web", "ssh_password", (True, True, False, False), True),
+])
+def test_a_grant_must_name_the_target_as_it_is_and_fit_the_credential_protocol(
+    declared, auth_kind, facts, refused,
+):
+    http_origin, serves_http, services_observed, device = facts
+    reason = credential_api.grant_target_kind_error(
+        declared_kind=declared, auth_kind=auth_kind, http_origin=http_origin,
+        serves_http=serves_http, services_observed=services_observed, device=device,
+    )
+    assert (reason is not None) is refused, reason
+
+
+def test_the_grant_route_refuses_an_incompatible_target_with_422(client):
+    http, pool = client
+    created = http.post("/credential-profiles", json=_create_payload(
+        target_kind="web", auth_kind="basic_auth", username="alice",
+    ))
+    assert created.status_code == 201, created.text
+    profile_id = created.json()["profile"]["id"]
+    pool.conn.grant_target_facts = {
+        DEVICE_HOST: {"http_origin": False, "serves_http": False, "services_observed": True, "device": True},
+        WEB_ORIGIN: {"http_origin": True, "serves_http": True, "services_observed": False, "device": False},
+    }
+    for kind, target in (("device", DEVICE_HOST), ("web", DEVICE_HOST), ("network", WEB_ORIGIN)):
+        refused = http.post(f"/credential-profiles/{profile_id}/grants", json={
+            "target_kind": kind, "target_id": str(target),
+        })
+        assert refused.status_code == 422, (kind, refused.text)
+    missing = http.post(f"/credential-profiles/{profile_id}/grants", json={
+        "target_kind": "web", "target_id": str(WEB_HOST),
+    })
+    assert missing.status_code == 404

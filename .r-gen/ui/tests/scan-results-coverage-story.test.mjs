@@ -1,0 +1,138 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+import { scanAssurance } from '../src/lib/assurance.mjs'
+import { scanResultPresentation } from '../src/lib/scanDetailPresentation.mjs'
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const detail = readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf8')
+
+test('credential lanes never endorse an unqualified authenticated result', () => {
+  const scan = scanWith({})
+  scan.result.smart_coverage = { auth_states_tested: ['anonymous', 'primary'] }
+  const presentation = scanResultPresentation(scan, scanAssurance(scan))
+  assert.equal(presentation.authenticationAssurance, 'Identity unverified')
+  assert.equal(presentation.coverageIncomplete, true)
+  assert.match(presentation.confidence, /no session-health timeline/)
+  assert.match(presentation.confidence, /Independently verified findings remain supported/)
+  assert.equal(presentation.confirmedCount, 1)
+})
+
+test('recorded credential interruption explains blocked work without hiding supported findings', () => {
+  const scan = scanWith({})
+  scan.result.authentication_assurance = {
+    reason_code: 'authentication_gap', state: 'unknown', interrupted_action_count: 2,
+  }
+  const presentation = scanResultPresentation(scan, scanAssurance(scan))
+  assert.equal(presentation.authenticationAssurance, 'Credential authority unavailable')
+  assert.equal(presentation.coverageIncomplete, true)
+  assert.match(presentation.confidence, /2 planned actions were interrupted or blocked/)
+  assert.match(presentation.confidence, /Review the identity and approval/)
+  assert.match(presentation.confidence, /Independently verified findings remain supported/)
+  assert.equal(presentation.confirmedCount, 1)
+  assert.match(presentation.headline, /confirmed material issue/)
+})
+
+function scanWith({ reasons = [], gaps = [], families = [], gradeReliable = true, score = 93 }) {
+  return {
+    id: 'scan-1',
+    result: {
+      findings: [
+        { title: 'A', severity: 'high', verified: true, proof_state: 'verified', url: 'http://t/a?x=1' },
+        { title: 'B', severity: 'high', verified: false, proof_state: 'likely_vulnerable', url: 'http://t/b' },
+      ],
+      coverage: { reasons, selected_family_gaps: families },
+      result: { assurance_score: score, assurance_gaps: gaps, grade_reliable: gradeReliable, risk_score: 14, risk_grade: 'F' },
+    },
+  }
+}
+
+test('a strong examination that finished everything endorses the conclusion', () => {
+  const scan = scanWith({})
+  const presentation = scanResultPresentation(scan, scanAssurance(scan))
+  assert.equal(presentation.confidenceTone, 'supporting')
+  assert.equal(presentation.coverageIncomplete, false)
+  assert.match(presentation.confidence, /supports this run-level conclusion/)
+  assert.equal(presentation.observedCount, 2)
+  assert.equal(presentation.confirmedCount, 1)
+  assert.equal(presentation.candidateCount, 1)
+})
+
+test('a strong score over an unfinished run is qualified, never endorsed, and names the families', () => {
+  const scan = scanWith({
+    reasons: ['timed_out'],
+    gaps: ['required_actions_complete', 'selected_families_complete'],
+    families: ['nuclei_passive', 'xss'],
+    gradeReliable: false,
+  })
+  const presentation = scanResultPresentation(scan, scanAssurance(scan))
+  assert.equal(presentation.confidenceTone, 'qualified')
+  assert.equal(presentation.coverageIncomplete, true)
+  assert.match(presentation.confidence, /did not finish everything it planned/)
+  assert.doesNotMatch(presentation.confidence, /supports this run-level conclusion/)
+  assert.deepEqual(presentation.incompleteFamilies, ['nuclei passive', 'xss'])
+  assert.deepEqual(presentation.coverageGapReasons, ['A planned step ran out of its time allowance before it finished'])
+})
+
+test('coverage gap reasons read as what happened to the planned work, not as codes', () => {
+  const scan = scanWith({
+    reasons: ['insufficient_plan_budget', 'not_applicable', 'some_future_code'],
+    gaps: [],
+    families: ['sqli'],
+    gradeReliable: false,
+  })
+  const presentation = scanResultPresentation(scan, scanAssurance(scan))
+  assert.deepEqual(presentation.coverageGapReasons, [
+    'Planned steps were skipped because the admitted budget did not reach them',
+    'A planned proof step had no candidate left to prove',
+    'some future code',
+  ])
+})
+
+test('an unreliable grade alone is enough to qualify the conclusion', () => {
+  const scan = scanWith({ gradeReliable: false })
+  const presentation = scanResultPresentation(scan, scanAssurance(scan))
+  assert.equal(presentation.confidenceTone, 'qualified')
+})
+
+test('a weak examination keeps the not-a-clean-bill wording', () => {
+  const scan = scanWith({ score: 40 })
+  const presentation = scanResultPresentation(scan, scanAssurance(scan))
+  assert.equal(presentation.confidenceTone, 'weak')
+  assert.match(presentation.confidence, /not a clean bill of health/)
+})
+
+test('the page renders one coverage-gaps panel and colours a qualified conclusion amber', () => {
+  assert.match(detail, /data-testid="coverage-gaps"/)
+  assert.match(detail, /resultPresentation\.confidenceTone === 'qualified' \? 'text-amber-200'/)
+  assert.match(detail, /that did not finish:/)
+  assert.doesNotMatch(detail, /What was not established<\/p>/)
+  assert.match(detail, /missing or incomplete coverage does not establish absence of vulnerabilities/)
+})
+
+test('finding rows show a route, a proof label, and survive narrow screens', () => {
+  assert.match(detail, /function ScanFindingClusterRow\(/)
+  assert.match(detail, /function ScanFindingLocation\(/)
+  assert.match(detail, /function findingLocation\(/)
+  assert.match(detail, /grid-cols-\[auto_minmax\(0,1fr\)_auto\]/)
+  assert.match(detail, /block truncate font-mono text-xs text-gray-400/)
+  assert.match(detail, /const proof = findingProofLabel\(finding\)/)
+  // Summary and section headings count from one grouping (scanFindingCounts).
+  assert.match(detail, /const counts = scanFindingCounts\(current\)/)
+  assert.match(detail, /\{scanFindingCountsText\(counts\)\}/)
+  // The redundant per-row origin pill is gone; origin lives in the section heading.
+  assert.doesNotMatch(detail, /\{finding\._origin\}<\/span>/)
+})
+
+test('the release decision labels its chips and folds the blocking list', () => {
+  assert.match(detail, /<span className="text-gray-500">profile<\/span>/)
+  assert.match(detail, /<span className="text-gray-500">policy<\/span>/)
+  // The provenance clause (this scan, Hunts, earlier scans) is built by blockerProvenanceText,
+  // whose wording is tested in scanDetailPresentation.test.mjs; the page renders it.
+  assert.match(detail, /blockerProvenanceText\(blockingFindings, scanId\)/)
+  assert.match(detail, /\{' '\}· \{provenanceText\}/)
+  assert.match(detail, /<details className="mt-3 border-t border-gray-800 pt-3">/)
+})

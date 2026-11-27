@@ -1,0 +1,451 @@
+"""Deterministic NoSQL-operator injection verification over exact requests.
+
+The contract is a sentinel differential: a value that matches nothing is sent
+both literally and wrapped in a NoSQL operator (``$ne`` / ``$gt`` / ``$regex``).
+If the operator form returns a materially different, repeatable response — or,
+in an authentication lane, a session where the literal failed — the operator
+was interpreted by a document store, which is NoSQL injection. Nothing is
+promoted from a single request or from normal dynamic variation, and a store
+that treats the operator as a literal key produces no differential.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+import hashlib
+import json
+import math
+import time
+from typing import Any, Mapping
+import urllib.parse
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
+
+try:
+    from capabilities.authentication_proof import successful_token_signals
+    from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from runtime.auth_refusal import (
+        AUTHENTICATION_REQUIRED, refusal_error, request_refusal,
+    )
+    from runtime.capability_registry import CapabilitySpec
+    from runtime.models import TargetBinding
+    from runtime.request_shape import resolve_json_field_path
+    from runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
+except ModuleNotFoundError:
+    from .authentication_proof import successful_token_signals
+    from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from ..runtime.auth_refusal import (
+        AUTHENTICATION_REQUIRED, refusal_error, request_refusal,
+    )
+    from ..runtime.capability_registry import CapabilitySpec
+    from ..runtime.models import TargetBinding
+    from ..runtime.request_shape import resolve_json_field_path
+    from ..runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
+
+try:
+    from scanner_tools.request_replay import ReplayRequest
+except ModuleNotFoundError:
+    from scanner.scanner_tools.request_replay import ReplayRequest
+
+
+NOSQLI_VERIFY_PARSER_VERSION = "nosqli-verify/v1"
+
+
+class NoSQLiVerifyError(ValueError):
+    """A NoSQLi verification request does not match immutable candidate authority."""
+
+
+def _content_type(request: ReplayRequest) -> str:
+    for name, value in request.headers:
+        if str(name).lower() == "content-type":
+            return str(value).lower()
+    return ""
+
+
+def _query_literal(request: ReplayRequest, field: str, value: str) -> ReplayRequest:
+    parsed = urllib.parse.urlsplit(request.url)
+    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    matches = [index for index, (name, _v) in enumerate(pairs) if name == field]
+    if len(matches) != 1:
+        raise NoSQLiVerifyError("query candidate field authority is ambiguous")
+    pairs[matches[0]] = (field, value)
+    return replace(request, url=_rebuild(parsed, pairs))
+
+
+def _query_operator(
+    request: ReplayRequest, field: str, operator: str, value: str,
+) -> ReplayRequest:
+    parsed = urllib.parse.urlsplit(request.url)
+    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    matches = [index for index, (name, _v) in enumerate(pairs) if name == field]
+    if len(matches) != 1:
+        raise NoSQLiVerifyError("query candidate field authority is ambiguous")
+    # ``field[$ne]=value`` — PHP/Express body parsers turn this into a nested
+    # operator object; a literal store keeps it as the key ``field[$ne]``.
+    pairs[matches[0]] = (f"{field}[{operator}]", value)
+    return replace(request, url=_rebuild(parsed, pairs))
+
+
+def _rebuild(parsed: Any, pairs: list[tuple[str, str]]) -> str:
+    return urllib.parse.urlunsplit((
+        parsed.scheme, parsed.netloc, parsed.path,
+        urllib.parse.urlencode(pairs, doseq=True), "",
+    ))
+
+
+def _form_pairs(request: ReplayRequest) -> list[tuple[str, str]]:
+    try:
+        text = (request.body or b"").decode("utf-8")
+    except (UnicodeDecodeError, AttributeError) as exc:
+        raise NoSQLiVerifyError("private form request body is invalid") from exc
+    return urllib.parse.parse_qsl(text, keep_blank_values=True)
+
+
+def _form_field_index(pairs: list[tuple[str, str]], field: str) -> int:
+    matches = [index for index, (name, _v) in enumerate(pairs) if name == field]
+    if len(matches) != 1:
+        raise NoSQLiVerifyError("form candidate field authority is ambiguous")
+    return matches[0]
+
+
+def _form_literal(request: ReplayRequest, field: str, value: str) -> ReplayRequest:
+    pairs = _form_pairs(request)
+    pairs[_form_field_index(pairs, field)] = (field, value)
+    return replace(request, body=urllib.parse.urlencode(pairs).encode("utf-8"))
+
+
+def _form_operator(
+    request: ReplayRequest, field: str, operator: str, value: str,
+) -> ReplayRequest:
+    # ``field[$ne]=value`` in a form body is what PHP/Express body parsers turn
+    # into a nested operator object, mirroring the query-string bracket form.
+    pairs = _form_pairs(request)
+    pairs[_form_field_index(pairs, field)] = (f"{field}[{operator}]", value)
+    return replace(request, body=urllib.parse.urlencode(pairs).encode("utf-8"))
+
+
+def _json_document(request: ReplayRequest) -> Any:
+    try:
+        return json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NoSQLiVerifyError("private JSON request body is invalid") from exc
+
+
+def _set_json_path(document: Any, field_path: str, value: Any) -> Any:
+    try:
+        parts = resolve_json_field_path(document, field_path)
+    except ValueError as exc:
+        raise NoSQLiVerifyError(
+            "private JSON body shape does not match the candidate field path"
+        ) from exc
+    cursor = document
+    for component in parts[:-1]:
+        cursor = cursor[component]
+    cursor[parts[-1]] = value
+    return document
+
+
+def _json_body(request: ReplayRequest, field_path: str, value: Any) -> ReplayRequest:
+    document = _set_json_path(_json_document(request), field_path, value)
+    body = json.dumps(
+        document, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    return replace(request, body=body)
+
+
+def _identity_signal(result: ReplayTransportResult) -> bool:
+    return bool(successful_token_signals(result))
+
+
+def _succeeded(result: ReplayTransportResult) -> bool:
+    """True when the target answered normally rather than failing the request."""
+    status = result.status_code
+    return isinstance(status, int) and 200 <= status < 300
+
+
+def _fingerprint(result: ReplayTransportResult) -> tuple[int | None, int, str]:
+    return (
+        result.status_code, len(result.response_body), keyed_body_digest(result.response_body),
+    )
+
+
+class NoSQLiVerifyAdapter:
+    """Prove NoSQL-operator injection with a repeated sentinel differential."""
+
+    # CapabilityExecutor checks these against the registry before it runs an
+    # adapter. Without them every execution raised AttributeError and settled
+    # as a bare "adapter_failed", so this family never ran a single attempt.
+    capability_name = "nosqli.verify_batch"
+    adapter_name = "nosqli.verify_batch"
+    adapter_version = "1"
+    manages_cancellation = True
+
+    def __init__(
+        self, *, specification: CapabilitySpec, target: TargetBinding,
+        request: ReplayRequest, candidate: Mapping[str, Any],
+        transport: ReplayTransport, requested_budget: Mapping[str, int],
+    ) -> None:
+        if specification.name != "nosqli.verify_batch":
+            raise NoSQLiVerifyError("NoSQLi verify capability is invalid")
+        if int(requested_budget.get("http_requests") or 0) < 4:
+            raise NoSQLiVerifyError("NoSQLi verification requires at least four HTTP requests")
+        if str(candidate.get("method") or "").upper() != request.method:
+            raise NoSQLiVerifyError("NoSQLi request method differs from candidate")
+        request_ref = str(candidate.get("request_ref_id") or "")
+        if request_ref and request_ref != request.request_id:
+            raise NoSQLiVerifyError("NoSQLi private request reference differs")
+        field = str(candidate.get("field_path") or candidate.get("parameter_name") or "")
+        if not field:
+            raise NoSQLiVerifyError("NoSQLi candidate has no exact field")
+        declared_fields = [
+            str(item) for item in candidate.get("body_field_names") or ()
+            if str(item)
+        ]
+        if declared_fields and field not in declared_fields:
+            raise NoSQLiVerifyError(
+                "NoSQLi candidate anchor is absent from its declared body fields"
+            )
+        self.specification = specification
+        self.target = target
+        self.request = request
+        self.candidate = dict(candidate)
+        self.transport = transport
+        self.requested_budget = {str(k): int(v) for k, v in requested_budget.items()}
+        # An endpoint-body candidate represents the whole declared body. Its
+        # anchor only supplies stable identity and ranking; try it first, then
+        # its siblings while another bounded four-request differential fits.
+        self.fields = tuple(dict.fromkeys([field, *declared_fields]))
+        # By method, as sqli_proof routes: a captured GET carries its fields in the query, and
+        # sending it to the JSON-body mutator blocked the candidate before any request.
+        self.request_mode = request.method not in {"GET", "HEAD"}
+        # A form-encoded body carries bracket-style operators (field[$ne]=x), not a
+        # JSON document, so routing it through the JSON mutator raised "private JSON
+        # request body is invalid" and no form NoSQL candidate could execute.
+        self.body_is_form = (
+            self.request_mode
+            and "x-www-form-urlencoded" in _content_type(request)
+        )
+
+    def _literal(self, field: str, value: str) -> ReplayRequest:
+        if self.body_is_form:
+            return _form_literal(self.request, field, value)
+        if self.request_mode:
+            return _json_body(self.request, field, value)
+        return _query_literal(self.request, field, value)
+
+    def _operator(self, field: str, operator: str, value: str) -> ReplayRequest:
+        if self.body_is_form:
+            return _form_operator(self.request, field, operator, value)
+        if self.request_mode:
+            return _json_body(self.request, field, {operator: value})
+        return _query_operator(self.request, field, operator, value)
+
+    def _spent(self, started: float, attempted: int) -> dict[str, int]:
+        """What to settle: requests sent, writes when the caller reserved them (every one sent:
+        a write past the reservation is a violation to surface, not to round away), and wall
+        seconds only when reserved and never above the reservation."""
+        spent = {"http_requests": attempted}
+        if (
+            "state_changing_requests" in self.requested_budget
+            and self.request.method not in {"GET", "HEAD", "OPTIONS"}
+        ):
+            spent["state_changing_requests"] = attempted
+        reserved = self.requested_budget.get("tool_wall_seconds")
+        if reserved is not None:
+            spent["tool_wall_seconds"] = min(
+                max(1, int(reserved)), max(1, math.ceil(time.monotonic() - started)),
+            )
+        return spent
+
+    async def execute(self, *, heartbeat: Heartbeat, cancelled: Cancelled) -> CapabilityAdapterResult:
+        started = time.monotonic()
+        attempted = 0
+        results: list[ReplayTransportResult] = []
+
+        async def send(request: ReplayRequest) -> ReplayTransportResult:
+            nonlocal attempted
+            if cancelled():
+                raise NoSQLiVerifyError("cancelled")
+            remaining = max(1, self.requested_budget["http_requests"] - attempted)
+            wall = max(1, int(self.requested_budget.get("tool_wall_seconds") or 1))
+            # Split the wall that is left, not the whole reservation (as sqli_proof does).
+            wall_left = wall - (time.monotonic() - started)
+            if "tool_wall_seconds" in self.requested_budget and wall_left < 0.5:
+                raise NoSQLiVerifyError("deadline")
+            # Counted before it is sent: a request cut off in flight still reached the target.
+            attempted += 1
+            result = await self.transport.send(
+                request, target=self.target,
+                timeout_seconds=max(0.5, min(15.0, wall_left / remaining)),
+                follow_redirects=False,
+            )
+            results.append(result)
+            await heartbeat()
+            return result
+
+        candidate_id = str(self.candidate.get("candidate_id") or "")
+        request_class = str(self.candidate.get("request_class") or "safe_read")
+        observations: list[Mapping[str, Any]] = []
+        attempted_fields: list[str] = []
+        verified = False
+        refused: tuple[int, str] | None = None
+        try:
+            for field in self.fields:
+                if self.requested_budget["http_requests"] - attempted < 4:
+                    break
+                attempted_fields.append(field)
+                field_digest = hashlib.sha256(field.encode("utf-8")).hexdigest()[:8]
+                sentinel = f"shakerscan_nosqli_{candidate_id[:8]}_{field_digest}"
+                technique = None
+                if request_class == "safe_authentication":
+                    # Auth bypass: the sentinel password never matches; ``$ne``
+                    # matches every stored password, so a resulting authenticated
+                    # session is proof -- but only when the operator response itself
+                    # succeeded, so a stray cookie on an error page cannot forge one.
+                    pairs = [
+                        (
+                            await send(self._literal(field, sentinel)),
+                            await send(self._operator(field, "$ne", sentinel)),
+                        )
+                        for _ in range(2)
+                    ]
+                    if all(
+                        not literal.error_code and not payload.error_code
+                        and _succeeded(payload)
+                        and not _identity_signal(literal) and _identity_signal(payload)
+                        for literal, payload in pairs
+                    ):
+                        verified = True
+                        technique = "operator_auth_bypass_repeated"
+                else:
+                    # Semantic oracle. In a document store ``{field: {$eq: X}}`` is
+                    # identical to ``{field: X}`` while ``{field: {$ne: X}}`` is its
+                    # complement. An endpoint that merely echoes the value, stringifies
+                    # the operator object, or rejects every operator shape with one
+                    # constant response cannot satisfy BOTH "eq collapses onto the
+                    # literal" AND "ne diverges from it", so reflection can no longer
+                    # masquerade as an interpreted operator.
+                    r_literal = await send(self._literal(field, sentinel))
+                    # A login form's 401 is its answer to a wrong password, not a refusal.
+                    field_refused = request_refusal(
+                        r_literal.status_code, r_literal.response_headers,
+                        request_class=request_class, url=self.request.url, body=self.request.body,
+                    )
+                    if field_refused is not None:
+                        # The target refused the control. The differential needs every sample
+                        # answered, so no operator can verify this field against a refusal:
+                        # inconclusive for that reason, never "not proven". A request for
+                        # credentials meets every field the same way, so the attempt stops; a
+                        # plain 403 (a WAF, an ownership check) may be particular to this
+                        # value, so the remaining fields are still tested.
+                        refused = refused or field_refused
+                        observations.append({
+                            "kind": "nosqli_proof",
+                            "canonical_path": self.candidate.get("canonical_path"),
+                            "origin": self.request.origin(),
+                            "candidate_id": self.candidate.get("candidate_id"),
+                            "request_ref_id": self.candidate.get("request_ref_id"),
+                            "method": self.request.method,
+                            "field_path": field,
+                            "request_class": request_class,
+                            "proof_state": "not_proven",
+                            "finding_verdict": "inconclusive",
+                            "inconclusive_reason": field_refused[1],
+                            "control_status": r_literal.status_code,
+                            "secret_values_visible": False,
+                        })
+                        if field_refused[1] == AUTHENTICATION_REQUIRED:
+                            break
+                        continue
+                    r_ne = await send(self._operator(field, "$ne", sentinel))
+                    r_eq = await send(self._operator(field, "$eq", sentinel))
+                    r_ne_again = await send(self._operator(field, "$ne", sentinel))
+                    samples = (r_literal, r_ne, r_eq, r_ne_again)
+                    fp_literal = _fingerprint(r_literal)
+                    fp_ne = _fingerprint(r_ne)
+                    fp_eq = _fingerprint(r_eq)
+                    fp_ne_again = _fingerprint(r_ne_again)
+                    pairs = [(r_literal, r_ne), (r_literal, r_ne_again)]
+                    if (
+                        all(not item.error_code and _succeeded(item) for item in samples)
+                        and fp_ne == fp_ne_again      # the operator answer is stable
+                        and fp_eq == fp_literal        # {$eq:X} collapses onto literal X
+                        and fp_ne != fp_literal        # {$ne:X} is the complement, not X
+                    ):
+                        verified = True
+                        technique = "operator_equality_complement_differential"
+
+                observations.append({
+                    "kind": "nosqli_proof",
+                    # The route is already value-free immutable manifest content,
+                    # and a verified injection that cannot say where it is is not
+                    # actionable.
+                    "canonical_path": self.candidate.get("canonical_path"),
+                    "origin": self.request.origin(),
+                    "candidate_id": self.candidate.get("candidate_id"),
+                    "request_ref_id": self.candidate.get("request_ref_id"),
+                    "method": self.request.method,
+                    "field_path": field,
+                    "request_class": request_class,
+                    "proof_state": "verified" if verified else "not_proven",
+                    "finding_verdict": "verified" if verified else "not_proven",
+                    "proof_contract": (
+                        "nosqli_operator_differential/v1" if verified else None
+                    ),
+                    "technique": technique,
+                    "operator": "$ne",
+                    "repetitions": 2,
+                    "response_pairs": [{
+                        "literal_status": literal.status_code,
+                        "operator_status": payload.status_code,
+                        "literal_response_sha256": keyed_body_digest(literal.response_body),
+                        "operator_response_sha256": keyed_body_digest(payload.response_body),
+                    } for literal, payload in pairs],
+                    "session_state_discarded": request_class == "safe_authentication",
+                    "secret_values_visible": False,
+                })
+                if verified:
+                    break
+        except NoSQLiVerifyError as exc:
+            reason = str(exc)
+            timed_out = reason == "deadline"
+            # A later field's error keeps the differentials already completed for earlier fields.
+            status = (
+                "cancelled" if reason == "cancelled"
+                else "partial" if timed_out or observations else "blocked"
+            )
+            return CapabilityAdapterResult(
+                status=status, observations=tuple(observations), errors=(reason,),
+                execution_started=bool(attempted), timed_out=timed_out,
+                actual_budget=self._spent(started, attempted),
+                partial=bool(attempted) or timed_out, parser_version=NOSQLI_VERIFY_PARSER_VERSION,
+            )
+
+        errors = tuple(item.error_code for item in results if item.error_code)
+        if refused is not None and not verified:
+            errors = (refusal_error(*refused), *errors)
+        fields_exhausted = not verified and len(attempted_fields) < len(self.fields)
+        return CapabilityAdapterResult(
+            status="partial" if errors or fields_exhausted else "success",
+            observations=tuple(observations), errors=errors,
+            actual_budget=self._spent(started, attempted),
+            partial=bool(errors or fields_exhausted),
+            timed_out=any(item.timed_out for item in results),
+            execution_started=True, parser_version=NOSQLI_VERIFY_PARSER_VERSION,
+            redacted_execution={
+                "candidate_id": self.candidate.get("candidate_id"),
+                "request_ref_id": self.candidate.get("request_ref_id"),
+                "method": self.request.method,
+                "field_path": attempted_fields[0] if attempted_fields else None,
+                "field_paths": attempted_fields,
+                "proof_contract": (
+                    "nosqli_operator_differential/v1" if verified else None
+                ),
+                "secret_values_visible": False,
+            },
+        )
+
+
+__all__ = ["NOSQLI_VERIFY_PARSER_VERSION", "NoSQLiVerifyAdapter", "NoSQLiVerifyError"]

@@ -1,0 +1,424 @@
+# Hunt architecture — AI-augmented penetration testing
+
+**Status:** Implemented direction with explicitly pending release acceptance; reconciled 2026-09-07.
+
+This is the canonical product direction for Hunt (operator direction, 2026-09-07), followed by the
+current measured state and how the 2.3.0 workstreams map onto it. It supersedes the earlier A0
+findings-only version of this file; those findings are preserved below under "Current state."
+
+## Goal
+
+Design Hunt as an AI-powered penetration-testing workspace that makes a skilled human pentester
+materially more effective. The objective is **not** a fully autonomous scanner that replaces the
+pentester. It is:
+
+> **Human judgment + AI reasoning + deterministic execution and proof.**
+
+- The human owns scope, objectives, risk decisions, and final judgment.
+- The AI is a fast research partner: observe, hypothesize, investigate, correlate, propose the next
+  best action.
+- ShakerScan provides the controlled execution environment, target memory, tools, evidence, and
+  verification.
+
+## Core product model — three layers
+
+```text
+┌──────────────────────────────────────────────────────┐
+│                 HUMAN PENTESTER                       │
+│ objectives • intuition • authorization • judgment     │
+│ attack ideas • prioritization • final conclusions     │
+└───────────────────────┬───────────────────────────────┘
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│                  AI HUNT BRAIN                        │
+│ observe → hypothesize → investigate → correlate       │
+│ challenge assumptions → propose next actions          │
+│ maintain target model → explain reasoning/results     │
+└───────────────────────┬───────────────────────────────┘
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│             SHAKERSCAN EXECUTION PLANE                │
+│ HTTP • Browser • Auth • Nuclei • SQLMap • JS          │
+│ GraphQL • OOB • Diff • Replay • Evidence • Proof       │
+│ scope • budgets • approvals • logging • safety         │
+└──────────────────────────────────────────────────────┘
+```
+
+The division is strict, and it maps directly onto invariants ShakerScan already enforces:
+
+- The human decides **what matters**.
+- The AI decides **what may be worth trying next** (candidates/notes only — AGENTS.md invariant 7).
+- ShakerScan decides **whether an action is allowed** and executes it safely (target binding,
+  policy, budgets, approvals — invariants 4/5/6).
+- Evidence/proof decides **whether a vulnerability is real** (deterministic proof contract, the
+  hard boundary in section "Deterministic proof").
+
+## Hunt is a research session, not a scan
+
+Not `start → run predetermined tests → report`, but a persistent investigation loop whose state
+survives any single AI context window:
+
+```text
+observe → build target model → generate hypotheses → rank → choose evidence needed
+   → execute bounded action → analyze → update target model → prove / reject / defer → repeat
+```
+
+The AI must never rediscover the whole application from scratch each turn. A Hunt runs for minutes
+or hours; its state is durable.
+
+## Human and AI roles
+
+**Human controls:** engagement scope, allowed targets, active-testing and state-changing
+permission, credentials/personas, high-risk techniques, the Hunt objective, areas of interest,
+business context, manual observations, and final severity/impact judgment. The human can inject a
+hypothesis at any time.
+
+**AI specializes in what humans are slow at:** reading thousands of endpoints; correlating traffic;
+reading large JS bundles and API schemas; spotting unusual parameters; comparing principals;
+recognizing repeated object relationships; generating and adapting attack hypotheses; tracking
+failed experiments; noticing unexplored areas; chaining weak observations; summarizing evidence.
+The AI must also argue **against** its own hypotheses (record contradictory evidence, deprioritize,
+propose alternatives) so Hunt does not become an expensive payload generator.
+
+## Persistent target knowledge graph
+
+Model relationships, not a bag of URLs. Persisted entities: application (hosts, services,
+technologies, API specs, JS bundles, GraphQL schemas, auth mechanisms); endpoints (method, route,
+params, body schema, discovery source, auth requirement, observed responses); principals (id, role,
+tenant, observed ownership, session state); objects (type, ids, owner principal, relationships,
+referencing endpoints); observations (interesting responses, errors, reflections, authz
+differences, leaked metadata, controls); hypotheses (statement, supporting/contradictory evidence,
+confidence, required next evidence, status); findings (suspected/verified/rejected/needs-review).
+The graph persists across Hunts. The AI gets compact structured memory plus retrieval, never
+thousands of raw transactions.
+
+## Hypothesis engine
+
+Hunt thinks in hypotheses, not scanner families. The taxonomy classifies the result **afterward**.
+
+```text
+Observation: GET /api/orders/4121 returned owner_id=84; a second principal is available.
+Hypothesis:  authorization may depend only on the order id.
+Evidence:    response.diff(GET /api/orders/4121, principal=A, principal=B)
+```
+
+A Hunt works this through the target's shared lead board (`hypotheses`) with
+`hypothesis.propose`, `hypothesis.claim` and `hypothesis.transition` (`api/hunt/hunt_hypotheses.py`).
+These capabilities call the same dedupe, compare-and-set claim, lifecycle gate and deterministic
+refutation check as Arsenal; they do not add a second lifecycle. Writes are limited to the Hunt's
+own target. A Hunt cannot promote a lead or close it as `dead`. `supported` must cite completed
+testing actions of that Hunt, and `refuted` needs a completed deterministic verification. Each
+move takes a reason code that fits it. Proposing a lead twice is a no-op, and endorsing another
+source's lead never changes its text or confidence. Renewing a lease keeps the state the Hunt
+reached; moving a lead to `open` releases it at once.
+
+A lead is its writer's words: the title, and also the family, dimensions and dedupe key. When an
+operator retracts a Hunt's entries, every lead that Hunt created is masked in all Hunt reads, each
+one still live is closed and gives up its dedupe key so a trusted source can raise the same lead
+again, its test records are removed, and it can no longer write or hold leads.
+
+The checkpoint hands over the open frontier ranked by the deterministic `hypothesis_scheduler`,
+with the leads the Hunt holds listed first. The ordering is computed server-side and each lead
+carries its score breakdown. Beyond what is stored on the lead (its family, severity guess and
+confidence, as its source stated them), the scheduler's inputs come from server records: the
+Hunt's active authentication sessions (reachability), the latest coverage any Hunt on the target
+recorded for the same family and route (novelty is lost while it is `negative`), tests that
+found no signal (prior failures), and the remaining HTTP request budget (deferral). No per-read
+planner hint is accepted, and a Hunt cannot raise the confidence of another source's lead.
+
+Leads also follow from results. `followup_leads` holds a small table keyed by vulnerability class
+(never by application): a deterministically verified finding of a class opens the leads listed
+for it, recorded once with the finding as lineage. A lead another source already holds is endorsed
+and left in its writer's words; a lead an operator closed stays closed. Production runs when a
+Hunt verifies a candidate, when a Hunt reads the board, and when a Hunt starts. A start also runs
+the existing graph and inventory lead producers for the target, each only when its records gained
+a row since the leads it last wrote, and records a lead for each advisory that service intelligence
+matches to an observed service and that is worth acting on (known exploited, or critical/high with
+a bundled check; not already settled by a verify Scan). All of this writes leads only: it runs no
+traffic, grants no authority and proves nothing.
+
+Four query kinds keep planners from repeating or idling. `attempts` groups what any Hunt already
+ran against the target by capability, method, route template and principal. `traffic` searches the
+calls archived for the target across its Scans and Hunts and returns references with the masked
+origin and path, never headers or bodies. `coverage_gaps` relates the application graph to the coverage
+ledger: each auth-boundary edge is matched, when read, to the latest authorization coverage on its
+consumer route across the target's Hunts, and the untested ones are listed first. `activity` reports
+what changed for one Hunt since a cursor (its settled actions, decided permission requests and
+moved leads on its target, as ids and states) and can hold the read for up to 15 seconds until
+something does. It is a bounded wait on an existing read route, holds no database connection
+between looks, and adds no scheduler: the planner still decides what to do next.
+
+`GET /targets/{id}/knowledge/yield` is the operator's read of how this went: per capability the
+settled actions, the requests and tool seconds they settled and the verified findings attributed to
+them, and per lead source and family how leads ended, with the same for leads that carry a lineage.
+It is measured from the action ledger, verification attributions and the lead board, for comparing
+runs offline. The scheduler's weights are fixed in code: nothing learns from this report online,
+across targets or per application, and planners do not read it.
+
+The lead board is the one place that says something is worth testing. Notes of kind `hypothesis`
+and `next_step` are no longer written (`knowledge.record` refuses them and points at
+`hypothesis.propose`); entries written before stay readable. The other records of a Hunt's work
+refer to the lead instead of restating it:
+
+- A coverage angle may name the lead it works (`hypothesis_id`). Recording the angle then moves the
+  lead through the same claim and transition code a Hunt calls directly: `planned` holds it,
+  `testing` starts it, `negative` counts a test that found nothing and hands it back, `candidate`
+  marks it supported, `blocked` releases it. A move the lifecycle refuses leaves the angle recorded
+  and is reported.
+- A `hypothesis_refuted` interpretation names its lead as subject and is counted against it in every
+  Hunt's ranking. It carries the exact conditions and its own applicability. The lead's state does
+  not change: only a deterministic verification refutes a lead.
+- The continuation report's last tier is the open leads in the scheduler's order, where it used to be
+  next-step notes.
+
+## Coverage angles and planner checkpoints
+
+A Hunt records **exact coverage angles**, not family-level self-attestations. An angle is keyed by the material dimensions that make the experiment distinct: vulnerability family, operation/locus, mechanism, principal context, and application state. The locus vocabulary is closed and published (`HuntCoverageAngleRequest.locus`, `GET /hunts/contract` → `coverage_ledger.locus_keys`); the server refuses an unknown key or an empty locus rather than dropping it, because a dropped dimension would merge two different experiments into one angle. The ledger is append-only; later events update the current view without erasing what the planner previously believed. `GET /hunts/{hunt_id}/record` exports that full event history (`coverage_ledger.events`, in sequence order, each superseded event marked with the event that replaced it) together with `event_total`, `event_limit` and `events_truncated`; a per-Hunt cap of 5,000 events (409 `coverage_event_limit_reached` beyond it) keeps the history below the export bound. Bytes are bounded too, because the field limits count characters: one event holds at most 32,768 bytes of text and locus values as stored (422 `coverage_event_too_large`) and a Hunt at most 8 MiB (409 `coverage_byte_limit_reached`). The export stops at the per-Hunt byte bound and the coverage page and checkpoint at 4 MiB, each reporting truncation, so rows stored before the bound cannot make them unbounded. Planner-supplied coverage strings and context values pass through the shared secret redactor before they are stored or fingerprinted. Settled claims are bound to same-Hunt actions that actually ran: `negative` may cite only completed actions whose settled budget records target traffic (requests, browser actions, ports, hosts or OOB interactions); `partial`, and `blocked` when it cites actions, need at least one such action; partial or blocked execution remains an explicit gap. Every action a `negative` or `partial` claim cites must also be related to the angle (422 `coverage_evidence_unrelated`, naming each unrelated action and why): where the angle and the action's recorded input both name a route, the action addressed that route (a concrete object path matches its template); where both name a host or port, the same service; `xss.verify`, `sqli.verify` and `authz.verify` support only their own family, and network capabilities (`ports.discover`, `service.*`, `ssh.*`, `tls.inspect`) only an angle without a route. An action that addressed the whole target without a route, such as a crawl or content discovery, is related at the target level. A queue handoff (an action whose result is only `queued`, such as a device posture queue or a confirmed SSH plan) is never evidence, and a policy refusal is a blocker sentence rather than evidence. Events are ordered by a sequence assigned under the Hunt row lock, and an angle's current state is its highest-sequence event. One supersession is refused: an event that cites no new evidence cannot drop the candidate an angle is bound to; it must keep that `candidate_id`. Coverage is writable while the Hunt is unfinished: an unfinished `budget_exhausted` Hunt accepts evidence-bound events so the planner can settle what its last actions examined, and finishing or cancelling (which sets `completed_at` under the same row lock) makes the history read-only. A negative result on one angle never closes a materially different method, route, identity, mechanism, input path, or state.
+
+`GET /hunts/{hunt_id}/checkpoint` builds a bounded handoff from server-owned state: latest coverage angles, open candidates, action outcomes, budgets, and unresolved proof gaps. Every bounded list reports what it left out: `angles_truncated`, `candidates_truncated`, and for the continuation queue (ranked over every open angle, not only the newest ones) `continuation_count`, `continuation_total` and `continuation_truncated`. It is intended for context compaction, planner replacement, and resumed work. The checkpoint is advisory investigation memory only. It cannot grant authority, create proof, or promote a candidate to a verified finding.
+
+## Capability architecture
+
+The AI receives small, strongly typed capabilities, never a shell on the ShakerScan host or
+planner-supplied argv for its tools (invariant 3). The exception is `ssh.exec` on a device target:
+a command the AI chooses runs on that device over SSH, with a profile the person granted
+`ssh.exec`, under the target's authorization, budget, timeout and output cap ([hunt-ssh.md](hunt-ssh.md)). Each capability declares input schema, risk, permissions, target restrictions,
+request/time budget, expected evidence, and output schema. Target families: HTTP (request/replay/
+mutate/compare/sequence), browser (navigate/interact/observe_network/execute_candidate/
+capture_state), auth (principal.select/compare, session.refresh, auth.observe), discovery
+(surface.query, openapi/graphql/javascript.inspect, traffic.search), verification (sqlmap.verify,
+xss.browser_verify, nuclei.run_selected, oob.allocate/check), evidence (record/query,
+finding.propose/verify_request). Scan and Hunt call the **same** registry entries (invariant 5/10).
+
+## Human–AI collaboration modes
+
+Modes differ by **authority, not engine**:
+
+- **Copilot** — AI only recommends; the human executes/approves. For sensitive engagements.
+- **Assisted** — AI auto-runs low-risk actions; higher-risk actions request approval. The intended
+  default. This is the existing approval-receipt + policy model applied per action.
+- **Autonomous** — AI runs everything the engagement policy permits; the human observes and can
+  interrupt. For labs, staging, long-running research.
+
+## The AI learns from the pentester (session-scoped, never global)
+
+The human teaches Hunt during an engagement ("403 vs 404 here is an authz side channel"; "ignore
+missing-CSP findings, focus on exploitable flaws"). This becomes **target/session guidance**, never
+a permanent global detector rule. This is a hard constraint: it must not contaminate the universal
+engine with application-specific heuristics (see the universal-engine rule).
+
+## Skills become expert playbooks
+
+Skills teach the AI how an expert reasons about a problem (e.g. `skill.web.authorization`: map
+object relationships and principals, distinguish collection/object endpoints, inspect ownership
+identifiers, replay with alternate principals, test nested resources, check read/write asymmetry,
+look for indirect references). The AI decides which ideas apply. Skills never contain
+target-specific routes or benchmark answers.
+
+## Adaptive coverage, deepening, and challenge
+
+Hunt records exact coverage angles rather than closing an entire vulnerability family after one
+negative test. Method, route/object/sink, mechanism, principal context, and application state can
+make two experiments materially different. Compact checkpoints preserve those distinctions across
+planner handoffs and context compaction without treating planner memory as proof.
+
+After broad surface coverage, the preferred mode is evidence-driven deepening: follow a supported
+observation toward the next security-boundary edge and run the smallest useful falsifying action
+instead of starting another generic sweep. Non-terminal candidates appear in the checkpoint review
+queue for an adversarial pass over attacker prerequisites, alternative explanations, impact ceiling,
+duplicate identity, and the next falsifying action. Candidate fingerprints and canonical loci are
+continuation/deduplication hints only; registered deterministic verification remains the proof gate.
+
+## Deterministic proof — a hard invariant
+
+> **AI reasoning is not proof.** (AGENTS.md invariant 7.)
+
+AI reasoning creates a *candidate*. Verification requires deterministic evidence: a boolean/time
+differential, a controlled-mutation database error, sqlmap proof for injection; a genuine
+cross-principal comparison for BOLA (not merely HTTP 200). This is one of ShakerScan's strongest
+advantages and must not be weakened. It is also why the A3/A4 BOLA work is a careful build — see
+"Current state."
+
+## Scan and Hunt relationship
+
+Keep Scan; simplify its role to a fast deterministic baseline (crawl, API/schema and JS discovery,
+technology detection, known-exposure checks, basic injection, baseline proof). Its output is
+*initial target knowledge + obvious verified findings*, which Hunt consumes for adaptive
+investigation. A pentester can also start Hunt without a full Scan first.
+
+## Pentester-focused outputs
+
+Not thousands of findings. Verified vulnerabilities (counted by severity), strong leads (unresolved
+hypotheses worth manual review), interesting observations, and explicit coverage gaps (with the
+reason, e.g. "payment workflow untested: no payment test account supplied"). Every verified issue
+carries a minimal reproduction: principal/context, request, response, proof, impact, retest action.
+
+## Benchmark the AI against humans
+
+The primary success criterion is **Human + Hunt materially outperforms either alone**, measured on
+controlled pentest benchmarks across four arms (Scan only / AI Hunt only / Human only / Human + AI)
+on: verified and severe vulnerabilities, unique findings, false positives, time to first important
+finding, requests sent, investigation time, attack chains, and the share of AI leads useful to the
+pentester. This is a new evaluation axis beyond DAST recall, and it is what justifies added Hunt
+complexity.
+
+## What not to build
+
+- A giant deterministic expert system (thousands of `if route contains "order"…` rules). Let the AI
+  reason from observed facts.
+- An unrestricted shell agent. Keep typed capabilities and server-side enforcement.
+- A chatbot bolted onto a scanner. The AI needs real structured memory, evidence, tools, and the
+  ability to drive investigation.
+- A replacement for the pentester. The product is one strong pentester with the leverage of several
+  researchers.
+
+---
+
+## Current state (measured 2026-09-06/07)
+
+What exists today, honestly, and where it sits against the vision.
+
+- **Deterministic proof boundary: already enforced.** Hunt creates only unverified candidates;
+  verification runs through the deterministic proof moat (`validate_object_authorization`, the
+  sqli/xss proof contracts). This is the vision's strongest invariant and it is real now.
+- **Scan-as-baseline: real.** Scan produces the target knowledge (endpoints, principals, objects)
+  and the obvious verified findings. On Juice Shop it reaches 4/9 answer-key classes (verified SQLi
+  + the sensitive-exposure cluster).
+- **A0 baseline measured.** Hunt currently adds **zero** verified classes over Scan on Juice Shop,
+  for two structural reasons the vision's Phase 2/3 address:
+  1. *Auth/session primitives had diverged* — the Hunt's cross-principal proof needed an interactive
+     session the JSON+JWT login could not produce. **Fixed:** the `json_login` session auth kind
+     (commit `a0e0511a`) converges the credential primitive so a JSON+JWT target drives
+     `authz.verify` through the same registry entry Scan uses. Live-verified: both principals
+     establish sessions and the proof runs with them recognized as distinct.
+  2. *Endpoint knowledge is a raw, phantom-dominated URL list* (~3,000 rows, ~two-thirds
+     content-discovery phantoms). This is exactly the unstructured-target problem the knowledge
+     graph (Phase 2) exists to fix. Not yet built.
+- **First verified Hunt finding: not yet.** Getting Hunt to verify a class Scan misses (the A3
+  gate) needs a targeted-id BOLA proof. It is designed and **fail-closed** (the proof validator is
+  unchanged, so a wrong evidence-gather can only fail to verify), with one critical caveat: the
+  target route and the attacker's own baseline route must be the same resource collection, or a
+  public object would falsely verify. Because a new proof path is the most false-positive-sensitive
+  change in the system, it is scoped for a focused build with positive-and-negative validation, not
+  shipped opportunistically.
+
+## Phase 2a — endpoint frontier de-noising: two failed approaches, measured (2026-09-07)
+
+**Status: not solved.** A ranking attempt failed, data limitations were identified, and the
+decoy-based replacement was then evaluated and also found insufficient. Both results are measured,
+and both experiments are reproducible from the repo. Nothing here is a validated replacement.
+
+### Reproducing these results
+
+```bash
+# labeled sample: tests/fixtures/hunt/endpoint_reality_sample.json
+docker compose exec -T api sh -lc \
+  'cd /workspace && PYTHONPATH=/workspace:/workspace/api:/workspace/scanner \
+   python3 scripts/evaluate_endpoint_reality.py --base-url http://host.docker.internal:3001'
+```
+
+Labels are ground truth from the application's known route structure, never from the probe being
+evaluated. The sample deliberately includes protected routes, a method-specific route, client-side
+fragment routes, and entries whose correct answer is `unknown`, so an evaluator is scored on
+abstention as well as separation.
+
+### Experiment 1 — evidence-based ranking (failed, reverted)
+
+Ranked the frontier by evidence of interaction and reachability. Measured against the live
+inventory it promoted the wordlist phantom `/api/Cards/search/` to the top, so it was reverted.
+What this supports, stated no more strongly than the evidence allows:
+
+| Signal | Defensible conclusion |
+|---|---|
+| `source` provenance | Too coarse **as currently written**: values are `scan`/`coverage_recon`/`asm`/`recon`, not the column comment's `crawl\|ffuf\|openapi`, so it does not separate. Not proof the concept is useless. |
+| `attempt_count`, `last_verdict` | Interaction does not prove existence: probed phantoms acquire both because the app answers them. |
+| HTTP status | Not usable as a fixed rule: on this target the wordlist paths return 401/400 and real routes 200. Any hardcoded status rule would be app-fitting. |
+| `content_hash` | Unavailable (never populated) — untested, not disproven. |
+
+One failed ranking does not eliminate every combination of these signals. It does show that no
+ranking over these columns alone worked here.
+
+Separately measured: the current `priority_score` ordering genuinely misranks, putting a
+never-probed guess (65) above the heavily-tested real `/api/Users` (20).
+
+### Experiment 2 — the existing decoy / soft-404 comparison (insufficient)
+
+Evaluated the shipping comparison (`_learn_not_found_signatures`, `_probe_path_status`,
+`_soft404_matches`) against the labeled sample. It is **not an existence oracle**:
+
+> **These numbers are WITHDRAWN.** They came from scoring the low-level `_soft404_matches`
+> matcher, not the shipping `filter_reachable_worklist`, which already keeps fragment routes and
+> already drops only GET entries so a method-specific route survives. Re-scored against the real
+> entry point, production made **no errors on the sample**: absent routes dropped 2/2, real or
+> client routes dropped 0, and no useful representative lost. There was nothing here for a
+> replacement to improve. Reproduce with `scripts/evaluate_endpoint_reality.py`.
+
+The five realistic wordlist phantoms return `401 / 83 bytes` — and so do the real protected routes
+`/api/Addresss` and `/api/Cards`. When auth middleware answers a real protected route and a
+nonexistent one identically, the comparison cannot distinguish them, and the correct outcome is
+**unknown**, not phantom. HTTP also permits 404 for an existing forbidden resource. The real-route
+demotion comes from probing GET against a POST-only route, so method-specific endpoints are at risk
+from a path-only probe.
+
+### Defects found while measuring — both now addressed
+
+Both were in `api/asm_inventory.py`:
+
+1. **The filter disabled itself silently on large batches.** Above `max_probe` (default 2,000)
+   unique paths it returns every entry unfiltered. **Mitigated** (`17f97acb`): the skip is now
+   logged with its counts, so the question is answerable from production. The limit is unchanged,
+   and whether real ingestion batches exceed it remains **unverified**.
+2. **The matcher treated an unmeasurable size as a match**, dropping an endpoint on an undecidable
+   comparison and contradicting the module's own stated bias. **Fixed** (`02fa0c27`): an
+   inconclusive size now keeps the endpoint, with tests that fail without the fix.
+
+Also corrected: an earlier claim that ASM "only filters at write time" was wrong. A sweep already
+persists `last_http_status`, `unreachable_streak` and `last_reachability_at`, and retires rows to
+`gone`. What is missing is the richer *comparison* evidence, not persisted reachability.
+
+### Phase 2a state: implemented / live-validated / pending
+
+**Implemented and live-validated.** An opt-in grouped frontier, `kind="endpoint_groups"` on the
+existing `/hunts/{id}/query` (`kind="endpoints"` unchanged). Groups carry `route_template`,
+`grouping_evidence`, `sample_count`, `representatives`, `principal_contexts`, `prior_results`,
+`open_questions` and every member `sample_id`, so a grouping is reversible and drill-down through
+`filter.id` loses no lead. Ordering puts groups with prior results first and never lets repeated
+parameter samples occupy the first page. Verified end to end against the running API.
+
+**Implemented, deliberately conservative.** Status-only sibling-to-route inference was removed as
+unsupported (`20b62611`). Grouping now merges only on identifier-shaped segments or a declared
+specification, and identifier-shaped grouping is labelled tentative. Removing unsupported merges
+can *increase* group counts, so **no measured live de-noising or recall improvement is claimed.**
+
+**Pending.** Persisting comparison evidence with its context (method, principal/auth context,
+control reference, outcome, timestamp) rather than a boolean; evaluating any new signal on the
+labeled sample in both directions before adoption; authenticated evaluation (the evaluator probes
+anonymously only).
+
+**Not the goal.** A smaller endpoint list is supporting evidence of usability, never proof that
+Hunt finds more. Phase 2a is finished when a pentester gets an actionable target view without
+losing leads — not when every URL carries a label.
+
+## Workstream-to-phase mapping
+
+The implementation should continue through these phases:
+
+| Vision phase | Plan workstream | State |
+|---|---|---|
+| Phase 1 — pentester-friendly Hunt (timeline, observations/hypotheses/actions, approve/skip/modify) | (new, UX) | not started |
+| Phase 2 — target knowledge graph | A2 structured target memory | de-noising design settled by measurement (below); relationship layer not started |
+| Phase 3 — unified capability API (Scan and Hunt share primitives) | A1 shared capability layer | **first primitive converged** (`json_login`); more to audit |
+| Phase 4 — adaptive reasoning loop | A3 reasoning loop | blocked on the targeted-id proof + Phase 2 |
+| Phase 5 — deep workflow reasoning (authz, multi-user, business logic, GraphQL, SPA, chains) | A4 advanced discovery in Hunt | designed for BOLA (targeted-id proof); pending |
+| Phase 6 — human + AI benchmarks | (new, eval) | not started; replaces recall-only as the success axis |
+
+## Recommended direction (one line)
+
+> An AI-augmented penetration-testing environment where humans provide judgment and creativity, AI
+> provides scale and adaptive reasoning, and ShakerScan provides safe execution and trustworthy
+> proof.
+
+DAST remains underneath as baseline discovery and deterministic verification. Hunt becomes the
+product. The competitive advantage is not more payloads than Burp or Nuclei; it is a pentester and
+an AI researcher sharing one target model, evidence, tools, and history — and together finding more
+real vulnerabilities, faster.

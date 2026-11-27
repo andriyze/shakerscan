@@ -1,0 +1,227 @@
+"""Content-free HTTP workflow bindings on the existing Hunt request capability.
+
+Captured values are data, never commands, destinations or authority. JSON pointers
+use RFC 6901; destinations are only body fields or target HTTP headers.
+"""
+from __future__ import annotations
+
+import re
+import uuid
+from typing import Any, Mapping
+
+_NAME = r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$"
+_HEADER = r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,120}$"
+_FORBIDDEN_HEADERS = frozenset({
+    "host", "content-length", "connection", "transfer-encoding", "upgrade", "te", "trailer",
+    "proxy-authorization", "proxy-connection", "keep-alive",
+    "x-original-url", "x-rewrite-url", "x-http-method-override", "x-http-method", "x-method-override",
+})
+POINTER_SCHEMA = {"type": "string", "maxLength": 512}
+# A cookie name (RFC 6265 token).
+COOKIE_NAME_PATTERN = r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$"
+# A discovered secret's reference (api/hunt/discovered_secrets.py, SECRET_REF_RE).
+SECRET_REF_PATTERN = r"^secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+# A withheld value's reference (api/runtime/archive_body_masking.py, WITHHELD_REF_RE).
+WITHHELD_REF_PATTERN = (
+    r"^withheld://hunt/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[1-9][0-9]{0,3}$"
+)
+# A saved login's reference: its credential profile id (api/hunt/saved_logins.py).
+SAVED_LOGIN_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+# A built-in default credential pair's reference (api/hunt/default_credentials.py, PAIR_ID_PATTERN).
+DEFAULT_CREDENTIAL_PATTERN = r"^dc-[0-9]{2}$"
+HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
+    "capture": {"type": "array", "maxItems": 16, "items": {
+        "type": "object", "additionalProperties": False, "required": ["name"],
+        "properties": {"name": {"type": "string", "pattern": _NAME},
+            "json_pointer": POINTER_SCHEMA, "header": {"type": "string", "pattern": _HEADER},
+            "cookies": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": True,
+                "items": {"type": "string", "pattern": COOKIE_NAME_PATTERN},
+                "description": ("Set-Cookie captures only: keep just these cookies (for example the "
+                    "session cookie, PHPSESSID). A captured cookie shorter than 8 characters (a "
+                    "security level, a flag) cannot be withheld reliably and hides every page sent "
+                    "with the capture; leave such cookies out.")}},
+    }},
+    "request_bindings": {"type": "array", "maxItems": 16, "items": {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "source_action_id": {"type": "string", "maxLength": 36},
+            "withheld_ref": {"type": "string", "maxLength": 80, "pattern": WITHHELD_REF_PATTERN,
+                "description": ("A value this Hunt withheld from a capability output, by its reference "
+                    "(withheld://hunt/<action id>/<n>, from withheld_values[].ref). The worker sends "
+                    "the value; it is never shown.")},
+            "secret_ref": {"type": "string", "maxLength": 80, "pattern": SECRET_REF_PATTERN,
+                "description": ("A secret discovered on this target earlier (secret://<id>, from "
+                    "secrets.inspect). The request must name its origin (scheme://host:port); the "
+                    "secret is sent only there. The worker sends the value; it is never shown.")},
+            "saved_login": {"type": "string", "maxLength": 36, "pattern": SAVED_LOGIN_PATTERN,
+                "description": ("A saved login attached to this Hunt, by its profile id (briefing "
+                    "saved_logins). Only in the login's own POST to its login_url, with "
+                    "credential_field username or secret and a body_pointer. The worker fills the "
+                    "value; it is never shown. An unattached one raises a login.use request.")},
+            "default_credential": {"type": "string", "maxLength": 5, "pattern": DEFAULT_CREDENTIAL_PATTERN,
+                "description": ("A built-in default or common credential pair, by reference (briefing "
+                    "default_credentials). In a login POST on the Hunt's own host (credential_field "
+                    "username or secret, body_pointer), or a GET of a route that asked for HTTP Basic "
+                    "(credential_field basic, header Authorization). Bounded, paced, stopped at a "
+                    "lockout sign.")},
+            "capture_name": {"type": "string", "pattern": _NAME},
+            "principal": {"type": "string", "enum": ["primary", "secondary", "service"]},
+            "profile_id": {"type": "string", "maxLength": 36},
+            "profile_version": {"type": "integer", "minimum": 1},
+            "credential_field": {"type": "string", "enum": ["secret", "username", "client_id", "basic"]},
+            "body_pointer": POINTER_SCHEMA, "header": {"type": "string", "pattern": _HEADER},
+            "prefix": {"type": "string", "maxLength": 32,
+                "description": "Literal non-secret header prefix, for example Bearer followed by a space."},
+        },
+    }},
+}
+
+
+def pointer_parts(pointer: Any) -> tuple[str, ...]:
+    if not isinstance(pointer, str) or len(pointer) > 512 or (pointer and not pointer.startswith('/')):
+        raise ValueError("invalid HTTP workflow JSON pointer")
+    if re.search(r"~(?![01])", pointer):
+        raise ValueError("invalid HTTP workflow JSON pointer escape")
+    parts = tuple(part.replace('~1', '/').replace('~0', '~') for part in pointer.split('/')[1:])
+    if len(parts) > 16:
+        raise ValueError("HTTP workflow JSON pointer is too deep")
+    return parts
+
+
+def pointer_get(value: Any, pointer: str) -> Any:
+    for part in pointer_parts(pointer):
+        if isinstance(value, list):
+            if not re.fullmatch(r"0|[1-9][0-9]*", part):
+                raise ValueError("HTTP workflow array index is invalid")
+            try:
+                value = value[int(part)]
+            except (ValueError, IndexError):
+                raise ValueError("HTTP workflow response field is missing") from None
+        elif isinstance(value, Mapping) and part in value:
+            value = value[part]
+        else:
+            raise ValueError("HTTP workflow response field is missing")
+    return value
+
+
+def pointer_set(body: dict[str, Any], pointer: str, value: Any) -> None:
+    parts = pointer_parts(pointer)
+    if not parts:
+        raise ValueError("HTTP workflow binding must name a body field")
+    parent: Any = body
+    for part in parts[:-1]:
+        if isinstance(parent, list) and re.fullmatch(r"0|[1-9][0-9]*", part):
+            try:
+                parent = parent[int(part)]
+            except IndexError:
+                raise ValueError("HTTP workflow body parent is missing") from None
+        elif isinstance(parent, dict) and part in parent:
+            parent = parent[part]
+        else:
+            raise ValueError("HTTP workflow body parent is missing")
+    last = parts[-1]
+    if isinstance(parent, dict):
+        parent[last] = value
+    elif isinstance(parent, list) and re.fullmatch(r"0|[1-9][0-9]*", last) and int(last) < len(parent):
+        parent[int(last)] = value
+    else:
+        raise ValueError("HTTP workflow body destination is invalid")
+
+
+def validate_exchange_input(values: Mapping[str, Any]) -> None:
+    names: set[str] = set()
+    for capture in values.get("capture") or ():
+        if ("json_pointer" in capture) == ("header" in capture):
+            raise ValueError("capture requires exactly one JSON pointer or header")
+        name = capture["name"]
+        if name in names:
+            raise ValueError("capture names must be unique")
+        names.add(name)
+        if "json_pointer" in capture:
+            pointer_parts(capture["json_pointer"])
+        if "cookies" in capture and str(capture.get("header") or "").lower() != "set-cookie":
+            raise ValueError("capture cookies applies to a Set-Cookie header capture only")
+    destinations: set[tuple[str, str]] = set()
+    for binding in values.get("request_bindings") or ():
+        sources = sum(key in binding for key in (
+            "source_action_id", "principal", "profile_id", "withheld_ref", "secret_ref", "saved_login",
+            "default_credential"))
+        if sources != 1 or (("body_pointer" in binding) == ("header" in binding)):
+            raise ValueError("request binding requires one source and one body/header destination")
+        if "default_credential" in binding:
+            if not re.fullmatch(DEFAULT_CREDENTIAL_PATTERN, str(binding["default_credential"])):
+                raise ValueError("default_credential must be a built-in reference such as dc-01")
+            basic = (binding.get("credential_field") == "basic"
+                     and str(binding.get("header") or "").lower() == "authorization")
+            body = binding.get("credential_field") in {"username", "secret"} and "body_pointer" in binding
+            if not (basic or body) or any(k in binding for k in ("capture_name", "profile_version", "prefix")):
+                raise ValueError("a default credential binds its username or secret into the request body, "
+                                 "or the pair as HTTP Basic (credential_field basic, header Authorization)")
+        elif "saved_login" in binding:
+            if not re.fullmatch(SAVED_LOGIN_PATTERN, str(binding["saved_login"])):
+                raise ValueError("saved_login must be a saved login's profile id")
+            if binding.get("credential_field") not in {"username", "secret"} or "body_pointer" not in binding \
+                    or any(k in binding for k in ("capture_name", "profile_version", "prefix")):
+                raise ValueError("a saved login binds its username or secret into the request body only")
+        elif "withheld_ref" in binding or "secret_ref" in binding:
+            if "withheld_ref" in binding and not re.fullmatch(WITHHELD_REF_PATTERN, str(binding["withheld_ref"])):
+                raise ValueError("withheld_ref must be a withheld://hunt/<action id>/<n> reference")
+            if "secret_ref" in binding and not re.fullmatch(SECRET_REF_PATTERN, str(binding["secret_ref"])):
+                raise ValueError("secret_ref must be a secret://<id> reference")
+            if "secret_ref" in binding and not str(values.get("origin") or "").strip():
+                # Never a default origin: the person allows (and the worker sends to) one named login.
+                raise ValueError("a request binding a secret_ref must name its origin (scheme://host:port)")
+            if any(k in binding for k in ("capture_name", "credential_field", "profile_version")):
+                raise ValueError("withheld value binding takes only its reference and a destination")
+        elif "source_action_id" in binding:
+            uuid.UUID(binding["source_action_id"])
+            if not binding.get("capture_name") or any(k in binding for k in ("credential_field", "profile_version")):
+                raise ValueError("response binding requires a capture name, not credential fields")
+        else:
+            if binding.get("credential_field") not in {"secret", "username", "client_id"} or "capture_name" in binding:
+                raise ValueError("credential binding requires a credential field, not a capture name")
+            if "profile_id" in binding:
+                uuid.UUID(binding["profile_id"])
+                if type(binding.get("profile_version")) is not int or binding["profile_version"] < 1:
+                    raise ValueError("newly selected profile requires its current version")
+            elif "profile_version" in binding:
+                raise ValueError("a named principal uses its saved Hunt profile version")
+        if "prefix" in binding and ("header" not in binding or any(
+                ord(char) < 32 or ord(char) > 126 for char in binding["prefix"])):
+            raise ValueError("workflow prefix must be printable ASCII on a header binding")
+        if "body_pointer" in binding:
+            if not pointer_parts(binding["body_pointer"]):
+                raise ValueError("body binding must name a field")
+            if not any(key in values for key in ("json_body", "form_body")):
+                raise ValueError("body bindings require a JSON or form body template")
+            if "form_body" in values and len(pointer_parts(binding["body_pointer"])) != 1:
+                raise ValueError("form binding must name one form field")
+            destination = ("body", binding["body_pointer"])
+        else:
+            header = str(binding["header"]).lower()
+            if header in _FORBIDDEN_HEADERS:
+                raise ValueError("workflow bindings cannot change HTTP routing or framing headers")
+            destination = ("header", header)
+        if destination in destinations:
+            raise ValueError("duplicate HTTP workflow binding destination")
+        destinations.add(destination)
+
+
+def public_capture_references(values: Any, *, source_action_id: Any) -> list[dict[str, str]]:
+    """Expose only bounded same-action handles, never arbitrary persisted fields."""
+    try:
+        source = str(uuid.UUID(str(source_action_id)))
+    except (TypeError, ValueError, AttributeError):
+        return []
+    result: list[dict[str, str]] = []
+    if isinstance(values, list):
+        for item in values[:16]:
+            if (isinstance(item, Mapping) and item.get("source_action_id") == source
+                    and isinstance(item.get("capture_name"), str)
+                    and re.fullmatch(_NAME, item["capture_name"])):
+                reference = {"source_action_id": source, "capture_name": item["capture_name"]}
+                if item.get("header") == "Cookie":
+                    # A session cookie capture is shown as the binding a later call sends it with.
+                    reference["header"] = "Cookie"
+                result.append(reference)
+    return result

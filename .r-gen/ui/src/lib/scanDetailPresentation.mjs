@@ -1,0 +1,965 @@
+const MATERIAL_SEVERITIES = new Set(['critical', 'high', 'medium'])
+
+function record(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+function finiteNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === '') return fallback
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+/** Identity for matching a reported finding to a persisted row.
+ *
+ *  The persisted fingerprint is the stable identity the server reconciles on; two findings
+ *  with different fingerprints are different findings even when their title, URL and tool
+ *  read the same, and a URL path is case-sensitive. The display key is only a fallback for
+ *  rows that carry no fingerprint at all. */
+export function scanFindingIdentity(finding) {
+  const item = record(finding)
+  const fingerprint = String(item.fingerprint || '').trim()
+  if (fingerprint) return `fp:${fingerprint}`
+  return 'display:' + [
+    String(item.title || '').trim().toLowerCase(),
+    String(item.url || '').trim().replace(/\/+$/, ''),
+    String(item.tool || '').trim().toLowerCase(),
+  ].join('|')
+}
+
+function scanFindingDisplayIdentity(finding) {
+  const item = record(finding)
+  return [
+    String(item.title || '').trim().toLowerCase(),
+    String(item.url || '').trim().replace(/\/+$/, ''),
+    String(item.tool || '').trim().toLowerCase(),
+    String(item.severity || '').trim().toLowerCase(),
+  ].join('|')
+}
+
+/** Join the report to durable rows observed by this scan without counting both copies.
+ *  A display-only match needs scan linkage and is consumed once; distinct fingerprints
+ *  always remain distinct even when their visible titles and URLs are identical. */
+export function reconciledScanFindings(scan, targetFindings = []) {
+  const item = record(scan)
+  const scanId = String(item.id || '')
+  const raw = Array.isArray(record(item.result).findings) ? item.result.findings : []
+  const persisted = []
+  const persistedIds = new Set()
+  const attached = Array.isArray(item.findings) ? item.findings : []
+  const linkedHistory = (Array.isArray(targetFindings) ? targetFindings : []).filter((finding) => {
+    const row = record(finding)
+    return String(row.scan_id || '') === scanId || String(row.last_seen_scan_id || '') === scanId
+  })
+  for (const finding of [...attached, ...linkedHistory]) {
+    const row = record(finding)
+    const key = String(row.id || scanFindingIdentity(row))
+    if (persistedIds.has(key)) continue
+    persistedIds.add(key)
+    persisted.push(finding)
+  }
+  const matched = new Set()
+  const current = raw.map((finding, index) => {
+    const source = record(finding)
+    let match = persisted.findIndex((row, rowIndex) => !matched.has(rowIndex) && (
+      (source.id && String(record(row).id || '') === String(source.id))
+      || (source.fingerprint && String(record(row).fingerprint || '') === String(source.fingerprint))
+    ))
+    if (match < 0 && !source.fingerprint) {
+      match = persisted.findIndex((row, rowIndex) => !matched.has(rowIndex)
+        && scanFindingDisplayIdentity(row) === scanFindingDisplayIdentity(source))
+    }
+    if (match >= 0) matched.add(match)
+    const saved = match >= 0 ? record(persisted[match]) : null
+    return {
+      ...source, ...saved,
+      _rowKey: `raw-${saved?.id || source.id || source.fingerprint || index}`,
+      _origin: 'observed in this scan',
+      _persisted: Boolean(saved?.id),
+    }
+  })
+  for (const [index, finding] of persisted.entries()) {
+    if (matched.has(index)) continue
+    current.push({ ...record(finding), _rowKey: `persisted-${record(finding).id || index}`,
+      _origin: 'observed in this scan', _persisted: true })
+  }
+  return { current, persistedCurrentCount: persisted.length }
+}
+
+/** Local "about 16:40" for a quota resume estimate; `timeZone` is injectable for tests. */
+export function formatResumeTime(value, { timeZone } = {}) {
+  const date = new Date(String(value || ''))
+  if (!value || Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone }).format(date)
+}
+
+/** Plain-language explanation of the root domain's hourly test budget for one Scan.
+ *
+ *  The server's `domain_rate` object is authoritative: `state: 'waiting'` is only reported while
+ *  the Scan is still queued, and a `reduction` records exactly how a background Scan's budget was
+ *  lowered. Operator-submitted Scans are never waiting or reduced by this quota. */
+export function domainRatePresentation(scan, options = {}) {
+  const rate = record(record(scan).domain_rate)
+  const root = String(rate.root_domain || '').trim() || 'this domain'
+  const cap = finiteNumber(rate.cap_per_hour)
+  if (rate.state === 'waiting') {
+    const resume = formatResumeTime(rate.resume_estimate, options)
+    return {
+      kind: 'waiting',
+      label: `Waiting for ${root}'s hourly test budget${resume ? ` (resumes about ${resume})` : ''}`,
+      description: `This is background work. ${root} allows ${cap} tested endpoints per hour across its targets, `
+        + 'and that budget is in use by background testing or recent Scans. '
+        + (resume
+          ? `Testing resumes automatically when budget frees up, estimated about ${resume}.`
+          : 'Testing resumes automatically when budget frees up.'),
+    }
+  }
+  const reduction = record(rate.reduction)
+  if (Object.keys(reduction).length) {
+    return {
+      kind: 'reduced',
+      label: `Budget reduced by ${root}'s hourly test budget`,
+      description: String(reduction.reason || `Granted ${finiteNumber(reduction.granted)} of ${finiteNumber(reduction.requested)} endpoints.`),
+    }
+  }
+  return null
+}
+
+const RUN_KIND_WORDS = {
+  device_posture: 'network discovery',
+  device_probe: 'device check',
+  device_web_dast: 'device web Scan',
+}
+
+/** What a queued Scan waits behind: the Scans running now (a bounded sample, newest first) and
+ *  how many run in all. `running` excludes the queued Scan itself. */
+export function queueWaitPresentation(selfId, running, total) {
+  const rows = (Array.isArray(running) ? running : []).filter((item) => item && item.id)
+  const others = rows.filter((item) => item.id !== selfId)
+  const reported = Number.isFinite(Number(total)) ? Number(total) - (rows.length - others.length) : others.length
+  const count = Math.max(others.length, reported)
+  if (count <= 0) {
+    return {
+      label: 'No other Scan is running.',
+      detail: 'It starts as soon as a worker picks it up; a worker that is starting or busy with other work can take a minute.',
+      items: [],
+      more: 0,
+    }
+  }
+  const items = others.map((item) => {
+    const name = String(item.target_name || '').trim()
+    const url = String(item.target_url || '').trim()
+    const kind = RUN_KIND_WORDS[String(item.run_kind || item.scan_type || '')] || 'Scan'
+    return { id: String(item.id), name: name && name !== url ? name : url.replace(/^[a-z]+:\/\//i, '') || 'a target', kind }
+  })
+  return {
+    label: `Waiting behind ${count} running Scan${count === 1 ? '' : 's'}.`,
+    detail: 'Every licensed or configured scan slot is in use. This Scan starts when one of them finishes; cancelling one frees its slot.',
+    items,
+    more: Math.max(0, count - items.length),
+  }
+}
+
+export function scanPhasePresentation(scan, options = {}) {
+  const status = String(record(scan).status || 'pending').toLowerCase()
+  const rawPhase = String(record(scan).current_phase || '').trim().toLowerCase()
+  const progress = Math.max(0, Math.min(100, finiteNumber(record(scan).progress)))
+
+  if (status === 'pending' || status === 'queued') {
+    const quota = domainRatePresentation(scan, options)
+    if (quota?.kind === 'waiting') {
+      return { label: quota.label, description: quota.description, progress }
+    }
+    return {
+      label: 'Waiting for a worker',
+      description: 'The scan is queued. Testing will begin as soon as a compatible worker is available.',
+      progress,
+    }
+  }
+
+  const phases = [
+    {
+      terms: ['final', 'report', 'complete'],
+      label: 'Preparing the report',
+      description: 'Consolidating evidence, coverage, findings, and the final decision record.',
+    },
+    {
+      terms: ['validat', 'verif', 'proof', 'attack_chain'],
+      label: 'Validating evidence',
+      description: 'Checking candidate findings against deterministic proof requirements.',
+    },
+    {
+      terms: ['active', 'test', 'template', 'nuclei', 'phase_'],
+      label: 'Testing the attack surface',
+      description: 'Running the checks permitted by this scan’s policy and resource budget.',
+    },
+    {
+      terms: ['discover', 'crawl', 'recon', 'probe', 'baseline', 'pre_scan', 'init'],
+      label: 'Mapping the application',
+      description: 'Discovering reachable pages, APIs, technologies, and baseline security posture.',
+    },
+  ]
+  const match = phases.find((phase) => phase.terms.some((term) => rawPhase.includes(term)))
+  return match ? {
+    label: match.label,
+    description: match.description,
+    progress,
+  } : {
+    label: rawPhase ? rawPhase.replaceAll('_', ' ') : 'Scan in progress',
+    description: 'The worker is executing the current scan plan. Activity appears below as it is recorded.',
+    progress,
+  }
+}
+
+export function scanLogEntry(rawLine) {
+  const raw = String(rawLine || '').trim()
+  // A parallel parent's feed is assembled from its children, each line prefixed with the child
+  // that produced it. That prefix is not the log source; keep it as the entry's origin so the
+  // operator can still tell discovery from shard work.
+  const childMatch = raw.match(/^\[(Discovery|Shard \d+)\]\s*/)
+  const child = childMatch ? childMatch[1] : ''
+  const body = childMatch ? raw.slice(childMatch[0].length) : raw
+  const sourceMatch = body.match(/^\[([^\]]+)\]\s*/)
+  const source = sourceMatch ? sourceMatch[1] : ''
+  let message = sourceMatch ? body.slice(sourceMatch[0].length) : body
+  let kind = 'detail'
+  let label = source ? source.replaceAll('_', ' ') : 'activity'
+  let meta = ''
+
+  const progress = raw.match(/\[progress\]\s+phase=([^\s]+)\s+pct=(\d+)\s+message=(.*)$/i)
+  if (progress) {
+    kind = 'milestone'
+    label = 'milestone'
+    message = progress[3].trim() || progress[1].replaceAll('_', ' ')
+    meta = `${progress[2]}% · ${progress[1].replaceAll('_', ' ')}`
+  } else if (structuredLogFailure(raw, source)) {
+    kind = 'error'
+    label = 'error'
+  } else if (notApplicableStep(raw)) {
+    // A step that did not apply to this target is the plan working, not something to look at.
+    const step = message.match(/^Diagnostic\s+(.+?)\s+·/)
+    label = 'not applicable'
+    message = `${step ? step[1] : 'This step'} did not run: it does not apply to this target. Nothing was sent.`
+  } else if (structuredLogWarning(raw, source)) {
+    kind = 'warning'
+    label = 'attention'
+  } else if (/\b(finding|vulnerab|verified|candidate|exploit)\b/i.test(raw)) {
+    kind = 'finding'
+    label = 'finding'
+  } else if (/\b(starting|started|complete|completed|discovered|found \d+|phase)\b/i.test(raw)) {
+    kind = 'milestone'
+    label = 'milestone'
+  }
+
+  if (child) meta = meta ? `${child} · ${meta}` : child
+  return { raw, source, child, message, kind, label, meta }
+}
+
+function structuredValue(raw, key) {
+  const match = raw.match(new RegExp(`(?:^|[\\s·])${key}=([^\\s·]+)`, 'i'))
+  return match ? match[1].replace(/^['"]|['"]$/g, '').toLowerCase() : ''
+}
+
+function structuredLogFailure(raw, source) {
+  const normalizedSource = String(source || '').toLowerCase()
+  if (['error', 'fatal', 'exception', 'traceback'].includes(normalizedSource)) return true
+  const outcome = structuredValue(raw, '(?:outcome|status|result)')
+  if (['error', 'failed', 'failure', 'fatal', 'exception'].includes(outcome)) return true
+  const error = structuredValue(raw, 'error')
+  // A structured action outcome is authoritative. Skipped/partial/degraded
+  // actions often retain an adapter error class explaining why no execution
+  // occurred; that is attention-worthy, not an execution failure.
+  if (
+    error
+    && !['none', 'null', 'false', 'no', '0', 'nil', 'success', 'ok', '-'].includes(error)
+    && !['warning', 'partial', 'degraded', 'timeout', 'timed_out', 'skipped'].includes(outcome)
+  ) return true
+  if (['success', 'ok', 'complete', 'completed', 'warning', 'partial', 'degraded', 'timeout', 'timed_out', 'skipped'].includes(outcome)) return false
+  if (error && !['none', 'null', 'false', 'no', '0', 'nil', 'success', 'ok', '-'].includes(error)) return true
+  const withoutBenignFields = raw
+    .replace(/(?:^|[\s·])(?:error|reason)=(?:none|null|false|no|0|nil|success|ok|-)(?=$|[\s·])/gi, ' ')
+    .replace(/(?:^|[\s·])(?:outcome|status|result)=(?:success|ok|complete|completed)(?=$|[\s·])/gi, ' ')
+  return /(?:^|[\s:])(error|failed|failure|traceback|exception|fatal)(?:$|[\s:])/i.test(withoutBenignFields)
+}
+
+function notApplicableStep(raw) {
+  if (structuredValue(raw, '(?:outcome|status|result)') !== 'skipped') return false
+  if (structuredValue(raw, 'reason') !== 'not_applicable') return false
+  return ['', 'none', 'null', 'false', 'no', '0', 'nil', '-'].includes(structuredValue(raw, 'error'))
+}
+
+function structuredLogWarning(raw, source) {
+  const normalizedSource = String(source || '').toLowerCase()
+  if (['warn', 'warning'].includes(normalizedSource)) return true
+  const outcome = structuredValue(raw, '(?:outcome|status|result)')
+  if (['warning', 'partial', 'degraded', 'timeout', 'timed_out', 'skipped'].includes(outcome)) return true
+  return /\b(warn(?:ing)?|timed?\s*out|partial|degraded|budget reached|skipping)\b/i.test(raw)
+}
+
+// Coverage reasons arrive as the finalizer's stable codes. Each label says what happened to the
+// planned work in the operator's terms; the raw code (underscores and all) is the fallback only
+// for a code this table does not know.
+const COVERAGE_REASON_LABELS = {
+  timed_out: 'A planned step ran out of its time allowance before it finished',
+  scan_time_limit: 'The scan reached its time limit, so planned steps were stopped or never started; findings confirmed before the stop are kept',
+  http_request_budget_exhausted: 'A planned step used up its HTTP request allowance before it finished',
+  state_changing_budget_exhausted: 'A planned step used up its state-changing request allowance before it finished',
+  process_killed: 'A tool was killed by the system (for example, out of memory) before it finished; what it wrote before that is kept',
+  discovery_truncated: 'Surface discovery was cut short by its budget, so part of the application was never examined',
+  discovery_failed: 'A surface discovery step failed, so what the application exposes was never fully examined',
+  nuclei_selection_empty: "The scan's template policy left no template to run",
+  prerequisite_unavailable: 'A step was skipped because something it needs was missing, such as a reachable origin or an authenticated session',
+  cancelled: 'The run was cancelled before all planned work finished',
+  budget_exhausted: 'The run exhausted its budget before all planned work finished',
+  insufficient_plan_budget: 'Planned steps were skipped because the admitted budget did not reach them',
+  not_applicable: 'A planned proof step had no candidate left to prove',
+  dependency_failed: 'A planned step was skipped because the step it depended on did not complete',
+  policy_disabled: 'A planned step was disabled by the scan policy',
+  worker_lost: 'A worker was lost before all planned work finished',
+  authentication_uncertain: 'Credential authority could not be confirmed',
+  authentication_required: 'The target refused unauthenticated requests (401/403 or a redirect to sign-in), so those candidates were not tested; to verify them, the scan needs a credential profile whose allowed capabilities include these checks: attach one, or add the checks to the attached profile (active verifiers need approved elevation)',
+  target_refused: "The target refused the verifier's requests (403) without asking for credentials, for example a firewall or an access rule, so those candidates could not be verified",
+  target_unavailable: 'The target did not serve the page a proof tests: it answered unavailable, rate-limited or timed out (HTTP 408, 429, 502-504), did not answer, or answered every request with no such page or a server error, so those candidates were neither proven nor ruled out',
+  insufficient_budget_for_stage: 'A continuation could not fund a single verification stage, so its candidates were left unverified',
+  output_truncated: 'A step produced more output than it may keep, so part of its result was cut off',
+  source_not_published: 'An optional discovery file (robots.txt or llms.txt) was not published by the target',
+  declared_out_of_scope: "The target's API description declares its routes on another origin (a different host, port or scheme), outside this scan's scope",
+  declared_partly_out_of_scope: "Some routes in the target's API description are declared only on another origin (a different host, port or scheme); the rest were ingested",
+  parser_failed: 'A step returned output that could only be partly read',
+  parallel_child_incomplete: 'One of the parallel parts of this scan did not finish',
+  connection_limit_exceeded: 'A step hit its connection limit before it finished',
+  unproven_critical_high: 'A critical or high result is still unproven',
+  parser_promoted_or_degraded_output: 'A step returned output that could only be partly read',
+  nmap_timeout_reported: 'The port scan ran out of time before it finished',
+  malformed_naabu_jsonl: 'The port discovery step returned output that could not be read',
+  slow_endpoints: 'Some endpoints answered too slowly to finish their checks in time',
+  no_families_selected: 'The scan policy selected no check family, so only the baseline probes ran',
+  application_surface_not_examined: 'No selected check family examines the application itself; the selected families only probe fixed, well-known locations',
+  selected_family_no_candidates: 'A selected check family had nothing to test on the discovered surface',
+  template_windows_incomplete_on_origin: 'Active templates did not all run at one of the scanned origins (the target or another origin the scan discovered), so some checks never ran there',
+  auth_endpoint_probe_limited: "The attached credential profile's own sign-in endpoint is tested paced and bounded (at most 20 requests a minute across the scan, within a bounded set of probes for each check: up to 4,352 requests per scan part), and a check there ended without a verdict. The pace does not prevent a sign-in throttle or lockout keyed to the scanner's address",
+}
+
+// A coverage reason code as the Scan page shows it: its label when this table knows the code,
+// otherwise the code in title case ("selected_family_incomplete" -> "Selected Family Incomplete").
+export function coverageReasonText(code) {
+  const raw = String(code || '')
+  return COVERAGE_REASON_LABELS[raw] || raw.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+// A planned step as a reader would name it. Steps are planned by capability; the baseline
+// requests share one capability, so those are named by step.
+const STEP_LABELS = {
+  'baseline.http': 'Baseline HTTP request',
+  'baseline.http_redirect': 'HTTP to HTTPS redirect check',
+  'baseline.security_txt': 'security.txt check',
+  'baseline.cors': 'Cross-origin (CORS) check',
+  'baseline.cors_null': 'Cross-origin (CORS) null-origin check',
+}
+
+const CAPABILITY_LABELS = {
+  'web.probe': 'Reachability check',
+  'web.crawl': 'Page crawl',
+  'web.browser_crawl': 'Browser crawl',
+  'web.content_discover': 'Content discovery',
+  'web.param_discover': 'Parameter discovery',
+  'web.spec_ingest': 'API description import',
+  'web.identify': 'Technology identification',
+  'http.request': 'Baseline HTTP check',
+  'dns.inspect': 'DNS check',
+  'dns.enumerate': 'DNS enumeration',
+  'tls.inspect': 'TLS check',
+  'templates.passive_batch': 'Passive templates',
+  'templates.passive_scan': 'Passive templates',
+  'templates.active_batch': 'Active templates',
+  'templates.scan': 'Active templates',
+  'exposure.verify_batch': 'Exposure checks',
+  'xss.verify_batch': 'Cross-site scripting checks',
+  'xss.verify': 'Cross-site scripting checks',
+  'xss.request_verify_batch': 'Cross-site scripting checks',
+  'xss.request_verify': 'Cross-site scripting checks',
+  'xss.browser_prove_batch': 'Cross-site scripting proof in a browser',
+  'sqli.verify_batch': 'SQL injection checks',
+  'sqli.verify': 'SQL injection checks',
+  'sqli.request_verify_batch': 'SQL injection checks',
+  'sqli.request_verify': 'SQL injection checks',
+  'sqli.prove_batch': 'SQL injection proof',
+  'redirect.verify_batch': 'Open redirect checks',
+  'graphql.verify_batch': 'GraphQL checks',
+  'scan.finalize': 'Report assembly',
+}
+
+const STEP_STATUS_LABELS = {
+  success: 'completed',
+  complete: 'completed',
+  partial: 'partly completed',
+  skipped: 'did not run',
+  timed_out: 'timed out',
+  failed: 'failed',
+  blocked: 'blocked',
+  cancelled: 'cancelled',
+  pending: 'did not start',
+  planned: 'did not start',
+}
+
+/** The plain name of one planned step: "sqli.verify_batch" reads "SQL injection checks". A name
+ *  this table does not know is shown as words ("auth.session_probe" -> "Auth session probe"). */
+export function scanStepLabel(action) {
+  const item = record(action)
+  const stepId = String(item.action_id || '')
+  if (STEP_LABELS[stepId]) return STEP_LABELS[stepId]
+  const capability = String(item.capability_name || '')
+  if (CAPABILITY_LABELS[capability]) return CAPABILITY_LABELS[capability]
+  const words = (capability || stepId || 'step').replace(/[._]+/g, ' ').replace(/\s+batch$/i, '').trim()
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Step'
+}
+
+/** A step status in words ("timed_out" -> "timed out", "skipped" -> "did not run"). */
+export function scanStepStatusLabel(status) {
+  const raw = String(status || '')
+  return STEP_STATUS_LABELS[raw] || raw.replace(/_/g, ' ') || 'incomplete'
+}
+
+/** The planned steps of a scan that did not complete, split into gaps and steps that did not apply.
+ *
+ *  A step that did not apply to the target is not a gap: nothing was left untested. Those are
+ *  counted apart so the gap list holds only work that was planned and is missing. A step that
+ *  stopped early and whose continuation then finished is not a gap either: its work was done. */
+export function coverageGapRows(actions) {
+  const rows = (Array.isArray(actions) ? actions : [])
+    .filter((item) => item && typeof item === 'object' && String(item.status || '') !== 'success')
+    .filter((item) => String(item.continued_status || '') !== 'success')
+  const notApplicable = rows.filter(
+    (item) => String(item.status || '') === 'skipped' && String(item.reason_code || '') === 'not_applicable',
+  )
+  return {
+    gaps: rows.filter((item) => !notApplicable.includes(item)),
+    reasonCodes: Array.from(new Set(rows.map((item) => String(item.reason_code || '')).filter(Boolean))),
+    notApplicable: notApplicable.length,
+  }
+}
+
+// What a family's slow endpoint could not finish: the template pack, or an exposure probe that
+// no retry got an answer for.
+const SLOW_ENDPOINT_WORK = {
+  nuclei_passive: 'the passive templates',
+  nuclei_active: 'the active templates',
+  sensitive_exposure: 'the exposure checks',
+}
+
+// "Partial because N slow endpoints", naming them from the family coverage the finalizer wrote,
+// so a reader sees which endpoints were too slow rather than a generic timeout.
+export function slowEndpointsLabel(coverage) {
+  const rows = (Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : [])
+    .filter((row) => Array.isArray(record(row).slow_endpoints) && record(row).slow_endpoints.length)
+  const endpoints = [...new Set(rows.flatMap((row) => (
+    record(row).slow_endpoints.map((item) => String(item || ''))
+  )).filter(Boolean))]
+  if (!endpoints.length) return COVERAGE_REASON_LABELS.slow_endpoints
+  const work = [...new Set(rows.map((row) => SLOW_ENDPOINT_WORK[String(record(row).family)] || 'their checks'))]
+  const plural = endpoints.length === 1 ? 'endpoint' : 'endpoints'
+  return `Partial because ${endpoints.length} slow ${plural} could not finish ${work.join(' or ')} in time: ${endpoints.join(', ')}`
+}
+
+// Why no application response was observed. The finalizer records the cause as a coverage
+// reason; the HTTP status is the fallback. Saying "authentication challenge" for a bound
+// origin that only redirects elsewhere sent operators to look for a login that does not exist.
+export function notExaminedExplanation(report) {
+  const reasons = new Set((Array.isArray(record(report.coverage).reasons) ? record(report.coverage).reasons : [])
+    .concat(Array.isArray(record(record(report.coverage).grade_reliability).reasons) ? record(record(report.coverage).grade_reliability).reasons : [])
+    .map((reason) => String(reason || '')))
+  const transport = record(record(report.reachability).transport)
+  const attempts = Array.isArray(transport.attempts) ? transport.attempts : []
+  if (record(report.reachability).status === 'unavailable' && attempts.length) {
+    const tried = attempts.map((item) => `${String(record(item).origin || '').replace(/\/$/, '')} (${String(record(item).error || 'no response')})`).join(', ')
+    return `No origin of this target answered, so the application was not examined. Tried: ${tried}.`
+  }
+  const specific = String(record(report.coverage).not_examined_reason || '')
+  if (reasons.has('bound_origin_redirects_off_origin')) {
+    const where = specific ? ` (${specific})` : ''
+    return `The bound origin answered every request with a redirect to another origin${where}, so no application response was observed here. Scan the origin that serves the application (for example its https:// or www origin) to examine it.`
+  }
+  const status = Number(record(report.http).status)
+  if ([401, 403, 407].includes(status)) {
+    return 'The scanner reached an authentication challenge that did not expose application content.'
+  }
+  return 'The responses observed on the bound origin did not expose application content.'
+}
+
+// sensitive_exposure is read-only GET traffic and runs in passive Scans, so it is not
+// something active permission bought.
+const ACTIVE_FAMILIES = new Set(['xss', 'sqli', 'nuclei_active', 'bola', 'nosqli', 'authz_surface', 'graphql', 'recon_active'])
+const ACTIVE_FAMILY_LABELS = {
+  xss: 'XSS', sqli: 'SQLi', nuclei_active: 'active templates', bola: 'BOLA',
+  nosqli: 'NoSQLi', authz_surface: 'authz', graphql: 'GraphQL', recon_active: 'active recon',
+}
+
+// The one thing to do next, derived from what limited this run. A page that lists every gap
+// but never says what to do about it leaves the operator to reverse-engineer the fix.
+export function nextStepsFor({ targetUrl, testingWarning, coverageReasons, http, authenticated, authenticationRequested, notExamined }) {
+  const steps = []
+  const target = String(targetUrl || '')
+  const encodedTarget = encodeURIComponent(target)
+  if (coverageReasons.includes('bound_origin_redirects_off_origin')) {
+    const destination = String(http.redirect_origin || http.redirect_location || http.location || '')
+    let origin = ''
+    try {
+      origin = destination ? new URL(destination, target || undefined).origin : ''
+    } catch {
+      origin = ''
+    }
+    steps.push({
+      key: 'serving-origin',
+      label: origin ? `Scan ${origin.replace(/^https?:\/\//, '')} instead` : 'Scan the origin that serves the application',
+      href: `/scan/new?target=${encodeURIComponent(origin || target)}`,
+    })
+  }
+  if (testingWarning) {
+    steps.push({
+      key: 'standard-active',
+      label: 'Re-run with the standard active preset',
+      href: `/scan/new?target=${encodedTarget}&preset=standard_active`,
+    })
+  }
+  if (!notExamined && !authenticated && !authenticationRequested) {
+    steps.push({
+      key: 'credentials',
+      label: 'Add credentials to examine the authenticated surface',
+      href: '/credentials',
+    })
+  }
+  return steps
+}
+
+// What earlier scans found that this run did not observe. Only active rows count, and a row
+// counts as observed here when this scan wrote it, last saw it, or reported the same finding.
+// Subtracting list lengths counted resolved and false-positive rows as "unresolved".
+/** The server's carried-over summary from the deployment decision, or null when the
+ *  decision does not carry one (an older API). The server computes it next to the gate over
+ *  the target's complete active set, so it is the number the page renders whenever present;
+ *  the client computation below is only the fallback. */
+export function carriedOverFromDecision(decision) {
+  const item = record(decision)
+  const summary = item.carried_over
+  if (!summary || typeof summary !== 'object' || !Number.isFinite(Number(summary.count))) return null
+  const complete = summary.complete !== false
+  return {
+    state: complete ? 'ready' : 'partial',
+    count: Math.max(0, Number(summary.count)),
+    material: Math.max(0, Number(summary.material) || 0),
+    fromHunts: Math.max(0, Number(summary.from_hunts) || 0),
+    fromOther: Math.max(0, Number(summary.from_other) || 0),
+    highest: summary.highest ? String(summary.highest).toLowerCase() : null,
+    complete,
+    source: 'server',
+  }
+}
+
+/** Unresolved findings on the target that this run did not observe.
+ *
+ *  A row counts as observed by this run only through persisted linkage (written or last seen
+ *  by this scan) or a fingerprint this run reported. Display strings are never proof of
+ *  re-observation. `historyState` 'partial' means the target's active rows were not all
+ *  loaded: the count is a lower bound and an all-clear must not be claimed. */
+export function carriedOverSummary(scan, targetFindings, historyState = 'ready') {
+  const scanRecord = record(scan)
+  const scanId = String(scanRecord.id || '')
+  if (historyState === 'loading' || historyState === 'error') {
+    return { state: historyState, count: 0, material: 0, fromHunts: 0, fromOther: 0, highest: null, complete: false }
+  }
+  const reported = Array.isArray(record(scanRecord.result).findings) ? record(scanRecord.result).findings : []
+  const reportedFingerprints = new Set(
+    reported.map((finding) => String(record(finding).fingerprint || '').trim()).filter(Boolean),
+  )
+  const carried = (Array.isArray(targetFindings) ? targetFindings : []).filter((finding) => {
+    const item = record(finding)
+    if (String(item.status || 'active') !== 'active') return false
+    if (String(item.scan_id || '') === scanId || String(item.last_seen_scan_id || '') === scanId) return false
+    const fingerprint = String(item.fingerprint || '').trim()
+    return !(fingerprint && reportedFingerprints.has(fingerprint))
+  })
+  const order = ['critical', 'high', 'medium', 'low', 'info']
+  const highest = order.find((severity) => carried.some((finding) => String(record(finding).severity || '').toLowerCase() === severity)) || null
+  const material = carried.filter((finding) => ['critical', 'high', 'medium'].includes(String(record(finding).severity || '').toLowerCase())).length
+  const complete = historyState !== 'partial'
+  // A row a Hunt created (a Hunt that re-proves a scan's row leaves its scan_id in place).
+  const fromHunts = carried.filter((finding) => record(finding).hunt_run_id && !record(finding).scan_id).length
+  const fromOther = carried.filter((finding) => !record(finding).hunt_run_id && !record(finding).scan_id).length
+  return { state: complete ? 'ready' : 'partial', count: carried.length, material, fromHunts, fromOther, highest, complete }
+}
+
+/** Where each release-gate blocker came from. The server labels every DAST blocker with an
+ *  `origin` ('this_scan', 'hunt', 'earlier_scan'); an older API marks only carried rows with
+ *  `from_target_active`, which reads as an earlier scan. A Hunt's finding is never counted as
+ *  an earlier scan's. */
+export function blockerOrigin(blocker, scanId) {
+  const item = record(blocker)
+  const origin = String(item.origin || '')
+  if (origin === 'this_scan' || origin === 'hunt' || origin === 'earlier_scan' || origin === 'other') return origin
+  if (item.from_target_active === true && String(item.scan_id || '') !== String(scanId || '')) return 'earlier_scan'
+  return 'this_scan'
+}
+
+export function blockerProvenance(blockers, scanId) {
+  const counts = { thisScan: 0, hunts: 0, earlierScans: 0, other: 0 }
+  for (const blocker of Array.isArray(blockers) ? blockers : []) {
+    const origin = blockerOrigin(blocker, scanId)
+    if (origin === 'hunt') counts.hunts += 1
+    else if (origin === 'earlier_scan') counts.earlierScans += 1
+    else if (origin === 'other') counts.other += 1
+    else counts.thisScan += 1
+  }
+  return counts
+}
+
+/** The provenance clause after the blocker count, or '' when every blocker is this scan's. */
+export function blockerProvenanceText(blockers, scanId) {
+  const { thisScan, hunts, earlierScans, other } = blockerProvenance(blockers, scanId)
+  if (hunts === 0 && earlierScans === 0 && other === 0) return ''
+  const parts = [`${thisScan} from this scan`]
+  if (hunts > 0) parts.push(`${hunts} found by Hunt${hunts === 1 ? '' : 's'} on this target`)
+  if (earlierScans > 0) parts.push(`${earlierScans} unresolved on this target from earlier scans`)
+  if (other > 0) parts.push(`${other} recorded on this target outside a scan or Hunt`)
+  return parts.join(' · ')
+}
+
+/** Who found the carried-over rows, for the "Carried over" tile. */
+export function carriedSourceText(carried) {
+  const item = record(carried)
+  const hunts = Number(item.fromHunts) || 0
+  const other = Number(item.fromOther) || 0
+  const parts = [`Found by earlier scans`]
+  if (hunts > 0) parts.push(`${hunts} by Hunt${hunts === 1 ? '' : 's'}`)
+  if (other > 0) parts.push(`${other} recorded outside a scan or Hunt`)
+  return parts.length === 1 ? parts[0] : `${parts[0]} or other sources (${parts.slice(1).join(', ')})`
+}
+
+// The release line states provenance only when the decision supplies it: a blocker the gate
+// marked as carried from the target's unresolved set, and not written by this scan, came from
+// an earlier scan. Proof state says nothing about when a finding was observed.
+const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info']
+
+/**
+ * "critical or high " for blockers that all carry those severities, so the release line says
+ * which bar the count is against (the gate blocks at high by default, while the run headline
+ * counts medium too). '' when the blockers carry no severity.
+ */
+export function blockerSeverityPhrase(blockers) {
+  const present = new Set((Array.isArray(blockers) ? blockers : [])
+    .map((blocker) => String(record(blocker).severity || '').toLowerCase())
+    .filter((severity) => SEVERITY_ORDER.includes(severity)))
+  if (!present.size) return ''
+  const lowest = Math.max(...[...present].map((severity) => SEVERITY_ORDER.indexOf(severity)))
+  const names = SEVERITY_ORDER.slice(0, lowest + 1)
+  if (names.length === 1) return `${names[0]} `
+  return `${names.slice(0, -1).join(', ')} or ${names.at(-1)} `
+}
+
+function unresolvedPhrase(count, blockers) {
+  return `${count} unresolved ${blockerSeverityPhrase(blockers)}finding${count === 1 ? '' : 's'}`
+}
+
+export function releaseLine(decision, scanId, confirmedCount) {
+  const item = record(decision)
+  const verdict = String(item.decision || item.deploy_decision || '').toLowerCase()
+  if (!verdict) return null
+  const blockers = Array.isArray(item.blocking_findings) ? item.blocking_findings : []
+  // The list may be truncated; blocking_count is the gate's own total.
+  const blockerCount = Math.max(blockers.length, Number(item.blocking_count) || 0)
+  const { hunts, earlierScans, other } = blockerProvenance(blockers, scanId)
+  const rationale = String(item.rationale || item.reason || '').trim()
+  if (verdict === 'block' || verdict === 'blocked') {
+    if (blockers.length > 0 && hunts + earlierScans + other === blockers.length && confirmedCount === 0) {
+      const sources = [earlierScans > 0 && 'earlier scans', hunts > 0 && (hunts === 1 ? 'a Hunt' : 'Hunts'), other > 0 && 'other records'].filter(Boolean)
+      const source = sources.length > 1 ? `${sources.slice(0, -1).join(', ')} and ${sources.at(-1)}` : sources[0]
+      return { verdict, tone: 'block', text: `Release is blocked by ${unresolvedPhrase(blockerCount, blockers)} from ${source} that this run did not re-examine.` }
+    }
+    return { verdict, tone: 'block', text: blockerCount > 0
+      ? `Release is blocked by ${unresolvedPhrase(blockerCount, blockers)} on this target.`
+      : 'Release is blocked by unresolved findings on this target.' }
+  }
+  if (verdict === 'allow') {
+    return { verdict, tone: 'allow', text: 'Release policy allows this target on the findings currently unresolved.' }
+  }
+  return { verdict, tone: 'review', text: rationale
+    ? `${rationale}${blockerCount > 0 ? ` ${unresolvedPhrase(blockerCount, blockers)} on this target.` : ''}`
+    : `Release decision: ${verdict.replace(/_/g, ' ')}.` }
+}
+
+// The scan detail carries the server's proof projection on every finding (the same field the
+// findings API serves), so proof is read from it alone. The scanner's own word is kept as
+// scan_time_proof_state ('exploited' means verified); reading it against this vocabulary showed
+// proven critical exposures as "0 proven, need verification".
+export function isProvenFinding(finding) {
+  return String(finding?.proof_state || '') === 'verified'
+}
+
+const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
+
+// The scan page's Findings tab: what this run proved, what still needs verification, and the
+// informational rest. A title is listed once with every location it was observed at, so five
+// identical "cloud credential material" exposures read as one row of five, not five rows.
+export function groupScanFindings(findings) {
+  const groups = { proven: [], verify: [], informational: [] }
+  const clusters = new Map()
+  for (const finding of Array.isArray(findings) ? findings : []) {
+    const severity = String(finding?.severity || 'info').toLowerCase()
+    const group = isProvenFinding(finding) ? 'proven' : MATERIAL_SEVERITIES.has(severity) ? 'verify' : 'informational'
+    const title = String(finding?.title || 'Untitled finding').trim() || 'Untitled finding'
+    const key = `${group}|${severity}|${title.toLowerCase()}`
+    let cluster = clusters.get(key)
+    if (!cluster) {
+      cluster = { key, group, severity, title, findings: [] }
+      clusters.set(key, cluster)
+      groups[group].push(cluster)
+    }
+    cluster.findings.push(finding)
+  }
+  for (const list of Object.values(groups)) {
+    list.sort((a, b) => ((SEVERITY_RANK[a.severity] ?? 4) - (SEVERITY_RANK[b.severity] ?? 4))
+      || (b.findings.length - a.findings.length))
+  }
+  return groups
+}
+
+/**
+ * The Findings tab's counts, from the same grouping that draws its sections, so the summary line
+ * and the section headings can never disagree. `provenMaterial` (medium or higher) is the number
+ * the run headline calls "confirmed material issues".
+ */
+export function scanFindingCounts(findings) {
+  const groups = groupScanFindings(findings)
+  const size = (clusters) => clusters.reduce((sum, cluster) => sum + cluster.findings.length, 0)
+  const provenMaterial = groups.proven.reduce((sum, cluster) => sum + (MATERIAL_SEVERITIES.has(cluster.severity) ? cluster.findings.length : 0), 0)
+  const proven = size(groups.proven)
+  const verify = size(groups.verify)
+  const informational = size(groups.informational)
+  return { total: proven + verify + informational, proven, provenMaterial, verify, informational }
+}
+
+/** "30 proven (24 medium or higher) · 2 need verification · 1 informational". */
+export function scanFindingCountsText(counts) {
+  const parts = [`${counts.proven} proven${counts.provenMaterial && counts.provenMaterial !== counts.proven ? ` (${counts.provenMaterial} medium or higher)` : ''}`]
+  if (counts.verify) parts.push(`${counts.verify} ${counts.verify === 1 ? 'needs' : 'need'} verification`)
+  if (counts.informational) parts.push(`${counts.informational} informational`)
+  return parts.join(' · ')
+}
+
+// Active templates run in windows of the allowlist at each sweep base (the target's own base and
+// every other origin the scan found); the finalizer records how many (base, window) pairs ran.
+// Shown on the page. When every pair ran, the finalizer no longer calls the family unfinished for
+// endpoints the plan left unscheduled (the templates ran at the bases, not at each endpoint);
+// the page reads a report stored before that the same way.
+export function templateWindowsPresentation(coverage) {
+  const rows = Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : []
+  const row = record(rows.find((item) => record(item).family === 'nuclei_active'))
+  const windows = record(row.template_windows)
+  const run = finiteNumber(windows.run, null)
+  const total = finiteNumber(windows.total, null)
+  if (run === null || total === null || total <= 0) return null
+  const bases = (Array.isArray(windows.bases) ? windows.bases : [])
+    .map((item) => ({
+      base: String(record(item).base || ''),
+      run: finiteNumber(record(item).run, 0),
+      total: finiteNumber(record(item).total, 0),
+    }))
+    .filter((item) => item.base)
+  const perBase = bases.length ? ` (${bases.map((item) => `${item.base} ${item.run}/${item.total}`).join(', ')})` : ''
+  return {
+    run,
+    total,
+    complete: run >= total && bases.every((item) => item.run >= item.total),
+    bases,
+    detail: `${run} of ${total} ran${perBase}`,
+    text: `Active templates: ${run} of ${total} template windows ran${perBase}.`,
+  }
+}
+
+// The only partial reason every-window-ran outweighs: endpoints the plan never scheduled. A sweep
+// that timed out, failed or left a base short is still unfinished.
+const WINDOWS_COVER_REASONS = new Set(['manifest_entries_unscheduled'])
+
+function windowsCoverFamily(coverage, templateWindows) {
+  if (!templateWindows?.complete) return false
+  const rows = Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : []
+  const row = record(rows.find((item) => record(item).family === 'nuclei_active'))
+  return row.coverage_status === 'complete' || WINDOWS_COVER_REASONS.has(String(row.reason || ''))
+}
+
+export function scanResultPresentation(scan, assurance) {
+  const scanRecord = record(scan)
+  const report = record(scanRecord.result)
+  const result = record(report.result)
+  const findings = Array.isArray(report.findings) ? report.findings : []
+  const material = findings.filter((finding) => MATERIAL_SEVERITIES.has(String(finding?.severity || '').toLowerCase()))
+  const confirmed = material.filter(isProvenFinding)
+  const candidates = material.filter((finding) => !confirmed.includes(finding))
+  const assuranceBand = String(assurance?.band || result.assurance_band || 'none')
+  const assuranceLabel = String(assurance?.label || 'Coverage unavailable')
+  const weakExamination = ['none', 'weak', 'limited'].includes(assuranceBand)
+  const notExamined = result.risk_assessment_state === 'not_examined' || result.application_observed === false
+
+  let headline = 'No material vulnerability confirmed in this run'
+  let explanation = findings.length
+    ? `${findings.length} lower-severity or informational observation${findings.length === 1 ? ' was' : 's were'} recorded.`
+    : 'This run did not produce a confirmed medium, high, or critical finding.'
+  let tone = 'caution'
+  if (notExamined) {
+    headline = 'Application was not examined'
+    explanation = notExaminedExplanation(report)
+    tone = 'warning'
+  } else if (confirmed.length) {
+    headline = `${confirmed.length} confirmed material ${confirmed.length === 1 ? 'issue requires' : 'issues require'} action`
+    explanation = 'Deterministic evidence confirmed at least one medium, high, or critical finding in this run.'
+    tone = 'danger'
+  } else if (candidates.length) {
+    headline = `${candidates.length} potential material ${candidates.length === 1 ? 'issue needs' : 'issues need'} verification`
+    explanation = 'These candidates are not confirmed vulnerabilities until their proof requirements succeed.'
+    tone = 'warning'
+  }
+
+  const options = record(scanRecord.options)
+  const plan = record(options.scan_execution_plan)
+  const policy = record(plan.policy)
+  const resolvedFamilies = Array.isArray(plan.resolved_families) ? plan.resolved_families : []
+  const budgetProfile = String(plan.budget_profile || options.budget_profile || 'unknown')
+  const activeTesting = policy.active_testing === true
+  // What "active" bought. Permission alone ran nothing: a run allowed active testing under the
+  // passive preset and the tile said "Active allowed" over a report with no active family in it.
+  const activeFamilies = resolvedFamilies.filter((family) => ACTIVE_FAMILIES.has(String(family)))
+  const activeFamiliesLabel = activeFamilies.map((family) => ACTIVE_FAMILY_LABELS[family] || String(family).replaceAll('_', ' ')).join(', ')
+  const testingSummary = !activeTesting
+    ? 'Passive only'
+    : activeFamilies.length
+      ? `Active · ${activeFamiliesLabel}`
+      : 'Active allowed · none selected'
+  const testingWarning = activeTesting && !activeFamilies.length
+    ? 'Active testing was allowed but the passive preset ran no active family. Re-run with the standard active preset to test XSS and SQLi.'
+    : null
+  const smartCoverage = record(report.smart_coverage)
+  const authStates = Array.isArray(smartCoverage.auth_states_tested) ? smartCoverage.auth_states_tested : []
+  const authenticated = authStates.some((state) => String(state).toLowerCase() !== 'anonymous')
+  // This historical flag records a credential lane, not an accepted identity or
+  // a continuous session-health observation.
+  const identityAssurance = record(report.authentication_assurance)
+  const authenticationGap = identityAssurance.reason_code === 'authentication_gap'
+  const interruptedActions = Math.max(0, Math.trunc(finiteNumber(identityAssurance.interrupted_action_count, 0)))
+  const authenticationRequested = authenticationGap || identityAssurance.authentication_requested === true || authenticated
+    || (Array.isArray(options.credential_profile_refs) && options.credential_profile_refs.length > 0)
+    || (Array.isArray(options.managed_credential_profiles) && options.managed_credential_profiles.length > 0)
+  const authenticationAssurance = authenticationGap ? 'Credential authority unavailable' : authenticationRequested ? 'Identity unverified' : 'Anonymous only'
+  const budgetUsed = record(record(report.scan_metadata).budget_used)
+  const missingHeaders = Array.isArray(record(report.http).missing_security_headers)
+    ? record(report.http).missing_security_headers
+    : []
+  const scorePolicy = String(result.score_policy || '')
+  const posturePenalty = finiteNumber(result.posture_penalty, null)
+  const policyVersion = Number(scorePolicy.match(/^risk_and_assurance\/v(\d+)$/)?.[1] || 0)
+  const coverage = record(report.coverage)
+  // Families the operator selected that never reached a complete state. Naming them is what
+  // turns "a selected check family is incomplete" into something a reader can act on.
+  const templateWindows = templateWindowsPresentation(coverage)
+  const windowsCovered = windowsCoverFamily(coverage, templateWindows)
+  // A report stored before the finalizer judged a windowed sweep by its (base, window) pairs
+  // still names the sweep as its only unfinished family; that reason then explains nothing.
+  const windowsOnlyGap = windowsCovered && Array.isArray(coverage.selected_family_gaps)
+    && coverage.selected_family_gaps.length > 0
+    && coverage.selected_family_gaps.every((family) => String(family) === 'nuclei_active')
+  const coverageReasons = (Array.isArray(coverage.reasons) ? coverage.reasons : [])
+    .filter((reason) => !(windowsOnlyGap && String(reason) === 'selected_family_incomplete'))
+  const coverageWarnings = coverageReasons.map((reason) => (
+    String(reason || '').replaceAll('_', ' ')
+  )).filter(Boolean)
+  const incompleteFamilies = Array.isArray(coverage.selected_family_gaps)
+    ? coverage.selected_family_gaps
+      .filter((family) => !(windowsCovered && String(family) === 'nuclei_active'))
+      .map((family) => String(family || '').replaceAll('_', ' ')).filter(Boolean)
+    : []
+  const candidateRows = Array.isArray(coverage.family_coverage) ? coverage.family_coverage : null
+  const candidateGapFamilies = candidateRows ? resolvedFamilies
+    .filter((family) => ACTIVE_FAMILIES.has(String(family)))
+    .filter((family) => {
+      const row = candidateRows.find((item) => record(item).family === family)
+      return !row || (Number(record(row).planned_candidates || 0) === 0
+        && Number(record(row).attempted_candidates || 0) === 0)
+    })
+    .map((family) => String(family).replaceAll('_', ' ')) : []
+  // Why the selected injection families had nothing to test, as the server worked it out from
+  // the executed manifests -- for a JSON-body API, that its bodies need state-changing authority.
+  const injectionGap = record(record(record(scanRecord.execution_explanation).coverage).injection_candidates)
+  const injectionCandidateGap = typeof injectionGap.message === 'string' ? injectionGap.message : ''
+  const assuranceGaps = Array.isArray(assurance?.gaps) ? assurance.gaps : []
+  // A strong examination score describes the work that ran. When the run stopped before its
+  // plan completed, or the scorer itself marked the grade unreliable, the conclusion is only as
+  // wide as the completed work, and the supporting sentence must say so instead of endorsing it.
+  const coverageIncomplete = coverageWarnings.length > 0
+    || incompleteFamilies.length > 0
+    || candidateGapFamilies.length > 0
+    || assuranceGaps.length > 0
+    || result.grade_reliable === false
+    || authenticationRequested
+  const confidenceTone = weakExamination ? 'weak' : coverageIncomplete ? 'qualified' : 'supporting'
+  const confidence = authenticationGap
+    ? `${assuranceLabel}. Credential authority could not be confirmed; ${interruptedActions || 'some'} planned action${interruptedActions === 1 ? ' was' : 's were'} interrupted or blocked. Review the identity and approval before starting new work. Independently verified findings remain supported.`
+    : authenticationRequested
+    ? `${assuranceLabel}. Credentials do not establish accepted identity; no session-health timeline proves authenticated coverage. Independently verified findings remain supported.`
+    : weakExamination
+    ? `${assuranceLabel} — this is not a clean bill of health.`
+    : coverageIncomplete
+      ? incompleteFamilies.length > 0
+        ? `${assuranceLabel} for the work that ran, but the run did not finish everything it planned; the conclusion is limited to what completed.`
+        : `${assuranceLabel} for the work that ran; the listed coverage gaps limit what can be concluded from this run.`
+      : `${assuranceLabel} supports this run-level conclusion.`
+  const coverageGapReasons = coverageReasons.map((reason) => (
+    String(reason) === 'slow_endpoints'
+      ? slowEndpointsLabel(coverage)
+      : COVERAGE_REASON_LABELS[String(reason)] || String(reason || '').replaceAll('_', ' ')
+  )).filter(Boolean)
+  const nextSteps = nextStepsFor({
+    targetUrl: String(scanRecord.target_url || scanRecord.target || ''),
+    testingWarning,
+    coverageReasons: coverageReasons.map((reason) => String(reason || '')),
+    http: record(report.http),
+    authenticated,
+    authenticationRequested,
+    notExamined,
+  })
+
+  return {
+    headline,
+    nextSteps,
+    explanation,
+    tone,
+    confidence,
+    confidenceTone,
+    coverageIncomplete,
+    coverageGapReasons,
+    incompleteFamilies,
+    templateWindows,
+    candidateGapFamilies,
+    injectionCandidateGap,
+    observedCount: findings.length,
+    observedRiskScore: notExamined ? null : finiteNumber(result.risk_score ?? result.score ?? scanRecord.score, null),
+    observedRiskGrade: notExamined ? '' : String(result.risk_grade || result.grade || scanRecord.grade || '').replace(/\*+$/, ''),
+    budgetProfile,
+    activeTesting,
+    authenticated,
+    authenticationRequested,
+    authenticationAssurance,
+    resolvedFamilies,
+    activeFamilies,
+    testingSummary,
+    testingWarning,
+    requestCount: finiteNumber(budgetUsed.http_requests, null),
+    missingHeaders,
+    posturePenalty,
+    scorePolicy,
+    // v3 was briefly reused for both pre- and post-posture calculations.
+    // The emitted penalty disambiguates those rows; v4+ has stable provenance.
+    postureIncluded: posturePenalty !== null || policyVersion >= 4,
+    notExamined,
+    confirmedCount: confirmed.length,
+    candidateCount: candidates.length,
+    coverageWarnings,
+  }
+}

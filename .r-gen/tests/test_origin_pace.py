@@ -1,0 +1,72 @@
+"""The aggregate Hunt request rate per target origin (runtime/origin_pace)."""
+from __future__ import annotations
+
+import asyncio
+import time
+
+import pytest
+
+from api.runtime import origin_pace
+from api.runtime.origin_pace import OriginPace, activate, origin_of, take
+
+
+def test_origin_keys_scheme_host_and_port():
+    assert origin_of("http://App.Example.test/x?y=1") == "http://app.example.test:80"
+    assert origin_of("https://app.example.test:8443/") == "https://app.example.test:8443"
+    assert origin_of("/relative") is None
+
+
+def test_requests_never_start_faster_than_the_rate():
+    pace = OriginPace(None, 20)  # no shared store: the process-local bucket, same rule
+
+    async def burst():
+        started = time.monotonic()
+        stamps = []
+
+        async def one():
+            await pace.take("http://t.test/a")
+            stamps.append(time.monotonic() - started)
+        await asyncio.gather(*(one() for _ in range(60)))
+        return sorted(stamps)
+
+    stamps = asyncio.run(burst())
+    # 20 a second, no burst: 60 requests take at least 59 / 20 s, and no one-second window holds
+    # more than 20 of them.
+    assert stamps[-1] >= 59 / 18 - 0.05  # spaced at 90 % of the rate
+    for start in stamps:
+        assert len([s for s in stamps if start <= s < start + 1]) <= 21  # scheduler jitter: one
+    assert pace.requests == 60 and pace.waited_seconds > 0
+
+
+def test_origins_are_paced_apart_and_nothing_is_dropped():
+    pace = OriginPace(None, 5)
+
+    async def run():
+        await asyncio.gather(*(pace.take("http://a.test/") for _ in range(5)),
+                             *(pace.take("http://b.test/") for _ in range(5)))
+    started = time.monotonic()
+    asyncio.run(run())
+    assert 0.7 <= time.monotonic() - started < 1.3  # each origin paced on its own: 5 at 5/s, in parallel
+    assert pace.requests == 10
+
+
+def test_the_shared_store_decides_the_wait():
+    class Store:
+        calls = []
+
+        def eval(self, script, numkeys, key, cost, burst):
+            self.calls.append((key, float(cost), float(burst)))
+            return b"0.0"
+
+    store = Store()
+    pace = OriginPace(store, 10)
+    asyncio.run(pace.take("http://t.test/x", 3))
+    assert store.calls == [("hunt:origin_pace:http://t.test:80", pytest.approx(3 / 9), 0.0)]
+
+
+def test_outside_hunt_work_nothing_waits_and_inside_the_active_pace_counts():
+    assert asyncio.run(take("http://t.test/")) == 0.0
+    with activate(None, 1000) as pace:
+        asyncio.run(take("http://t.test/"))
+        assert origin_pace.current() is pace and pace.requests == 1
+    assert origin_pace.current() is None

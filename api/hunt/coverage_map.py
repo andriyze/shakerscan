@@ -276,6 +276,7 @@ _LOOKED_AT = frozenset({"review", "exposure", "unauthenticated_api"})
 _NOTHING_SERVED = frozenset({401, 403, 404, 405, 407, 410})
 # Process-state keys of the discovery runner that are not step outcomes.
 _STATE_KEYS = frozenset({"running", "products", "notes", "probe_hits", "sweep_counts", "deferred_finish",
+                         "engine_accounts", "engine_writes",
                          "sweep_stats"})
 
 
@@ -551,7 +552,10 @@ def build_coverage(
                       **({"planner_finished": True} if state.get("deferred_finish") else {}),
                       **({"sweep_stats": dict(state["sweep_stats"])}
                          if isinstance(state.get("sweep_stats"), Mapping) else {}),
-                      **({"notes": state["notes"]} if state.get("notes") else {})},
+                      **({"notes": state["notes"]} if state.get("notes") else {}),
+                      # What the engine made on the target (allow_account_creation), for clean-up.
+                      **({"engine_accounts": list(state["engine_accounts"])} if state.get("engine_accounts") else {}),
+                      **({"engine_writes": list(state["engine_writes"])} if state.get("engine_writes") else {})},
         "open": items,
         **({"signed_in": signed_in} if signed_in else {}),
         **({"allowed": sorted(allowed_names)} if allowed_names is not None else {}),
@@ -616,7 +620,8 @@ def debrief_coverage(report: Mapping[str, Any], *, forced: bool, reason: str | N
         "discovery": {"steps": dict(discovery.get("steps") or {}),
                       **({"sweep_stats": dict(discovery["sweep_stats"])} if discovery.get("sweep_stats") else {}),
                       **({"sweep_checks": dict(discovery["sweep_checks"])} if discovery.get("sweep_checks") else {}),
-                      **({"products": list(discovery.get("products") or [])} if discovery.get("products") else {})},
+                      **({"products": list(discovery.get("products") or [])} if discovery.get("products") else {}),
+                      **({key: list(discovery[key]) for key in ("engine_accounts", "engine_writes") if discovery.get(key)})},
         "open_sample": [_item_line(item) for item in (report.get("open") or [])[:20]],
         "forced": bool(forced),
         **({"force_reason": str(reason)[:2000]} if forced and reason else {}),

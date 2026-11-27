@@ -1,0 +1,271 @@
+"""Canonical target inventory routes. Connected Devices is a projection of these IDs."""
+from __future__ import annotations
+
+from datetime import datetime
+import json
+from typing import Any, Literal
+import uuid
+
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .asset_migration import host_url
+from .asset_inventory import DEFAULT_MEMBER_LIMIT, MAX_MEMBER_LIMIT, list_assets_v1
+from .asset_store import asset_detail, asset_history, list_assets, resolve_asset_id
+from .liveness import check_now as liveness_check_now
+
+try:
+    from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from list_contract import CURSOR_MAX_LENGTH
+except ModuleNotFoundError:
+    from ..list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from ..list_contract import CURSOR_MAX_LENGTH
+
+router = APIRouter(tags=['targets'])
+_pool_provider: Any = None
+
+
+def configure_asset_router(pool_provider: Any) -> None:
+    global _pool_provider
+    _pool_provider = pool_provider
+
+
+def pool():
+    value = _pool_provider() if callable(_pool_provider) else None
+    if value is None:
+        raise HTTPException(503, 'Database not ready')
+    return value
+
+
+class HostTargetCreate(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    locator: str = Field(min_length=1, max_length=253)
+    name: str | None = Field(default=None, max_length=255)
+    # The operator cohorts web targets accept, plus the historical 'development' value.
+    environment: Literal['production', 'staging', 'development', 'lab', 'demo', 'calibration', 'internal'] = 'production'
+    approved_by: str | None = Field(default=None, min_length=1, max_length=120)
+    port_hints: list[int] = Field(default_factory=list,max_length=128)
+
+    @field_validator('port_hints', mode='before')
+    @classmethod
+    def ports(cls, values):
+        if not isinstance(values,list) or any(type(port) is not int or not 1 <= port <= 65535 for port in values):
+            raise ValueError('Port hints must be integers between 1 and 65535')
+        return list(dict.fromkeys(values))
+
+
+class DeviceProfileCreate(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    device_class: Literal['generic','media','camera','printer','router','nas','conference','building','industrial','server'] = 'generic'
+    manufacturer: str | None = Field(default=None, max_length=255)
+    model: str | None = Field(default=None, max_length=255)
+    firmware_version: str | None = Field(default=None, max_length=255)
+
+
+@router.get('/targets/inventory')
+async def target_inventory(response: Response = None,
+                           search: str = Query('', max_length=500), connected_only: bool = False,
+                           include_inactive: bool = False, include_services: bool = False,
+                           group_by: Literal['domain'] | None = None,
+                           asset_type: Literal['web','network'] | None = None,
+                           environment: str | None = Query(None, max_length=40),
+                           authorization: Literal['authorized','unauthorized'] | None = None,
+                           findings: Literal['any','critical_high','none'] | None = None,
+                           activity: Literal['never','scanned','scanning'] | None = None,
+                           liveness: Literal['live','reachable','unreachable','no_dns','dns_error',
+                                             'blocked','unchecked'] | None = None,
+                           domain: str | None = Query(None, max_length=253, description=
+                                                      "only this domain group (the group's root_domain)"),
+                           sort: Literal['name','risk','recent','created',
+                                         '-name','-risk','-recent','-created'] = 'name',
+                           include_facets: bool = False,
+                           web_only: bool = Query(False, description="only active http(s) web targets a "
+                                                  "picker can offer (the UI's usable-web-target rule)"),
+                           limit: int | None = Query(None, ge=1, le=500),
+                           offset: int = Query(0, ge=0),
+                           cursor: str | None = Query(None, max_length=CURSOR_MAX_LENGTH),
+                           fields: str | None = Query(None, max_length=2048),
+                           count: Literal['none', 'estimate', 'exact'] | None = None,
+                           since: datetime | None = None,
+                           member_limit: int = Query(DEFAULT_MEMBER_LIMIT, ge=1, le=MAX_MEMBER_LIMIT)):
+    """The target inventory.
+
+    list/v1 (any of ``cursor``/``count``/``fields``/``since``): keyset pages of assets, or with
+    ``group_by=domain`` of domain groups with at most ``member_limit`` assets each; ``sort`` takes
+    ``-`` to descend. Otherwise the deprecated limit/offset response (``sort`` names its own
+    direction: name ascending, the others descending); with ``group_by=domain`` each group holds at
+    most ``member_limit`` assets and a page at most 200 (``member_count``/``members_truncated``)."""
+    limit, cursor, fields, count, since, member_limit, web_only, liveness, domain = (direct(value) for value in (
+        limit, cursor, fields, count, since, member_limit, web_only, liveness, domain))
+    if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
+        page = v1_page(limit=limit, cursor=cursor, sort=sort, fields=fields, count=count, since=since)
+        async with pool().acquire() as conn:
+            return await list_assets_v1(
+                conn, page, search=search, connected_only=connected_only,
+                include_inactive=include_inactive, include_services=include_services, group_by=group_by,
+                asset_type=asset_type, environment=environment, authorization=authorization,
+                findings=findings, activity=activity, member_limit=member_limit,
+                include_facets=include_facets, web_only=bool(web_only), liveness=liveness, domain=domain,
+            )
+    if sort.startswith('-'):
+        raise HTTPException(400, 'A "-" sort is list/v1 only; add count=none (or a cursor) to use it')
+    limit = 100 if limit is None else limit
+    mark_deprecated(response)
+    async with pool().acquire() as conn:
+        return await list_assets(conn, search=search, connected_only=connected_only,
+                                 include_inactive=include_inactive, include_services=include_services,
+                                 limit=limit, offset=offset, group_by=group_by, asset_type=asset_type,
+                                 environment=environment, authorization=authorization, findings=findings,
+                                 activity=activity, sort=sort, include_facets=include_facets,
+                                 web_only=bool(web_only), member_limit=member_limit,
+                                 liveness=liveness, domain=domain)
+
+
+@router.post('/targets/{target_id}/liveness')
+async def check_target_liveness(target_id: str):
+    """Check the target's liveness now (docs/target-liveness.md) and return it. The check belongs
+    to the target's asset (its host); a check younger than 30 s is returned instead of repeated."""
+    try:
+        uuid.UUID(str(target_id))
+    except ValueError:
+        raise HTTPException(400, 'invalid target id')
+    result = await liveness_check_now(pool(), target_id)
+    if result is None:
+        raise HTTPException(404, 'target not found')
+    return result
+
+
+@router.post('/targets/hosts')
+async def create_host_target(request: HostTargetCreate):
+    async with pool().acquire() as conn:
+        return await persist_host_target(conn, request)
+
+
+# A person adding a target on the Targets page makes it theirs, even when a scan or a Hunt agent
+# created the row first: a scan-submitted row becomes 'manual', a Hunt agent's created_via is
+# dropped, and a host row is marked ``declared`` so it keeps declaring its domain after scans
+# attach web rows under it (operations/discovery.py). Other automated sources are left alone.
+_PERSON_ADDED_SQL = """
+UPDATE targets SET
+    discovery_source = CASE WHEN discovery_source = 'scan' THEN 'manual' ELSE discovery_source END,
+    metadata_json = CASE WHEN metadata_json->>'created_via' = 'hunt'
+                         THEN metadata_json - 'created_via' ELSE COALESCE(metadata_json, '{}'::jsonb) END
+        || CASE WHEN discovery_source = 'host' THEN '{"declared": true}'::jsonb ELSE '{}'::jsonb END
+WHERE id = $1
+  AND (discovery_source = 'scan' OR metadata_json->>'created_via' = 'hunt'
+       OR (discovery_source = 'host' AND metadata_json->>'declared' IS DISTINCT FROM 'true'))
+RETURNING discovery_source, metadata_json
+"""
+
+
+async def mark_person_added(conn, target_id) -> Any:
+    """Record that a person added ``target_id``; the updated row, or None when nothing changed."""
+    return await conn.fetchrow(_PERSON_ADDED_SQL, target_id)
+
+
+async def persist_host_target(conn, request: HostTargetCreate, *, created_via: str | None = None):
+    """Create or update a host target. ``created_via`` names automation that created it (a Hunt
+    agent); it is recorded on a new row only, so a host a person added keeps counting as theirs.
+    Without it the caller is a person: the row is marked as theirs (``mark_person_added``)."""
+    try:
+        from scanner_tools.device_posture import normalize_device_locator
+    except ModuleNotFoundError:
+        from scanner.scanner_tools.device_posture import normalize_device_locator
+    try:
+        locator = normalize_device_locator(request.locator)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    async with conn.transaction():
+        row = await conn.fetchrow("""INSERT INTO targets(url,name,discovery_source,metadata_json)
+            VALUES($1,$2,'host',$3) ON CONFLICT(canonical_key) DO UPDATE SET
+                metadata_json=CASE WHEN $4::boolean THEN targets.metadata_json || jsonb_build_object('port_hints',(
+                    SELECT COALESCE(jsonb_agg(value ORDER BY first_seen),'[]'::jsonb) FROM (
+                        SELECT value,min(ordinality) AS first_seen FROM jsonb_array_elements(
+                            CASE WHEN jsonb_typeof(targets.metadata_json->'port_hints')='array'
+                                THEN targets.metadata_json->'port_hints' ELSE '[]'::jsonb END
+                            || ($3::jsonb->'port_hints')) WITH ORDINALITY
+                        GROUP BY value ORDER BY first_seen LIMIT 128
+                    ) hints)) ELSE targets.metadata_json END
+            RETURNING id,url,name,metadata_json,(xmax=0) AS created""",host_url(locator),request.name or locator,
+            json.dumps({'environment':request.environment,'cohort':request.environment,
+                        'port_hints':request.port_hints,
+                        **({'created_via':created_via} if created_via else {})}),bool(request.port_hints))
+        if created_via is None:
+            await mark_person_added(conn, row['id'])
+        result = {'id':str(row['id']), 'asset_id':str(row['id']), 'url':row['url'],
+                  'status':'created' if row['created'] else 'already_exists'}
+        saved = row['metadata_json']
+        if isinstance(saved,str):
+            saved = json.loads(saved)
+        result['port_hints_truncated'] = bool(set(request.port_hints) - set(saved.get('port_hints') or []))
+        if request.approved_by:
+            try:
+                import target_authorization
+            except ModuleNotFoundError:
+                from .. import target_authorization
+            try:
+                result['authorization'] = await target_authorization.authorize_target(
+                    conn,row['id'],approved_by=request.approved_by,
+                )
+            except target_authorization.TargetAuthorizationError as exc:
+                raise HTTPException(400,str(exc)) from exc
+        return result
+
+
+@router.get('/targets/{target_id}/asset')
+async def get_target_asset(target_id: str):
+    async with pool().acquire() as conn:
+        return await asset_detail(conn, target_id)
+
+
+@router.get('/targets/{target_id}/history')
+async def get_asset_history(target_id: str, kind: Literal['scans','findings','hunts'] = 'scans',
+                            limit: int = Query(50,ge=1,le=500), offset: int = Query(0,ge=0)):
+    async with pool().acquire() as conn:
+        return await asset_history(conn,target_id,kind=kind,limit=limit,offset=offset)
+
+
+async def ensure_device_profile(conn: Any, target_id: Any, request: DeviceProfileCreate) -> uuid.UUID:
+    owner = await resolve_asset_id(conn,target_id)
+    target = await conn.fetchrow('SELECT id,is_active,metadata_json FROM targets WHERE id=$1 FOR UPDATE',owner)
+    if not target['is_active']:
+        raise HTTPException(409,'Reactivate this target before enabling network scans')
+    metadata = target['metadata_json'] or {}
+    if isinstance(metadata,str):
+        metadata = json.loads(metadata)
+    await conn.execute("""INSERT INTO target_device_profiles(target_id,device_class,manufacturer,model,firmware_version,environment)
+        VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(target_id) DO NOTHING""",owner,request.device_class,
+        request.manufacturer,request.model,request.firmware_version,
+        str(metadata.get('environment') or metadata.get('cohort') or 'production'))
+    return owner
+
+
+@router.post('/targets/{target_id}/device-profile')
+async def enable_device_profile(target_id: str, request: DeviceProfileCreate):
+    async with pool().acquire() as conn, conn.transaction():
+        owner = await ensure_device_profile(conn,target_id,request)
+    return {'asset_id':str(owner),'device_id':str(owner),'view':f'/devices/{owner}'}
+
+
+try:
+    from devices.router import DeviceScanRequest
+except ModuleNotFoundError:
+    from ..devices.router import DeviceScanRequest
+
+
+@router.post('/targets/{target_id}/network-scans')
+async def start_target_network_scan(target_id: str, request: DeviceScanRequest):
+    """Canonical entry point; same executor, queue, and ledger as the device view."""
+    try:
+        from devices.router import scan_device
+    except ModuleNotFoundError:
+        from ..devices.router import scan_device
+    async with pool().acquire() as conn, conn.transaction():
+        owner = await ensure_device_profile(conn,target_id,DeviceProfileCreate())
+        metadata = await conn.fetchval('SELECT metadata_json FROM targets WHERE id=$1',owner)
+        if isinstance(metadata,str):
+            metadata = json.loads(metadata)
+        if not request.port_hints and (metadata or {}).get('port_hints'):
+            request = request.model_copy(update={'port_hints':HostTargetCreate.ports(metadata['port_hints'])})
+    return await scan_device(str(owner),request)

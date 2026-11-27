@@ -1,0 +1,967 @@
+'use client'
+import { featureEnabled, workspaceScanCeiling } from '@/lib/workspaceCapabilities'
+
+import { useEffect, useMemo, useState, useRef } from 'react'
+import { placementPreviewLabel } from '@/lib/labels'
+import { useRouter } from 'next/navigation'
+import Link from '@/components/WorkspaceLink'
+import { useCan, useSessionCapabilities } from '@/lib/useSessionCapabilities'
+import { capabilityReason } from '@/lib/sessionCapabilities.mjs'
+import {
+  getScanPublicContract,
+  getWorkers,
+  createTarget,
+  createTargetPolicyApprovalReceipt,
+  getTargetAuthorization,
+  authorizeTarget,
+  previewScanContract,
+  submitBatchV2,
+  submitScanV2,
+  type ScanBudgetProfile,
+  type ScanPublicContract,
+  type ScanContractPreview,
+  type TargetAuthorization,
+} from '@/lib/api'
+import { checkFamilyLabel } from '@/lib/checkFamilyLabel'
+import { listCredentialProfiles, type CredentialProfile } from '@/lib/credentialApi'
+import { preferredCredentialId } from '@/lib/credentialDefaults'
+import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/components/ui'
+import { useTargetSearch } from '@/lib/useTargetSearch'
+import { getTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
+import { credentialScanCoverageNote } from '@/lib/credentialScanCoverage.mjs'
+import { authorizedByPhrase } from '@/lib/assetAuthorization.mjs'
+import { DOMAIN_LOOKUP_MAX_PAGES, DOMAIN_LOOKUP_PAGE, INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, findDomainGroup, singleScanPrefill } from '@/lib/targetInventoryModel.mjs'
+import { credentialDescription, credentialOptions } from '@/lib/pickerOptions'
+import {
+  RequestCollectionPicker,
+  type RequestCollectionSelectionMetadata,
+} from '@/components/RequestCollectionPicker'
+import { scanScopeEnvironment, validateScanTarget } from '@/lib/targetValidation'
+import { usableWebTargets } from '@/lib/targetChoices'
+
+import { targetForRegisteredDnsFallback } from '@/lib/targetDns'
+
+/** A registered target a web scan can name: active, with a usable web URL. */
+const registeredWebTarget = (asset: TargetAsset) => usableWebTargets([asset]).length === 1
+
+const BUDGETS: Array<{ value: ScanBudgetProfile; label: string; description: string; limits: string }> = [
+  { value: 'fast', label: 'Fast', description: 'Quick feedback for routine checks.', limits: '30 min · 5,000 requests' },
+  { value: 'balanced', label: 'Balanced', description: 'The default coverage and runtime.', limits: '60 min · 20,000 requests' },
+  { value: 'thorough', label: 'Thorough', description: 'Deeper release and staging coverage.', limits: '180 min · 60,000 requests' },
+  { value: 'deep', label: 'Deep', description: 'Opt-in maximum-depth examination.', limits: '360 min · 150,000 requests' },
+]
+
+const ADVANCED_LIMITS = [
+  ['max_duration_seconds', 'Maximum duration (seconds)'],
+  ['max_http_requests', 'Maximum HTTP requests'],
+  ['max_state_changing_requests', 'Maximum state-changing requests'],
+  ['max_endpoints', 'Maximum endpoints'],
+  ['max_hosts', 'Maximum hosts'],
+  ['max_browser_actions', 'Maximum browser actions'],
+  ['max_tcp_ports', 'Maximum TCP ports'],
+  ['max_tool_wall_seconds', 'Maximum tool runtime (seconds)'],
+  ['max_workers', 'Maximum workers'],
+] as const
+
+type ScanTopology = 'single' | 'parallel'
+type ScanFamilyPreset = 'passive' | 'standard_active' | 'custom'
+
+function formatLimit(value: number | undefined): string {
+  return Number.isFinite(value) ? Number(value).toLocaleString() : 'server default'
+}
+
+/** A refusal because every scan slot is taken (HTTP 429, or a message naming the limit). */
+function isScanSlotRefusal(status: number | undefined, message: string): boolean {
+  return status === 429 || /concurrent scan limit|scan slots?|licensed slots?/i.test(message)
+}
+
+export default function NewScanPage() {
+  const router = useRouter()
+  const toast = useToast()
+  const [target, setTarget] = useState('')
+  const [batchMode, setBatchMode] = useState(false)
+  const [batchTargets, setBatchTargets] = useState('')
+  // Why the batch holds fewer targets than were asked for, or that a domain is still being read.
+  const [batchNotice, setBatchNotice] = useState<string | null>(null)
+  const [otherAddresses, setOtherAddresses] = useState<string[]>([])
+  const [batchResolving, setBatchResolving] = useState(false)
+  const [targetKind, setTargetKind] = useState<'web' | 'api'>('web')
+  const [budgetProfile, setBudgetProfile] = useState<ScanBudgetProfile>('balanced')
+  const [activeTesting, setActiveTesting] = useState(false)
+  const [topology, setTopology] = useState<ScanTopology>('single')
+  const [familyPreset, setFamilyPreset] = useState<ScanFamilyPreset>('passive')
+  const [authorized, setAuthorized] = useState(false)
+  const [subdomainDiscovery, setSubdomainDiscovery] = useState(false)
+  const [networkDiscovery, setNetworkDiscovery] = useState(false)
+  const [allowStateChanging, setAllowStateChanging] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [approvalReceipt, setApprovalReceipt] = useState('')
+  const [credentialProfiles, setCredentialProfiles] = useState<CredentialProfile[]>([])
+  // The target the loaded profiles belong to, so defaults never come from the previous target's list.
+  const [credentialProfilesTarget, setCredentialProfilesTarget] = useState<string | null>(null)
+  const credentialDefaultsTarget = useRef<string | null>(null)
+  const [primaryCredentialId, setPrimaryCredentialId] = useState('')
+  const [secondaryCredentialId, setSecondaryCredentialId] = useState('')
+  const [requestCollectionIds, setRequestCollectionIds] = useState<string[]>([])
+  const [requestCollectionMetadata, setRequestCollectionMetadata] = useState<RequestCollectionSelectionMetadata>({})
+  const [scanContract, setScanContract] = useState<ScanPublicContract | null>(null)
+  const [scanContractError, setScanContractError] = useState<string | null>(null)
+  const [customFamilies, setCustomFamilies] = useState<string[]>([])
+  const [contractPreview, setContractPreview] = useState<ScanContractPreview | null>(null)
+  const [contractPreviewError, setContractPreviewError] = useState<string | null>(null)
+  const [contractPreviewLoading, setContractPreviewLoading] = useState(true)
+  const [credentialsLoading, setCredentialsLoading] = useState(false)
+  const [credentialError, setCredentialError] = useState<string | null>(null)
+  const [customEndpoints, setCustomEndpoints] = useState('')
+  const [limits, setLimits] = useState<Record<string, string>>({})
+  const [workerStats, setWorkerStats] = useState<Awaited<ReturnType<typeof getWorkers>> | null>(null)
+  const [workerReadinessError, setWorkerReadinessError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  // Session capabilities: a person who may not start scans sees the form without Run Scan.
+  const canStartScan = useCan('scans.start')
+  const startScanRefusal = capabilityReason(useSessionCapabilities(), 'scans.start')
+  const [error, setError] = useState<string | null>(null)
+  const [slotsBusy, setSlotsBusy] = useState(false)
+  const errorRef = useRef<HTMLDivElement | null>(null)
+  // A refusal lands next to the submit button; bring it into view and focus, wherever the person
+  // scrolled (the form is several screens tall).
+  useEffect(() => {
+    if (!error) { setSlotsBusy(false); return }
+    const node = errorRef.current
+    if (!node) return
+    node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    node.focus({ preventScroll: true })
+  }, [error])
+
+  useEffect(() => {
+    const requestedParams = new URLSearchParams(window.location.search)
+    const requestedTargets = (requestedParams.get('targets') || '')
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean)
+    const requestedTarget = requestedParams.get('target')?.trim()
+    const requestedDomain = requestedParams.get('domain')?.trim()
+    let cancelled = false
+    if (requestedDomain && featureEnabled('batch_scan')) {
+      // A large domain group arrives by reference: read its web apps here (one batch's worth).
+      setBatchMode(true)
+      setBatchResolving(true)
+      // list/v1 reads at most INVENTORY_MEMBER_LIMIT members of the group, never the whole install.
+      // The search is a substring match, so the exact group is looked for over a few pages.
+      findDomainGroup(requestedDomain, (cursor) => getTargetAssets({
+        group_by: 'domain', search: requestedDomain, count: 'none', limit: DOMAIN_LOOKUP_PAGE,
+        member_limit: INVENTORY_MEMBER_LIMIT, ...(cursor ? { cursor } : {}),
+      }))
+        .then((resolved) => {
+          if (cancelled) return
+          if (!resolved.found && !resolved.exhausted) {
+            setBatchNotice(`${requestedDomain} was not among the first ${(DOMAIN_LOOKUP_PAGE * DOMAIN_LOOKUP_MAX_PAGES).toLocaleString('en-US')} matching domain groups. Type its targets below.`)
+            return
+          }
+          if (!resolved.found || !resolved.targets.length) {
+            setBatchNotice(`No active web apps were found for ${requestedDomain}. Add targets, or type them below.`)
+            return
+          }
+          setBatchTargets(resolved.targets.join('\n'))
+          setBatchNotice(batchCapNotice(resolved.total, requestedDomain, { memberCount: resolved.memberCount, moreMembers: resolved.moreMembers }))
+        })
+        .catch((cause) => {
+          if (!cancelled) setBatchNotice(`Could not read the web apps of ${requestedDomain}: ${cause instanceof Error ? cause.message : 'inventory unavailable'}`)
+        })
+        .finally(() => { if (!cancelled) setBatchResolving(false) })
+    } else if (requestedTargets.length > 0 && featureEnabled('batch_scan')) {
+      const capped = capBatchTargets(requestedTargets)
+      setBatchMode(true)
+      setBatchTargets(capped.targets.join('\n'))
+      setBatchNotice(batchCapNotice(capped.total, 'This selection'))
+    } else if (requestedTargets.length > 0) {
+      // No batch submission here: a target with several web addresses still opens prefilled.
+      const prefill = singleScanPrefill(requestedTargets)
+      setTarget(prefill.target)
+      setOtherAddresses(prefill.others)
+    } else if (requestedTarget) {
+      setTarget(requestedTarget)
+    }
+    getWorkers()
+      .then((workers) => {
+        if (!cancelled) {
+          setWorkerStats(workers)
+          setWorkerReadinessError(null)
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) setWorkerReadinessError(cause instanceof Error ? cause.message : 'Worker readiness is unavailable')
+      })
+    getScanPublicContract()
+      .then((contract) => {
+        if (cancelled) return
+        setScanContract(contract)
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setScanContractError(cause instanceof Error ? cause.message : 'Failed to load the Scan contract')
+        }
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  const targets = useMemo(
+    () => Array.from(new Set(batchTargets.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))),
+    [batchTargets],
+  )
+  // Registered targets matching what is typed come from a server search (one bounded page per
+  // debounced query); the first 100 targets used to be the only ones recognised.
+  const targetSearch = useTargetSearch({ includeServices: true, accept: registeredWebTarget, webOnly: true, enabled: !batchMode })
+  const { setQuery: setTargetQuery } = targetSearch
+  useEffect(() => { setTargetQuery(batchMode ? '' : target) }, [batchMode, setTargetQuery, target])
+  const existingTargets = targetSearch.assets
+  const selectedRegisteredTarget = useMemo(
+    () => existingTargets.find((item) => item.url === target.trim()),
+    [existingTargets, target],
+  )
+  const selectedCredentialIds = [primaryCredentialId, secondaryCredentialId].filter(Boolean)
+  const credentialUse = selectedCredentialIds.length > 0
+  // A registered target with a valid standing authorization (Targets, Authorize testing) needs no
+  // second confirmation for active testing: submission reuses that authorization. Credential use
+  // keeps the confirmation, as it records its own credential-tier receipt.
+  const [standingAuthorization, setStandingAuthorization] = useState<TargetAuthorization | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setStandingAuthorization(null)
+    if (batchMode || !selectedRegisteredTarget) return () => { cancelled = true }
+    getTargetAuthorization(selectedRegisteredTarget.id)
+      .then((authorization) => {
+        if (cancelled || !authorization?.standing) return
+        const expired = authorization.expires_at ? Date.parse(authorization.expires_at) <= Date.now() : false
+        if (!expired) setStandingAuthorization(authorization)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [batchMode, selectedRegisteredTarget?.id])
+  const standingCoversScan = Boolean(standingAuthorization) && !credentialUse && !batchMode
+  const confirmationNeeded = (activeTesting || credentialUse) && !standingCoversScan
+  const selectedPrimaryProfile = credentialProfiles.find((profile) => profile.id === primaryCredentialId)
+  const selectedSecondaryProfile = credentialProfiles.find((profile) => profile.id === secondaryCredentialId)
+  const approvalRequired = activeTesting || networkDiscovery || credentialUse || allowStateChanging
+  const currentWorkerCount = workerStats?.current_count ?? 0
+  const staleWorkers = workerStats?.stale_count ?? workerStats?.stale_workers?.length ?? 0
+  const pendingWorkers = workerStats?.pending_count ?? 0
+  const runnableWorkerCount = workerStats?.execution_capacity?.total_available ?? currentWorkerCount
+  const activeWorkerAvailable = !workerStats || runnableWorkerCount > 0
+  const reportedFingerprints = workerStats?.distinct_fingerprints?.length
+    ? workerStats.distinct_fingerprints
+    : Array.from(new Set((workerStats?.workers || []).map((worker) => worker.build_fingerprint).filter((value): value is string => Boolean(value))))
+  const customDuration = Number(limits.max_duration_seconds)
+  const approvalTtlMinutes = Math.ceil((
+    Number.isSafeInteger(customDuration) && customDuration > 0
+      ? customDuration
+      : scanContract?.budget_profiles[budgetProfile]?.max_duration_seconds ?? 7200
+  ) / 60) + 15
+  const includeFamilies = familyPreset === 'custom' ? customFamilies : []
+  const excludeFamilies: string[] = []
+  // Until the server's preview answers, the contract's preset (with what it adds on this budget
+  // profile: active templates on thorough and deep) stands in for the resolved set.
+  const presetFamilies = (preset: 'passive' | 'standard_active') => {
+    const additions = scanContract?.family_preset_profile_additions?.[preset]?.[budgetProfile] ?? (
+      preset === 'standard_active' && (budgetProfile === 'thorough' || budgetProfile === 'deep') ? ['nuclei_active'] : []
+    )
+    const base = scanContract?.family_presets?.[preset] ?? (
+      preset === 'standard_active'
+        ? ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure']
+        : ['recon', 'nuclei_passive', 'sensitive_exposure']
+    )
+    // A signed-in Scan's preset also reads what its principal reaches (access control).
+    const signedIn = credentialUse ? (scanContract?.family_preset_signed_in_additions?.[preset] ?? (
+      preset === 'standard_active' ? ['authz_surface'] : []
+    )) : []
+    const chosen = new Set([...base, ...additions, ...signedIn])
+    const order = scanContract?.families?.map((family) => family.name) ?? [...base, ...additions, ...signedIn]
+    return order.filter((name) => chosen.has(name))
+  }
+  const resolvedFamilies = contractPreview?.resolved_families ?? (
+    familyPreset === 'custom' ? customFamilies : presetFamilies(familyPreset)
+  )
+
+  // The ceilings that change which families resolve (a request or mutation ceiling lowered far
+  // below the profile's leaves the active templates out of the standard set), as whole numbers.
+  const previewCeilings = (['max_http_requests', 'max_state_changing_requests'] as const).reduce<Record<string, number>>(
+    (chosen, key) => {
+      const value = (limits[key] || '').trim()
+      if (/^\d+$/.test(value) && Number.isSafeInteger(Number(value))) chosen[key] = Number(value)
+      return chosen
+    }, {},
+  )
+  const previewCeilingsKey = JSON.stringify(previewCeilings)
+
+  useEffect(() => {
+    let cancelled = false
+    // Drop the previous selection's answer so the local fallback shows the new preset at once;
+    // the line an operator reads to confirm what will run must never lag the radio.
+    setContractPreview(null)
+    setContractPreviewLoading(true)
+    const timer = window.setTimeout(() => {
+      const advanced = JSON.parse(previewCeilingsKey) as Record<string, number>
+      previewScanContract({
+        preset: familyPreset,
+        budget_profile: budgetProfile,
+        include_families: includeFamilies,
+        exclude_families: excludeFamilies,
+        active_testing: activeTesting,
+        allow_state_changing_http: allowStateChanging,
+        network_discovery: networkDiscovery,
+        subdomain_discovery: subdomainDiscovery,
+        execution_topology: topology === 'parallel' ? 'parallel' : 'single_worker',
+        signed_in: credentialUse,
+        ...(Object.keys(advanced).length ? { advanced } : {}),
+      })
+        .then((preview) => { if (!cancelled) { setContractPreview(preview); setContractPreviewError(null); setContractPreviewLoading(false) } })
+        .catch((cause) => { if (!cancelled) { setContractPreview(null); setContractPreviewError(cause instanceof Error ? cause.message : 'Preview unavailable'); setContractPreviewLoading(false) } })
+    }, 150)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, credentialUse, topology, previewCeilingsKey])
+
+  /** Searchable choices for one lane; incompatible profiles stay visible with the reason. */
+  function slotOptions(lane: 'primary' | 'secondary'): ComboboxOption[] {
+    return credentialProfiles.map((profile) => {
+      const compatibility = credentialCompatibility(profile, lane)
+      const option = credentialOptions([profile])[0]
+      return {
+        ...option,
+        group: compatibility.compatible ? option.group : 'Unavailable for this Scan',
+        disabled: !compatibility.compatible,
+        description: compatibility.reason ? `${credentialDescription(profile)} — ${compatibility.reason}` : option.description,
+      }
+    }).sort((left, right) => Number(Boolean(left.disabled)) - Number(Boolean(right.disabled)))
+  }
+
+  function credentialCompatibility(
+    profile: CredentialProfile,
+    lane: 'primary' | 'secondary',
+  ): { compatible: boolean; reason?: string } {
+    if (!profile.execution_compatible) return { compatible: false, reason: `profile is ${profile.status}` }
+    if (!scanContract) return { compatible: false, reason: 'Scan contract is unavailable' }
+    if (!scanContract.credentials.supported_auth_kinds.includes(profile.auth_kind)) {
+      return { compatible: false, reason: `${profile.auth_kind.replaceAll('_', ' ')} is not executable by Scan` }
+    }
+    if (lane === 'primary' && !['primary', 'service'].includes(profile.principal_slot)) {
+      return { compatible: false, reason: `stored in the ${profile.principal_slot} slot` }
+    }
+    if (lane === 'secondary') {
+      if (profile.principal_slot !== 'secondary') {
+        return { compatible: false, reason: `stored in the ${profile.principal_slot} slot` }
+      }
+      if (!scanContract.credentials.secondary_auth_kinds.includes(profile.auth_kind)) {
+        return { compatible: false, reason: 'this authentication kind cannot be a comparison identity' }
+      }
+    }
+    if (profile.auth_kind === 'oauth_password' && !profile.configuration.client_id_configured) {
+      return { compatible: false, reason: 'OAuth client ID is not configured' }
+    }
+    const allowed = new Set(profile.allowed_capabilities)
+    if (!allowed.size) return { compatible: true }
+    if (resolvedFamilies.includes('bola') && !allowed.has('authz.verify')) {
+      return { compatible: false, reason: 'does not allow the selected BOLA / IDOR verifier' }
+    }
+    const interactive = scanContract.credentials.interactive_auth_kinds.includes(profile.auth_kind)
+    if (interactive && !allowed.has('auth.session.establish')) {
+      return { compatible: false, reason: 'does not allow auth session establishment' }
+    }
+    if (!interactive && !scanContract.credentials.semantic_capabilities.some((name) => allowed.has(name))) {
+      return { compatible: false, reason: 'does not allow a Scan action capability' }
+    }
+    const coverageNote = credentialScanCoverageNote(profile.allowed_capabilities, { families: resolvedFamilies })
+    return coverageNote ? { compatible: true, reason: coverageNote } : { compatible: true }
+  }
+
+  function removeConfirmedActiveSelections() {
+    setRequestCollectionIds((current) => current.filter(
+      (selectionId) => requestCollectionMetadata[selectionId]?.replayPolicy !== 'confirmed_active',
+    ))
+  }
+
+  // A conclusion page can send the operator here with the fix already chosen
+  // ("re-run with the standard active preset", "scan the serving origin").
+  useEffect(() => {
+    let params: URLSearchParams
+    try {
+      params = new URLSearchParams(window.location.search)
+    } catch {
+      return
+    }
+    const presetParam = params.get('preset')
+    const targetParam = params.get('target')
+    if (targetParam) setTarget(targetParam)
+    if (presetParam === 'standard_active') {
+      setActiveTesting(true)
+      setFamilyPreset('standard_active')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function handleActiveTestingChange(enabled: boolean) {
+    setActiveTesting(enabled)
+    if (enabled) {
+      // The primary control should match the operator's intent. They can still
+      // explicitly return to Passive or choose Custom after granting permission.
+      if (familyPreset === 'passive') setFamilyPreset('standard_active')
+      return
+    }
+    if (familyPreset === 'standard_active') setFamilyPreset('passive')
+    if (!credentialUse) {
+      setAuthorized(false)
+      setApprovalReceipt('')
+    }
+    setNetworkDiscovery(false)
+    setAllowStateChanging(false)
+    removeConfirmedActiveSelections()
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    setPrimaryCredentialId('')
+    setSecondaryCredentialId('')
+    setCredentialProfiles([])
+    setCredentialProfilesTarget(null)
+    setCredentialError(null)
+    setCredentialsLoading(false)
+    if (batchMode || !selectedRegisteredTarget) return () => { cancelled = true }
+    setCredentialsLoading(true)
+    listCredentialProfiles({
+      target_kind: targetKind,
+      target_id: selectedRegisteredTarget.id,
+    })
+      .then(({ profiles }) => {
+        if (!cancelled) {
+          setCredentialProfiles(profiles)
+          setCredentialProfilesTarget(selectedRegisteredTarget.id)
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setCredentialError(cause instanceof Error ? cause.message : 'Failed to load credential profiles')
+        }
+      })
+      .finally(() => { if (!cancelled) setCredentialsLoading(false) })
+    return () => { cancelled = true }
+  }, [batchMode, selectedRegisteredTarget?.id, targetKind])
+
+  // A new Scan starts with the target's credentials (its own before shared ones) in each lane
+  // they fit; the pickers show the choice and Anonymous / No comparator clears it.
+  useEffect(() => {
+    const targetId = selectedRegisteredTarget?.id
+    if (!targetId || !scanContract || credentialProfilesTarget !== targetId) return
+    if (credentialDefaultsTarget.current === targetId) return
+    credentialDefaultsTarget.current = targetId
+    const primary = preferredCredentialId(credentialProfiles, (profile) => credentialCompatibility(profile, 'primary').compatible)
+    const secondary = preferredCredentialId(
+      credentialProfiles, (profile) => credentialCompatibility(profile, 'secondary').compatible, [primary],
+    )
+    setPrimaryCredentialId(primary)
+    setSecondaryCredentialId(secondary)
+    // credentialCompatibility reads the contract and families present when the list loaded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [credentialProfiles, credentialProfilesTarget, scanContract, selectedRegisteredTarget?.id])
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault()
+    if (!canStartScan) return
+    setError(null)
+    setSlotsBusy(false)
+    const submittedTargets = batchMode ? targets : [target.trim()]
+    if (submittedTargets.length === 0 || !submittedTargets[0]) {
+      setError('Enter at least one target URL.')
+      return
+    }
+    if (submittedTargets.length > SCAN_BATCH_MAX) {
+      setError(`Batch submission supports at most ${SCAN_BATCH_MAX} unique targets.`)
+      return
+    }
+    if (contractPreviewLoading || contractPreviewError || !contractPreview) {
+      setError(contractPreviewError || 'Wait for the Scan family preview before submitting.')
+      return
+    }
+    const invalid = submittedTargets.map(validateScanTarget).find(Boolean)
+    if (invalid) {
+      setError(invalid)
+      return
+    }
+    if (confirmationNeeded && !authorized) {
+      setError('Confirm that you own or are authorized to test every target with the selected permissions and identities.')
+      return
+    }
+    if (approvalRequired && batchMode) {
+      setError('Active testing and authenticated scanning must be submitted one target at a time.')
+      return
+    }
+    if (activeTesting && !activeWorkerAvailable) {
+      setError('No scan worker is currently available. Try again after a worker becomes ready.')
+      return
+    }
+    if (networkDiscovery && !activeTesting) {
+      setError('Network discovery requires active testing and authorization confirmation.')
+      return
+    }
+    if (credentialUse && batchMode) {
+      setError('Credential profiles are exact-target-bound and cannot be shared across a batch.')
+      return
+    }
+    if (requestCollectionIds.length && (batchMode || !selectedRegisteredTarget)) {
+      setError('Request collection selections are exact-target-bound and require one registered target.')
+      return
+    }
+    if (allowStateChanging && !activeTesting) {
+      setError('State-changing collection replay requires active testing.')
+      return
+    }
+    const includedActiveFamily = scanContract?.families.find(
+      (family) => includeFamilies.includes(family.name) && family.requires_active_testing,
+    )
+    if (includedActiveFamily && !activeTesting) {
+      setError(`${includedActiveFamily.label} is an active family. Enable active testing or return it to Default.`)
+      return
+    }
+    if (resolvedFamilies.includes('bola') && selectedCredentialIds.length !== 2) {
+      setError('Explicit BOLA / IDOR coverage requires two distinct authenticated principals.')
+      return
+    }
+    const incompatibleActiveSelection = requestCollectionIds.find(
+      (selectionId) => requestCollectionMetadata[selectionId]?.replayPolicy === 'confirmed_active',
+    )
+    if (incompatibleActiveSelection && (!activeTesting || !allowStateChanging)) {
+      setError('Confirmed-active request selections require active testing and state-changing HTTP permission.')
+      return
+    }
+
+    const advanced: Record<string, number> = {}
+    for (const [key, rawValue] of Object.entries(limits)) {
+      const value = rawValue.trim()
+      if (!value) continue
+      if (!/^\d+$/.test(value)) {
+        setError(`${ADVANCED_LIMITS.find(([name]) => name === key)?.[1] || key} must be a whole number.`)
+        return
+      }
+      const parsed = Number(value)
+      const definition = scanContract?.advanced_limits.find((item) => item.name === key)
+      const minimum = definition?.minimum ?? (key === 'max_state_changing_requests' ? 0 : 1)
+      const profileCeiling = workspaceScanCeiling(key, definition?.profile_ceilings[budgetProfile])
+      if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+        setError(`${ADVANCED_LIMITS.find(([name]) => name === key)?.[1] || key} must be at least ${minimum}.`)
+        return
+      }
+      if (definition && parsed > definition.maximum) {
+        setError(`${ADVANCED_LIMITS.find(([name]) => name === key)?.[1] || key} cannot exceed ${definition.maximum.toLocaleString()}.`)
+        return
+      }
+      if (profileCeiling !== undefined && parsed > profileCeiling) {
+        setError(`${ADVANCED_LIMITS.find(([name]) => name === key)?.[1] || key} cannot exceed the ${budgetProfile} ceiling of ${profileCeiling.toLocaleString()}.`)
+        return
+      }
+      advanced[key] = parsed
+    }
+    const endpointList = customEndpoints.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+    setLoading(true)
+    try {
+      let effectiveApprovalReceipt = approvalReceipt.trim()
+      let singleTarget = submittedTargets[0]
+      if (approvalRequired && !effectiveApprovalReceipt) {
+        let approvalTargetId = selectedRegisteredTarget?.id
+        if (!approvalTargetId) {
+          const registered = await createTarget(submittedTargets[0])
+          approvalTargetId = String(registered?.id || '').trim() || undefined
+          // Registered under its www/apex twin because the typed name has no address record:
+          // scan the name that was registered and authorized, not the one that cannot resolve.
+          if (registered?.dns_fallback && !batchMode) {
+            singleTarget = targetForRegisteredDnsFallback(singleTarget, registered.url, registered.dns_fallback)
+            if (registered.notice) toast.info(registered.notice)
+          }
+        }
+        if (!approvalTargetId) {
+          throw new Error('The target could not be registered for active scanning.')
+        }
+        try {
+          if (credentialUse) {
+            // Credential use stays an explicit, bounded credential-tier receipt.
+            const createdApproval = await createTargetPolicyApprovalReceipt({
+              targetId: approvalTargetId,
+              targetUrl: singleTarget,
+              ttlMinutes: approvalTtlMinutes,
+              riskTier: 'credential',
+              environment: scanScopeEnvironment(submittedTargets[0]),
+            })
+            effectiveApprovalReceipt = createdApproval.approvalReceiptId
+          } else {
+            // Authorize once per target: the standing authorization is reused by every later
+            // active scan and Hunt of this target, so this only creates something the first time.
+            const standing = (await getTargetAuthorization(approvalTargetId))
+              ?? (await authorizeTarget(approvalTargetId, 'interactive-ui'))
+            effectiveApprovalReceipt = standing.approval_receipt_id
+          }
+        } catch {
+          throw new Error('Active scan authorization could not be established for this target. Check the target and try again.')
+        }
+        setApprovalReceipt(effectiveApprovalReceipt)
+      }
+
+      const common = {
+        target_kind: targetKind,
+        budget_profile: budgetProfile,
+        policy: {
+          preset: familyPreset,
+          active_testing: activeTesting,
+          allow_state_changing_http: allowStateChanging,
+          subdomain_discovery: subdomainDiscovery,
+          network_discovery: networkDiscovery,
+          include_families: includeFamilies,
+          exclude_families: excludeFamilies,
+        },
+        request_collections: requestCollectionIds.map((id) => ({
+          id,
+          ...(requestCollectionMetadata[id]?.replayPolicy
+            ? { replay_policy: requestCollectionMetadata[id].replayPolicy }
+            : {}),
+        })),
+        credential_profile_ids: selectedCredentialIds,
+        advanced,
+        approval_receipt_id: effectiveApprovalReceipt || undefined,
+        options: {
+          ...(endpointList.length ? { custom_endpoints: endpointList } : {}),
+          parallel: topology === 'parallel',
+          require_current_workers: false,
+        },
+      }
+
+      if (batchMode) {
+        const result = await submitBatchV2({ targets: submittedTargets, ...common })
+        if (result.queued_count === 0) throw new Error(`No scans were queued (${result.failed_count} rejected).`)
+        toast.success(`${result.queued_count} scan${result.queued_count === 1 ? '' : 's'} queued`)
+        router.push('/scans')
+      } else {
+        const result = await submitScanV2({ target: singleTarget, ...common })
+        if (result?.notice) toast.info(`Scan queued. ${result.notice}`)
+        else toast.success('Scan queued')
+        router.push(`/scans/${result.scan_id}`)
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Failed to submit scan'
+      const status = cause instanceof Error ? (cause as Error & { status?: number }).status : undefined
+      setSlotsBusy(isScanSlotRefusal(status, message))
+      setError(message)
+      toast.error(message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="max-w-5xl mx-auto space-y-6">
+      <div>
+        <h1 className="text-2xl font-semibold text-white">New Scan</h1>
+        <p className="mt-1 text-sm text-gray-400">One deterministic scan pipeline. Choose its resource budget and testing permissions.</p>
+      </div>
+
+      <form
+        noValidate
+        onSubmit={handleSubmit}
+        onChange={() => { if (error) setError(null) }}
+        className="space-y-6"
+      >
+        <Card className="p-5 space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h2 className="font-medium text-white">Target</h2>
+              <p className="text-xs text-gray-500">Web URL or hostname in your authorized scope.</p>
+            </div>
+            {/* A managed deployment that does not list batch_scan refuses POST /scans/batch. */}
+            {featureEnabled('batch_scan') && <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={batchMode} onChange={(event) => {
+                setBatchMode(event.target.checked)
+                if (event.target.checked) {
+                  setActiveTesting(false)
+                  setFamilyPreset('passive')
+                  setAuthorized(false)
+                  setNetworkDiscovery(false)
+                  setAllowStateChanging(false)
+                  setApprovalReceipt('')
+                  setPrimaryCredentialId('')
+                  setSecondaryCredentialId('')
+                  setRequestCollectionIds([])
+                }
+              }} />
+              Multiple targets
+            </label>}
+          </div>
+          {batchMode ? (<>
+            <Field label="Target URLs (one per line)" required>
+              <textarea value={batchTargets} onChange={(event) => setBatchTargets(event.target.value)} rows={6} placeholder={'https://app.example.com\nhttps://api.example.com'} className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
+            </Field>
+            {batchResolving && <p className="mt-2 text-xs text-gray-400" role="status">Reading the domain&apos;s web apps…</p>}
+            {batchNotice && <p className="mt-2 text-xs text-amber-200" role="status" data-testid="batch-notice">{batchNotice}</p>}
+            {targets.length > SCAN_BATCH_MAX && <p className="mt-2 text-xs text-red-300" role="alert">{targets.length} targets listed; a batch scans at most {SCAN_BATCH_MAX}. Remove {targets.length - SCAN_BATCH_MAX} to continue.</p>}
+          </>) : (<>
+            <Field label="Target URL or hostname" required>
+              <input value={target} onChange={(event) => {
+                setTarget(event.target.value)
+                setOtherAddresses([])
+                setApprovalReceipt('')
+                setPrimaryCredentialId('')
+                setSecondaryCredentialId('')
+              }} list="known-targets" placeholder="https://example.com" className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
+            </Field>
+            {otherAddresses.length > 0 && <p className="mt-2 text-xs text-amber-200" role="status" data-testid="other-addresses-notice">
+              This target has {otherAddresses.length + 1} web addresses and a Scan here takes one. Not in this Scan: {otherAddresses.join(', ')}
+            </p>}
+          </>)}
+          {!batchMode && (selectedPrimaryProfile || selectedSecondaryProfile) && (
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-blue-900/60 bg-blue-950/20 px-3 py-2 text-sm text-gray-300" data-testid="credential-defaults">
+              <span>
+                Scans as {selectedPrimaryProfile ? <strong className="font-medium text-white">{selectedPrimaryProfile.name}</strong> : 'anonymous'}
+                {selectedSecondaryProfile && <> with <strong className="font-medium text-white">{selectedSecondaryProfile.name}</strong> as the second user</>}
+                <span className="block text-xs text-gray-500">This target&apos;s credentials are selected for new Scans.</span>
+              </span>
+              <span className="flex gap-2">
+                <Button type="button" size="sm" variant="ghost" onClick={() => {
+                  setShowAdvanced(true)
+                  requestAnimationFrame(() => document.getElementById('advanced-scan-options')?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+                }}>Change</Button>
+                <Button type="button" size="sm" variant="secondary" onClick={() => {
+                  setPrimaryCredentialId('')
+                  setSecondaryCredentialId('')
+                  setApprovalReceipt('')
+                }}>Scan anonymously</Button>
+              </span>
+            </div>
+          )}
+          <datalist id="known-targets">{existingTargets.map((item) => <option key={item.id} value={item.url} />)}</datalist>
+          <label className="block text-sm text-gray-300">
+            Target kind
+            <select value={targetKind} onChange={(event) => { setTargetKind(event.target.value as 'web' | 'api'); setApprovalReceipt('') }} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
+              <option value="web">Web application</option>
+              <option value="api">API</option>
+            </select>
+          </label>
+        </Card>
+
+        <Card className="p-5">
+          <h2 className="font-medium text-white">Budget</h2>
+          <p className="mt-1 text-xs text-gray-500">Budgets are hard ceilings, not separate scan modes.</p>
+          <div className="mt-4 grid gap-3 md:grid-cols-3" role="group" aria-label="Scan budget">
+            {BUDGETS.filter(budget => budget.value !== 'deep' || featureEnabled('deep_scan')).map((budget) => {
+              const serverLimits = scanContract?.budget_profiles[budget.value]
+              return (
+                <button key={budget.value} type="button" aria-pressed={budgetProfile === budget.value} onClick={() => { setBudgetProfile(budget.value); setError(null) }} className={`rounded-lg border p-4 text-left transition-colors ${budgetProfile === budget.value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-950 hover:border-gray-600'}`}>
+                  <span className="font-medium text-white">{budget.label}</span>
+                  <span className="mt-1 block text-sm text-gray-400">{budget.description}</span>
+                  <span className="mt-3 block text-xs text-gray-500">
+                    {serverLimits
+                      ? `${Math.round(workspaceScanCeiling('max_duration_seconds', serverLimits.max_duration_seconds)! / 60)} min · ${formatLimit(workspaceScanCeiling('max_http_requests', serverLimits.max_http_requests)!)} requests`
+                      : budget.limits}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+          {scanContractError && <p className="mt-3 text-xs text-amber-300">{scanContractError}. Server validation still applies.</p>}
+        </Card>
+
+        <Card className="p-5 space-y-4">
+          <div>
+            <h2 className="font-medium text-white">Testing policy</h2>
+            <p className="mt-1 text-xs text-gray-500">
+              {scanContract?.passive_coverage.description || 'Loading the server-defined passive coverage manifest…'}
+            </p>
+          </div>
+          <label className="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-950 p-4">
+            <input className="mt-1" type="checkbox" disabled={batchMode} checked={activeTesting} onChange={(event) => handleActiveTestingChange(event.target.checked)} />
+            <span>
+              <span className="block text-sm font-medium text-white">Allow active testing</span>
+              <span className="block text-xs text-gray-500">{batchMode ? 'Active testing is available for one target at a time.' : 'Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.'}</span>
+            </span>
+          </label>
+          {activeTesting && standingCoversScan && (
+            <p data-testid="standing-authorization" className="rounded-lg border border-emerald-800/60 bg-emerald-950/20 p-4 text-sm text-emerald-100">
+              Authorized for active testing{authorizedByPhrase(standingAuthorization?.approved_by)}: this Scan uses the target&apos;s standing authorization. You can revoke it from the target menu.
+            </p>
+          )}
+          {confirmationNeeded && (
+            <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-4 text-sm text-amber-100">
+              <input className="mt-1" type="checkbox" checked={authorized} onChange={(event) => setAuthorized(event.target.checked)} />
+              <span>I own or have explicit authorization to test every submitted target with the selected permissions and identities.</span>
+            </label>
+          )}
+          <div className="grid gap-3 md:grid-cols-2">
+            {featureEnabled('scan_discovery') && <label className="flex items-center gap-3 text-sm text-gray-300"><input type="checkbox" checked={subdomainDiscovery} onChange={(event) => setSubdomainDiscovery(event.target.checked)} /><span>Discover subdomains<span className="block text-xs text-gray-500">Found names are listed in the report and added as targets; this scan does not test them.</span></span></label>}
+            {featureEnabled('network_testing') && <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} /><span>Discover network services{!activeTesting && <span data-testid="network-discovery-needs-active" className="block text-xs text-gray-500">Needs active testing: turn it on above to use this.</span>}</span></label>}
+            <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={allowStateChanging} onChange={(event) => { setAllowStateChanging(event.target.checked); if (!event.target.checked) removeConfirmedActiveSelections() }} /><span>Allow explicitly selected state-changing HTTP requests <span className="text-gray-500">(includes default-login attempts, which can lock accounts, and exploit templates that send attack input)</span>{allowStateChanging && !resolvedFamilies.includes('nuclei_active') && <span className="mt-1 block text-xs text-amber-300/90" data-testid="state-changing-templates-note">Default-login attempts and exploit templates are active templates, which this Scan does not run: choose Thorough or Deep, or Custom with the active templates.</span>}</span></label>
+          </div>
+          {scanContract && (
+            <div className="rounded-lg border border-gray-800 bg-gray-950 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-medium text-gray-200">Coverage families</h3>
+                  <p className="mt-1 text-xs text-gray-500">Choose which kinds of checks this Scan runs. The server records the exact set when the Scan is queued.</p>
+                </div>
+              </div>
+              <div className="mt-3 grid gap-2 md:grid-cols-3">
+                {([
+                  ['passive', 'Passive', 'Recon, reviewed passive templates and verified exposure checks'],
+                  ['standard_active', 'Standard active', 'Passive coverage plus XSS and SQLi; on thorough and deep also the active templates'],
+                  ['custom', 'Custom', 'Choose an exact family set'],
+                ] as const).map(([value, label, description]) => (
+                  <label key={value} className={`rounded-sm border p-3 ${familyPreset === value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800'}`}>
+                    <span className="flex items-start gap-2">
+                      <input type="radio" name="family-preset" value={value} checked={familyPreset === value} disabled={value === 'standard_active' && !activeTesting} onChange={() => setFamilyPreset(value)} />
+                      <span><span className="block text-sm font-medium text-gray-200">{label}</span><span className="mt-1 block text-xs text-gray-500">{description}</span></span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {familyPreset === 'custom' && (
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  {scanContract.families.map((family) => (
+                    <label key={family.name} className={`flex items-start gap-3 rounded-sm border border-gray-800 p-3 text-xs ${family.requires_active_testing && !activeTesting ? 'text-gray-600' : 'text-gray-300'}`}>
+                      <input
+                        type="checkbox"
+                        disabled={family.requires_active_testing && !activeTesting}
+                        checked={customFamilies.includes(family.name)}
+                        onChange={(event) => setCustomFamilies((current) => event.target.checked ? [...current, family.name] : current.filter((name) => name !== family.name))}
+                      />
+                      <span><span className="block text-sm font-medium">{family.label}</span><span className="mt-1 block text-gray-500">{family.description}</span></span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <div className="mt-3 rounded-sm border border-gray-800 bg-black/20 p-3 text-xs text-gray-400">
+                <span className="font-medium text-gray-200">Checks this Scan runs:</span> {resolvedFamilies.length ? resolvedFamilies.map((name) => scanContract.families.find((family) => family.name === name)?.label || name).join(', ') : 'none'}
+                {contractPreview && Object.keys(contractPreview.minimum_family_quotas).length > 0 && (
+                  <span className="mt-1 block" data-testid="scan-minimum-attempts">Minimum attempts: {Object.entries(contractPreview.minimum_family_quotas).map(([family, quota]) => `${checkFamilyLabel(family)} ${quota}`).join(' · ')}</span>
+                )}
+                {contractPreviewError && <span className="mt-1 block text-amber-300">{contractPreviewError}</span>}
+              </div>
+            </div>
+          )}
+          {activeTesting && !activeWorkerAvailable && (
+            <div className="rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-200" role="alert">
+              <p className="font-medium">No scan worker is ready yet.</p>
+              <p className="mt-1 text-xs text-amber-100/80">
+                {workerReadinessError
+                  ? workerReadinessError
+                  : 'The scan can start as soon as one compatible worker is available.'}
+                {workerStats?.fleet?.enabled && <> <Link href="/fleet" className="font-medium underline">Open Fleet</Link>.</>}
+              </p>
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-5">
+          <h2 className="font-medium text-white">Where the Scan runs</h2>
+          <p className="mt-1 text-xs text-gray-500">Run the Scan on one worker or split it across several. This does not change its budget.</p>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <label className={`rounded-lg border p-4 ${topology === 'single' ? 'border-emerald-600 bg-emerald-950/20' : 'border-gray-800'}`}>
+              <span className="flex items-start gap-3">
+                <input type="radio" name="scan-topology" value="single" checked={topology === 'single'} onChange={() => setTopology('single')} />
+                <span><span className="block text-sm font-medium text-white">One worker — recommended</span><span className="mt-1 block text-xs text-gray-500">The whole Scan runs in order on one worker, which gives the most consistent results.</span></span>
+              </span>
+            </label>
+            {(featureEnabled('parallel_scan') || featureEnabled('worker_admin')) && <label className={`rounded-lg border p-4 ${topology === 'parallel' ? 'border-amber-600 bg-amber-950/20' : 'border-gray-800'}`}>
+              <span className="flex items-start gap-3">
+                <input type="radio" name="scan-topology" value="parallel" checked={topology === 'parallel'} onChange={() => setTopology('parallel')} />
+                <span><span className="block text-sm font-medium text-white">Several workers — experimental</span><span className="mt-1 block text-xs text-gray-500">Splits the Scan across workers to finish sooner; compare its results with a one-worker Scan.</span></span>
+              </span>
+            </label>}
+          </div>
+          <div className="mt-3 rounded-sm border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400">
+            <p>Placement preview: {workerStats ? placementPreviewLabel(topology, currentWorkerCount) : 'checking compatible current workers…'}.</p>
+            <p className="mt-1">Workers ready for this Scan: <strong className="font-medium text-gray-300">{workerStats ? currentWorkerCount : '—'}</strong>{workerStats && (staleWorkers > 0 || pendingWorkers > 0) && <> · {staleWorkers} on an older version · {pendingWorkers} still starting</>}</p>
+            <details className="mt-2" data-testid="scan-technical-details">
+              <summary className="cursor-pointer text-gray-500 hover:text-gray-300">Technical details</summary>
+              <p className="mt-1 break-all">Expected build: <span className="font-mono text-gray-300">{workerStats?.expected_build_fingerprint || 'unavailable'}</span></p>
+              <p className="mt-1 break-all">Reported running builds: <span className="font-mono text-gray-300">{reportedFingerprints.length ? reportedFingerprints.join(', ') : 'none reported'}</span></p>
+              {scanContract && <p className="mt-1 break-all">Plan format: <span className="font-mono text-gray-300">{scanContract.action_plan_schema}</span></p>}
+              <p className="mt-1 break-all">Check families: <span className="font-mono text-gray-300">{resolvedFamilies.length ? resolvedFamilies.join(', ') : 'none'}</span></p>
+            </details>
+          </div>
+        </Card>
+
+        <Card className="overflow-hidden">
+          <button type="button" aria-expanded={showAdvanced} aria-controls="advanced-scan-options" onClick={() => setShowAdvanced((value) => !value)} className="flex w-full items-center justify-between p-5 text-left">
+            <span><span className="block font-medium text-white">Advanced</span><span className="block text-xs text-gray-500">Authentication, known endpoints, and custom ceilings.</span></span>
+            <span className="text-gray-500">{showAdvanced ? '−' : '+'}</span>
+          </button>
+          {showAdvanced && (
+            <div id="advanced-scan-options" className="space-y-5 border-t border-gray-800 p-5">
+              <div>
+                <h3 className="text-sm font-medium text-gray-300">Authenticated principals</h3>
+                <p className="mt-1 text-xs text-gray-500">Select encrypted profiles this target owns or that are shared with it. Add a distinct second user to enable cross-user BOLA/IDOR comparisons.</p>
+              </div>
+              {batchMode ? (
+                <p className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-500">Credentials are unavailable for multi-target batches.</p>
+              ) : !selectedRegisteredTarget ? (
+                <p className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-500">Choose an existing target URL exactly as registered before attaching credentials.</p>
+              ) : credentialsLoading ? (
+                <p className="text-xs text-gray-500">Loading credential profiles…</p>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Field label="Primary identity">
+                    <Combobox value={primaryCredentialId} options={slotOptions('primary')} noneLabel="Anonymous"
+                      searchPlaceholder="Search credentials…" emptyMessage="No credentials for this target"
+                      onChange={(value) => { setPrimaryCredentialId(value); setApprovalReceipt('') }} />
+                  </Field>
+                  <Field label="Secondary identity">
+                    <Combobox value={secondaryCredentialId} options={slotOptions('secondary')} noneLabel="No comparator"
+                      searchPlaceholder="Search credentials…" emptyMessage="No credentials for this target"
+                      onChange={(value) => { setSecondaryCredentialId(value); setApprovalReceipt('') }} />
+                  </Field>
+                </div>
+              )}
+              {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
+              <p className="text-xs text-gray-500">The Scan request stores only a reference to each selected credential, never the secret. Right before it runs, the worker checks the target is still authorized and unlocks the credential. <Link href="/credentials" className="text-blue-300 hover:text-blue-200">Manage credentials</Link></p>
+              <RequestCollectionPicker
+                targetId={batchMode ? undefined : selectedRegisteredTarget?.id}
+                targetKind={targetKind}
+                selectedIds={requestCollectionIds}
+                onChange={setRequestCollectionIds}
+                onMetadataChange={setRequestCollectionMetadata}
+                allowConfirmedActive={activeTesting && allowStateChanging}
+                disabled={batchMode}
+              />
+              <label className="block text-sm text-gray-300">Known endpoints (one per line)<textarea value={customEndpoints} onChange={(event) => setCustomEndpoints(event.target.value)} rows={4} placeholder={'GET /api/users\nPOST /api/login username,password\nPOST /login form:username,password'} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /><span className="mt-1 block text-xs text-gray-500">After the path, list field names (<code>username,password</code>) or <code>name=value</code> pairs: a JSON body on POST, PUT and PATCH, a query on GET. For an HTML form, which posts form-encoded, prefix the fields with <code>form:</code> (<code>form:username,password</code> or <code>form:a=1&amp;b=2</code>); <code>json:{'{…}'}</code> sets a JSON body exactly. A line the server cannot read is refused, not stored as a path.</span></label>
+              <div>
+                <h3 className="text-sm font-medium text-gray-300">Custom budget ceilings</h3>
+                <p className="mt-1 text-xs text-gray-500">Whole numbers only. Zero is an explicit deny ceiling where the server contract permits it.</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  {ADVANCED_LIMITS.filter(([key]) => featureEnabled('extended_scan_limits') || ['max_duration_seconds', 'max_http_requests', 'max_workers'].includes(key)).map(([key, label]) => {
+                    const definition = scanContract?.advanced_limits.find((item) => item.name === key)
+                    const minimum = definition?.minimum ?? (key === 'max_state_changing_requests' ? 0 : 1)
+                    const maximum = workspaceScanCeiling(key, definition?.profile_ceilings[budgetProfile] ?? definition?.maximum)
+                    return (
+                      <label key={key} className="text-xs text-gray-400">
+                        {label}
+                        <input type="number" min={minimum} max={maximum} step="1" value={limits[key] || ''} onChange={(event) => setLimits((current) => ({ ...current, [key]: event.target.value }))} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" />
+                        {maximum !== undefined && <span className="mt-1 block text-[11px] text-gray-600">{budgetProfile} ceiling: {formatLimit(maximum)}{minimum === 0 ? ' · zero allowed' : ''}</span>}
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </Card>
+
+        {error && <div ref={errorRef} tabIndex={-1} role="alert" data-testid="scan-submit-error" className="scroll-mb-24 rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-red-500">
+          <p>{error}</p>
+          {slotsBusy && <p className="mt-1 text-red-200">Scans already running or queued hold the available slots. This Scan was not queued; try again when one finishes (<Link href="/scans" className="underline hover:text-white">Scans page</Link>).</p>}
+        </div>}
+        <div className="flex items-center justify-end gap-3">
+          <Button type="button" variant="secondary" onClick={() => router.back()}>Cancel</Button>
+          {canStartScan ? <Button
+            type="submit"
+            loading={loading}
+            disabled={contractPreviewLoading || !contractPreview || (confirmationNeeded && !authorized) || (activeTesting && !activeWorkerAvailable)}
+          >
+            Run Scan
+          </Button> : <p className="text-sm text-gray-400" data-testid="scan-start-refused">{startScanRefusal || 'Starting scans is not part of your role.'}</p>}
+        </div>
+      </form>
+    </div>
+  )
+}

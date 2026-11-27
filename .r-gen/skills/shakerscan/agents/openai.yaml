@@ -1,0 +1,4 @@
+interface:
+  display_name: "ShakerScan"
+  short_description: "Operate the ShakerScan security platform"
+  default_prompt: "Use $shakerscan to start the scanner and run the appropriate authorized security workflow."

@@ -1,0 +1,359 @@
+"""Bounded, target-scoped knowledge pages for Hunt and legacy agent reads.
+
+Cursors are positions, not authority. Every page reapplies the target and filters;
+no query identifier or SQL fragment is accepted from the caller.
+"""
+
+from __future__ import annotations
+
+import base64
+from datetime import datetime
+import hashlib
+import json
+from typing import Any, Mapping
+import uuid
+
+from fastapi import HTTPException
+
+from .endpoint_grouping import group_endpoint_rows
+from .graph_projection import project_graph_node
+from .knowledge_scope import (  # noqa: F401 - re-exported
+    COUNTED_KINDS, DEVICE_KINDS, MAX_COUNT, QUERIES, QuerySpec, _scope_where, knowledge_counts,
+)
+
+
+MAX_QUERY_ROWS = 500
+
+
+class KnowledgeQueryError(ValueError):
+    pass
+
+
+
+
+def _encode(value: Mapping[str, Any]) -> str:
+    return base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
+
+
+def _decode(value: str) -> dict[str, Any]:
+    try:
+        if not isinstance(value, str) or len(value) > 2048:
+            raise ValueError("invalid length")
+        result = json.loads(base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True))
+        if not isinstance(result, dict):
+            raise ValueError("not an object")
+        return result
+    except (ValueError, TypeError, UnicodeError) as exc:
+        raise KnowledgeQueryError("Invalid knowledge cursor") from exc
+
+
+def _filter_values(spec: QuerySpec, supplied: Mapping[str, Any]) -> dict[str, Any]:
+    unknown = set(supplied) - {*spec.filters, "id"}
+    if unknown:
+        raise KnowledgeQueryError("Unsupported knowledge filters: " + ", ".join(sorted(unknown)))
+    values: dict[str, Any] = {}
+    for key, raw in supplied.items():
+        if key == "verified_only":
+            if not isinstance(raw, bool):
+                raise KnowledgeQueryError("verified_only must be a boolean")
+            values[key] = raw
+        elif raw is not None:
+            if not isinstance(raw, str) or len(raw) > 500:
+                raise KnowledgeQueryError(f"{key} must be a bounded string")
+            value = raw.strip()
+            if key not in {"id", "path_contains", "text_contains"}:
+                value = value.upper() if key == "method" else value.lower()
+            if value:
+                values[key] = value
+    return values
+
+
+#: Bounded projection, not a count of the entire inventory. Filters precede this
+#: limit. Continuation binds the selected rows' digest so changes require restart
+#: instead of making an offset silently skip/repeat groups.
+MAX_GROUPING_ROWS = 20_000
+
+
+async def _endpoint_group_page(
+    conn: Any, *, target_id: Any, limit: int, cursor: str | None, scope: str,
+    values: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Page a deterministic, filtered projection; raw endpoint reads are unchanged."""
+    fingerprint = hashlib.sha256(json.dumps(dict(values), sort_keys=True).encode()).hexdigest()
+    offset = 0
+    position: dict[str, Any] = {}
+    if cursor is not None:
+        position = _decode(cursor)
+        offset = position.get("offset")
+        if (type(position.get("v")) is not int or position["v"] != 2
+                or position.get("scope") != scope or position.get("filter") != fingerprint
+                or type(offset) is not int or not 0 <= offset <= MAX_GROUPING_ROWS
+                or not isinstance(position.get("snapshot"), str)):
+            raise KnowledgeQueryError("Cursor does not match this knowledge query")
+    params: list[Any] = [target_id]
+    where = ["target_id=$1", "COALESCE(test_status,'')<>'gone'"]
+    for key, value in sorted(values.items()):
+        if key == "id":
+            try:
+                value = uuid.UUID(value)
+            except ValueError as exc:
+                raise KnowledgeQueryError("id must be a UUID") from exc
+        params.append(value)
+        placeholder = f"${len(params)}"
+        where.append(f"path ILIKE '%'||{placeholder}||'%'" if key == "path_contains"
+                     else f"{key}={placeholder}")
+    rows = [dict(row) for row in await conn.fetch(
+        "SELECT id, method, path, auth_state, test_status, last_verdict, param_shape, "
+        "param_location, content_type, last_http_status, priority_score FROM target_endpoints "
+        f"WHERE {' AND '.join(where)} ORDER BY id ASC LIMIT {MAX_GROUPING_ROWS + 1}",
+        *params,
+    )]
+    snapshot = hashlib.sha256(json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode()).hexdigest()
+    if cursor is not None and position["snapshot"] != snapshot:
+        raise KnowledgeQueryError("Grouped inventory changed; restart without a cursor")
+    truncated = len(rows) > MAX_GROUPING_ROWS
+    groups = group_endpoint_rows(rows[:MAX_GROUPING_ROWS])
+    if offset > len(groups):
+        raise KnowledgeQueryError("Cursor does not match this knowledge query")
+    page = groups[offset:offset + limit]
+    has_more = len(groups) > offset + limit
+    return {
+        "ok": True, "kind": "endpoint_groups", "supported": True,
+        "count": len(page), "rows": [g.as_row() for g in page],
+        "has_more": has_more,
+        "next_cursor": _encode({"v": 2, "scope": scope, "filter": fingerprint,
+                                "snapshot": snapshot, "offset": offset + limit})
+        if has_more else None,
+        "group_count": len(groups),
+        "sampled_requests": sum(g.sample_count for g in groups),
+        "inventory_rows_read": min(len(rows), MAX_GROUPING_ROWS),
+        "inventory_truncated": truncated,
+        "snapshot_id": snapshot,
+        "grouping_scope": "filtered_inventory",
+    }
+
+
+async def query_knowledge_page(
+    conn: Any, *, target_id: Any, kind: str, device: bool = False,
+    filters: Mapping[str, Any] | None = None, limit: int = 100,
+    cursor: str | None = None, current_hunt_id: Any = None,
+) -> dict[str, Any]:
+    kind = "receipts" if kind == "tool_receipts" else kind
+    if kind == "service_intelligence":
+        try:
+            from exposure.service_knowledge import query_service_knowledge
+        except ModuleNotFoundError:
+            from ..exposure.service_knowledge import query_service_knowledge
+        try:
+            return await query_service_knowledge(conn, target_id=target_id, device=device, filters=filters, limit=limit, cursor=cursor)
+        except ValueError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "attempts":
+        from .attempts import AttemptQueryError, target_attempts
+        if cursor is not None:
+            raise KnowledgeQueryError("attempts is one bounded report; it has no cursor")
+        try:
+            return await target_attempts(conn, target_id, filters=filters, limit=limit,
+                                         current_hunt_id=current_hunt_id)
+        except AttemptQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "coverage_gaps":
+        from .coverage_gaps import CoverageGapQueryError, target_coverage_gaps
+        if cursor is not None:
+            raise KnowledgeQueryError("coverage_gaps is one bounded report; it has no cursor")
+        try:
+            return await target_coverage_gaps(conn, target_id, filters=filters, limit=limit)
+        except CoverageGapQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "traffic":
+        from .traffic_search import TrafficQueryError, target_traffic
+        if cursor is not None:
+            raise KnowledgeQueryError("traffic is one bounded page; narrow the filters instead of paging")
+        try:
+            return await target_traffic(conn, target_id, filters=filters, limit=limit,
+                                        current_hunt_id=current_hunt_id)
+        except TrafficQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "changes":
+        from .knowledge_changes import ChangeQueryError, target_changes
+        supplied = dict(filters or {})
+        if set(supplied) - {"since"}:
+            raise KnowledgeQueryError("Unsupported knowledge filters: " + ", ".join(sorted(set(supplied) - {"since"})))
+        if cursor is not None:
+            raise KnowledgeQueryError("changes is one bounded report; it has no cursor")
+        since = supplied.get("since") or "last_hunt"
+        if not isinstance(since, str) or len(since) > 100:
+            raise KnowledgeQueryError("since must be a bounded string")
+        try:
+            report = await target_changes(conn, target_id, device=device, since=since,
+                                          current_hunt_id=current_hunt_id, limit=min(int(limit), 25))
+        except ChangeQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
+        return {**report, "supported": True, "count": 0, "rows": [], "has_more": False, "next_cursor": None}
+    if kind == "continue":
+        from .knowledge_changes import ChangeQueryError
+        from .knowledge_continue import CursorError, continue_report
+        supplied = dict(filters or {})
+        if set(supplied) - {"since", "after"}:
+            raise KnowledgeQueryError("Unsupported knowledge filters: "
+                                      + ", ".join(sorted(set(supplied) - {"since", "after"})))
+        after = supplied.get("after")
+        if after is not None and (not isinstance(after, str) or len(after) > 2048):
+            raise KnowledgeQueryError("after must be the next_after cursor of a previous page")
+        if cursor is not None:
+            raise KnowledgeQueryError("continue is one bounded report; it has no cursor")
+        since = supplied.get("since") or "release"
+        if not isinstance(since, str) or len(since) > 100:
+            raise KnowledgeQueryError("since must be a bounded string")
+        run = None
+        if current_hunt_id is not None:
+            found = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", uuid.UUID(str(current_hunt_id)))
+            run = dict(found) if found else None
+        try:
+            report = await continue_report(conn, target_id, device=device, audience="hunt", since=since, run=run,
+                                           limit=min(int(limit), 100), after=after,
+                                           reader=f"hunt:{current_hunt_id}" if current_hunt_id else None)
+        except (ChangeQueryError, CursorError) as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
+        return {**report, "supported": True, "count": 0, "rows": [], "has_more": False, "next_cursor": None}
+    if kind == "negative_results":
+        from .interpretations import negative_results
+        supplied = dict(filters or {})
+        unknown = set(supplied) - {"state", "source"}
+        if unknown:
+            raise KnowledgeQueryError("Unsupported knowledge filters: " + ", ".join(sorted(unknown)))
+        if cursor is not None:
+            raise KnowledgeQueryError("negative_results is one bounded page; narrow it with filter.state or filter.source")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_ROWS:
+            raise KnowledgeQueryError(f"limit must be between 1 and {MAX_QUERY_ROWS}")
+        for key, value in supplied.items():
+            if value is not None and (not isinstance(value, str) or len(value) > 80):
+                raise KnowledgeQueryError(f"{key} must be a bounded string")
+        try:
+            return await negative_results(conn, target_id, device=device, audience="hunt",
+                                          state=supplied.get("state"), source=supplied.get("source"),
+                                          limit=min(limit, 50))
+        except HTTPException as exc:
+            detail = exc.detail.get("message") if isinstance(exc.detail, dict) else exc.detail
+            raise KnowledgeQueryError(str(detail)) from exc
+    if kind == "endpoint_groups":
+        values = _filter_values(QUERIES["endpoints"], filters or {})
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_ROWS:
+            raise KnowledgeQueryError(f"limit must be between 1 and {MAX_QUERY_ROWS}")
+        if device:
+            return {"ok": True, "kind": kind, "supported": False, "count": 0, "rows": [],
+                    "has_more": False, "next_cursor": None}
+        return await _endpoint_group_page(
+            conn, target_id=target_id, limit=limit, cursor=cursor,
+            scope=f"web:{target_id}:endpoint_groups", values=values,
+        )
+    if kind not in QUERIES:
+        raise KnowledgeQueryError("Unsupported knowledge kind")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_ROWS:
+        raise KnowledgeQueryError(f"limit must be between 1 and {MAX_QUERY_ROWS}")
+    # A device has no web endpoint/principal graph. Explicitly report unsupported,
+    # rather than pretending the requested surface was examined and empty.
+    supported = DEVICE_KINDS
+    if (device and kind not in supported) or (not device and kind == "services"):
+        return {"ok": True, "kind": kind, "supported": False, "count": 0, "rows": [], "has_more": False, "next_cursor": None}
+    spec = QUERIES[kind]
+    values = _filter_values(spec, filters or {})
+    scope = f"{'device' if device else 'web'}:{target_id}:{kind}"
+    fingerprint = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+    params: list[Any] = []
+
+    def bind(value: Any) -> str:
+        params.append(value)
+        return f"${len(params)}"
+
+    where = _scope_where(kind, device, lambda name: bind(str(target_id) if name == "target_text" else target_id))
+    for key, value in values.items():
+        if key == "id":
+            try:
+                where.append(f"id={bind(uuid.UUID(value))}")
+            except ValueError as exc:
+                raise KnowledgeQueryError("id must be a UUID") from exc
+        elif key == "hunt_id":
+            try:
+                hunt_id = str(uuid.UUID(value))
+            except ValueError as exc:
+                raise KnowledgeQueryError("hunt_id must be a UUID") from exc
+            if kind == "interpretations":
+                where.append(f"written_by={bind('hunt:' + hunt_id)}")
+            else:
+                where.append(f"attributes->>'hunt_id'={bind(hunt_id)}")
+        elif key == "text_contains":
+            placeholder = bind(value.lower())
+            # Retracted and superseded text is withheld from Hunts, so it never matches a search either.
+            # Nor does knowledge text an operator withheld (target_skill.knowledge_withheld).
+            where.append(f"(status NOT IN ('retracted','superseded') AND (strpos(lower(title),{placeholder})>0 "
+                         f"OR strpos(lower(body),{placeholder})>0) AND NOT (written_by='system:knowledge-import' "
+                         "AND EXISTS (SELECT 1 FROM targets withheld WHERE withheld.id=target_interpretations.target_id "
+                         "AND CASE WHEN jsonb_typeof(withheld.metadata_json->'target_skill'->'knowledge_withheld'->'digests')='object' "
+                         "THEN jsonb_typeof(withheld.metadata_json->'target_skill'->'knowledge_withheld'->'digests' "
+                         "-> (target_interpretations.subject->>'body_sha256'))='object' "
+                         "ELSE withheld.metadata_json->'target_skill'->'knowledge_withheld'->>'body_sha256' "
+                         "= target_interpretations.subject->>'body_sha256' END)))")
+        elif key == "path_contains":
+            where.append(f"path ILIKE '%'||{bind(value)}||'%'")
+        elif key == "verified_only":
+            if value:
+                where.append("last_verification_verdict='exploited'")
+        else:
+            where.append(f"{key}={bind(value)}")
+    timestamp = f"COALESCE({spec.timestamp}, TIMESTAMPTZ '1970-01-01 00:00:00+00')"
+    order = [timestamp, "id"]
+    if kind == "endpoints":
+        order.insert(0, "priority_score")
+    if cursor:
+        position = _decode(cursor)
+        try:
+            if position["v"] != 1 or position["scope"] != scope or position["filter"] != fingerprint:
+                raise ValueError("cursor scope mismatch")
+            seen = datetime.fromisoformat(position["time"])
+            if seen.tzinfo is None:
+                raise ValueError("timezone required")
+            keys: list[Any] = [seen, uuid.UUID(position["id"])]
+            if kind == "endpoints":
+                priority = position["priority"]
+                if isinstance(priority, bool) or not isinstance(priority, int) or not -(2**31) <= priority < 2**31:
+                    raise ValueError("invalid priority")
+                keys.insert(0, priority)
+        except (KeyError, ValueError, TypeError) as exc:
+            raise KnowledgeQueryError("Cursor does not match this knowledge query") from exc
+        where.append(f"({', '.join(order)}) < ({', '.join(bind(key) for key in keys)})")
+    rows = list(await conn.fetch(
+        f"SELECT id, {spec.columns}, {timestamp} AS page_timestamp FROM {spec.table} "
+        f"WHERE {' AND '.join(where)} ORDER BY {', '.join(key + ' DESC' for key in order)} "
+        f"LIMIT {bind(limit + 1)}", *params,
+    ))
+    has_more = len(rows) > limit
+    rows = [dict(row) for row in rows[:limit]]
+    next_cursor = None
+    if has_more:
+        last = rows[-1]
+        stamp = last["page_timestamp"]
+        next_cursor = _encode({
+            "v": 1, "scope": scope, "filter": fingerprint,
+            "time": stamp.isoformat() if isinstance(stamp, datetime) else str(stamp),
+            "id": str(last["id"]), "priority": last.get("priority_score"),
+        })
+    for row in rows:
+        row.pop("page_timestamp", None)
+    if kind == "graph_nodes":
+        rows = [project_graph_node(row) for row in rows]
+    if kind == "hypotheses":
+        from .hunt_hypotheses import page_row
+        rows = [page_row(row) for row in rows]
+    if kind == "receipts":
+        from .receipt_rows import project_receipt_rows
+        rows = await project_receipt_rows(conn, rows)
+    if kind == "interpretations":
+        from .interpretations import KNOWLEDGE_IMPORT_WRITER, public_interpretation, target_withheld_digests
+        mirrored = [row["target_id"] for row in rows if row.get("written_by") == KNOWLEDGE_IMPORT_WRITER]
+        withheld = await target_withheld_digests(conn, mirrored) if mirrored else {}
+        rows = [public_interpretation(row, audience="hunt", withheld=withheld.get(str(row["target_id"]), frozenset()))
+                for row in rows]
+    return {"ok": True, "kind": kind, "supported": True, "count": len(rows), "rows": rows, "has_more": has_more, "next_cursor": next_cursor}

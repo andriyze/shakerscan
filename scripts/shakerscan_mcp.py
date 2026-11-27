@@ -1768,8 +1768,8 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
             "description": (
                 "Explicit permissions for this Hunt. Passive is the default. Name the authority you "
                 "want directly: allow_state_changing_http, network_discovery, allow_oob_interactions, "
-                "allow_identity_headers and allow_direct_origin each enable active_testing on their "
-                "own. All of them, and credential work, need authorization_confirmed=true and a target "
+                "allow_account_creation, allow_identity_headers and "
+                "allow_direct_origin each enable active_testing. All of them, and credential work, need authorization_confirmed=true and a target "
                 "authorized once with POST /targets/{target_id}/authorization; that standing "
                 "authorization is resolved automatically, and a Hunt asked to run without it is "
                 "refused with a 422 that names this. Read policy_adjustments on the response: it "

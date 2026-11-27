@@ -1,0 +1,31 @@
+# Release and supply-chain controls. Changes to main are gated by the required checks in
+# .github/rulesets/main.json (commit-policy, python-suite, smoke).
+/.github/workflows/ @andriyze
+/.github/rulesets/ @andriyze
+/.github/dependabot.yml @andriyze
+/scanner/Dockerfile @andriyze
+/scanner/entrypoint.sh @andriyze
+/scanner/release_identity.py @andriyze
+/scripts/publish-images.sh @andriyze
+/scripts/retry-command.sh @andriyze
+/install/STABLE_VERSION @andriyze
+/VERSION @andriyze
+/docs/releases/ @andriyze
+
+# V2 trusted execution boundary. Changes here alter capability authority,
+# target traffic, budget enforcement, evidence truth, or fleet behavior.
+/api/capabilities/ @andriyze
+/api/runtime/ @andriyze
+/api/scan/ @andriyze
+/api/hunt/ @andriyze
+/api/agent_tools.py @andriyze
+/api/api.py @andriyze
+/api/worker.py @andriyze
+/api/broker_worker.py @andriyze
+/api/parallel_scan.py @andriyze
+/scanner/scanner.py @andriyze
+/scanner/scanner_tools/request_meter.py @andriyze
+/scanner/scanner_tools/request_replay.py @andriyze
+/db/ @andriyze
+/tests/test_scan_*.py @andriyze
+/tests/test_broker_*.py @andriyze

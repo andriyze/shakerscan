@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in ShakerScan does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please do **not** include credentials, tokens, or data from systems
+        you are not authorized to share. Security vulnerabilities go through
+        [SECURITY.md](https://github.com/andriyze/shakerscan/blob/main/SECURITY.md) instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `shakerscan status`, or the VERSION file.
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Deployment mode
+      options: [localhost, "--lan", "--remote / Tailscale", fleet, client only]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Commands, API calls, or UI steps. Redact target hostnames if needed.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: For example `shakerscan api GET /scans/<id>/actions` or `./scanner.sh logs`. Redact secrets.
+      render: text

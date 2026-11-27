@@ -52,6 +52,7 @@ class HuntStartV2PolicyRequest(BaseModel):
     allow_state_changing_http: bool = False
     network_discovery: bool = False
     allow_oob_interactions: bool = False
+    allow_account_creation: bool = False
     allow_identity_headers: bool = False
     allow_direct_origin: bool = False
     authorization_confirmed: bool = False
@@ -222,7 +223,7 @@ _target_scope_refusal_resolver: Callable[[str], Awaitable[Mapping[str, Any] | No
 
 PRIVILEGED_POLICY_FLAGS = (
     "active_testing", "allow_state_changing_http", "network_discovery",
-    "allow_oob_interactions", "allow_identity_headers", "allow_direct_origin",
+    "allow_oob_interactions", "allow_account_creation", "allow_identity_headers", "allow_direct_origin",
 )
 
 

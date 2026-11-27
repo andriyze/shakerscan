@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # allow_state_changing_http, as it does at Hunt start.
 AUTHORITY_FLAGS: tuple[str, ...] = (
     "active_testing", "allow_state_changing_http", "allow_oob_interactions", "network_discovery",
-    "mutation_allowed",
+    "allow_account_creation", "mutation_allowed",
 )
 POLICY_GRANT_KINDS = (KIND_CAPABILITY_ENABLE, KIND_TARGET_AUTHORIZE)
 # A grant that would take a Hunt past this many authorized destinations is refused with a reason;

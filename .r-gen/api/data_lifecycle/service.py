@@ -1,0 +1,279 @@
+"""Immutable preview/approval/execution using the existing Arsenal receipt ledger."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import json
+import secrets
+from uuid import UUID, uuid4
+from fastapi import HTTPException
+
+from . import erasure, inputs, records
+from .inventory import (cancel_abandoned, catalog, cascade_plan, decoded, digest, find_roots, hashable,
+                        ident, inventory, lock_inventory, quiesce_targets, root_table)
+
+# Rows a target owns without a cascading FK, deleted while their owners still exist: tool
+# receipts reference the runs they came from, so they go before the scans and Hunts.
+OWNED_DELETE_ORDER = ('tool_receipts', 'scans', 'credential_profiles', 'credential_profile_bindings',
+                      'auth_sessions', 'request_collection_bindings', 'scope_receipts', 'discovery_runs')
+
+COMMAND = 'data.records.delete'
+CONFIRMATIONS = {'confirm_authorized', 'confirm_scope_reviewed', 'confirm_delete_records'}
+
+
+def approval_request(preview_id, preview_hash, scope_id, expires_at):
+    """The one approval that executes this preview, as POST /arsenal/approvals takes it: a client
+    no longer finds the action name, confirmations and context one refusal at a time."""
+    return {'endpoint': 'POST /arsenal/approvals', 'scope_receipt_id': scope_id, 'risk_tier': 'dangerous',
+            'action_name': COMMAND, 'confirmations': sorted(CONFIRMATIONS),
+            'action_context': {'preview_id': str(preview_id), 'preview_hash': preview_hash},
+            'expires_at_latest': expires_at,
+            'note': 'Add approved_by; expires_at must be in the future and no later than expires_at_latest.'}
+
+
+def approval_mismatches(*, risk_tier, action_name, confirmations, action_context, expires_at,
+                        preview_id, preview_hash, preview_expires, now):
+    """What in a record-deletion approval does not match its preview, each named with the value
+    it needs (one opaque 409 for all of them left clients guessing, and every guess left an
+    unused dangerous approval behind)."""
+    wrong = []
+    if risk_tier != 'dangerous':
+        wrong.append(f'risk_tier must be dangerous (got {risk_tier!r})')
+    if action_name != COMMAND:
+        wrong.append(f'action_name must be {COMMAND!r} (got {action_name!r})')
+    missing = sorted(CONFIRMATIONS - set(confirmations or ()))
+    if missing:
+        wrong.append('confirmations missing ' + ', '.join(missing))
+    expected = {'preview_id': str(preview_id), 'preview_hash': preview_hash}
+    if (action_context or {}) != expected:
+        wrong.append('action_context must be exactly {preview_id, preview_hash} of this preview'
+                     + (f" (extra keys: {', '.join(sorted(set(action_context) - set(expected)))})"
+                        if isinstance(action_context, dict) and set(action_context) - set(expected) else ''))
+    if not expires_at:
+        wrong.append(f'expires_at is required, no later than {preview_expires.isoformat()}')
+    elif not now < expires_at:
+        wrong.append('expires_at is already past')
+    elif expires_at > preview_expires:
+        wrong.append(f'expires_at must be no later than the preview\'s {preview_expires.isoformat()}')
+    return wrong
+
+
+def public_preview(preview_id, payload, scope_id):
+    manifest = payload['manifest']
+    return {**manifest, 'preview_id': str(preview_id), 'preview_hash': payload['preview_hash'],
+            'scope_receipt_id': scope_id, 'expires_at': payload['expires_at'],
+            'would_delete': manifest['records']['delete'].get('findings', {}).get('count', 0),
+            'approval_request': approval_request(preview_id, payload['preview_hash'], scope_id,
+                                                 payload['expires_at']),
+            'dry_run': True}
+
+
+async def preview(pool, selection):
+    async with pool.acquire() as conn:
+        async with conn.transaction(isolation='repeatable_read'):
+            await conn.execute("SET LOCAL statement_timeout='60s'")
+            columns, edges = await catalog(conn)
+            roots = await find_roots(conn, selection)
+            manifest, _ = await inventory(conn, selection, roots, columns, edges)
+            preview_id = uuid4()
+            scope_id = 'record-delete:' + str(preview_id)
+            expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+            payload = {'selection': selection, 'manifest': manifest,
+                       'expires_at': expires.isoformat(), 'preview_hash': digest(hashable(manifest))}
+            targets = manifest['owners']['target_id']
+            await conn.execute("""INSERT INTO scope_receipts
+                (id,target_id,input_scope,normalized_scope,verdict,warnings)
+                VALUES ($1,$2,$3::jsonb,$3::jsonb,'needs_approval',$4::jsonb)""",
+                scope_id, UUID(targets[0]) if len(targets) == 1 else None,
+                json.dumps({'kind': 'record_deletion', 'preview_id': str(preview_id),
+                            'preview_hash': payload['preview_hash'], 'owners': manifest['owners']}),
+                json.dumps(manifest['retained']))
+            await conn.execute("""INSERT INTO command_results
+                (id,command,status,dry_run,risk_tier,scope_receipt_id,operator_message,result_json,created_by)
+                VALUES ($1,$2,'approval_required',true,'dangerous',$3,
+                        'Record deletion preview; no records deleted',$4::jsonb,'record_deletion_api')""",
+                preview_id, COMMAND, scope_id, json.dumps(payload))
+    return public_preview(preview_id, payload, scope_id)
+
+
+def validate_approval(row, preview_row, payload, approval_id, now):
+    if row is None:
+        raise HTTPException(404, 'Approval receipt not found')
+    confirmations = set(decoded(row['confirmations']) or [])
+    expected = {'preview_id': str(preview_row['id']), 'preview_hash': payload['preview_hash']}
+    context = decoded(row['action_context']) or {}
+    expires = row['expires_at']
+    preview_expires = datetime.fromisoformat(payload['expires_at'])
+    wrong = []
+    if row['status'] != 'active':
+        wrong.append(f"approval is {row['status']}, not active")
+    if not row['approved_by'] or row['denial_reason']:
+        wrong.append('approval is a denial or names no approver')
+    if row['scope_receipt_id'] != preview_row['scope_receipt_id']:
+        wrong.append(f"approval is for scope receipt {row['scope_receipt_id']!r}, not this preview's "
+                     f"{preview_row['scope_receipt_id']!r}")
+    if row['created_at'] < preview_row['created_at']:
+        wrong.append('approval was created before this preview')
+    wrong += approval_mismatches(
+        risk_tier=row['risk_tier'], action_name=row['action_name'], confirmations=confirmations,
+        action_context=context, expires_at=expires, preview_id=expected['preview_id'],
+        preview_hash=expected['preview_hash'], preview_expires=preview_expires, now=now)
+    if wrong:
+        raise HTTPException(409, 'Approval must be active, dangerous, unexpired, and bound to this exact preview: '
+                            + '; '.join(wrong))
+
+
+def check_expected(payload, kind=None, entity_id=None, selection=None):
+    manifest = payload['manifest']
+    if kind and manifest['kind'] != kind:
+        raise HTTPException(409, 'Deletion preview is for a different record kind')
+    # A target preview lists the selected target first, then its linked services; a scan, its shards.
+    bound = manifest['root_ids'][:1] if kind in ('target', 'scan') else manifest['root_ids']
+    if entity_id and bound != [str(entity_id)]:
+        raise HTTPException(409, 'Deletion preview does not match this exact record')
+    if selection is not None and payload['selection'] != selection:
+        raise HTTPException(409, 'Cleanup filters changed; inspect a new preview')
+
+
+def inspect_execution_record(row, approval_id, *, preview_hash=None, kind=None, entity_id=None, selection=None):
+    """Validate read-only replay/preflight before acquiring any writer locks.
+
+    A completed result is immutable evidence of a past operation: expiry or
+    later approval revocation must not re-execute it or prevent its replay.
+    Actual mutation repeats this check under the existing inventory locks.
+    """
+    payload = decoded(row['result_json'])
+    if not isinstance(payload, dict) or not isinstance(payload.get('manifest'), dict):
+        raise HTTPException(409, 'Stored deletion preview is invalid')
+    if digest(hashable(payload['manifest'])) != payload.get('preview_hash'):
+        raise HTTPException(409, 'Stored deletion preview binding is inconsistent')
+    check_expected(payload, kind, entity_id, selection)
+    if preview_hash and not secrets.compare_digest(preview_hash, payload['preview_hash']):
+        raise HTTPException(409, 'Preview hash does not match')
+    if row['status'] == 'completed':
+        result = payload.get('result')
+        if str(row['approval_receipt_id']) != str(approval_id):
+            raise HTTPException(409, 'Preview was consumed by another approval')
+        if (not isinstance(result, dict) or result.get('operation_id') != str(row['id'])
+                or result.get('approval_receipt_id') != str(approval_id)
+                or result.get('status') != 'deleted'
+                or result.get('deleted_ids') != payload['manifest'].get('root_ids')):
+            raise HTTPException(409, 'Stored deletion result binding is inconsistent')
+        return payload, {**result, 'idempotent_replay': True}
+    if row['status'] != 'approval_required':
+        raise HTTPException(409, 'Deletion preview is not executable')
+    if datetime.now(timezone.utc) >= datetime.fromisoformat(payload['expires_at']):
+        raise HTTPException(409, 'Deletion preview expired; inspect a new preview')
+    return payload, None
+
+
+async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None, entity_id=None, selection=None):
+    if not preview_id or not approval_id:
+        raise HTTPException(428, 'Inspect POST /data-deletion/preview and approve its exact manifest before deleting')
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow('SELECT * FROM command_results WHERE id=$1 AND command=$2', UUID(str(preview_id)), COMMAND)
+                if not row:
+                    raise HTTPException(404, 'Deletion preview not found')
+                payload, replay = inspect_execution_record(row, approval_id, preview_hash=preview_hash,
+                    kind=kind, entity_id=entity_id, selection=selection)
+                if replay is not None:
+                    return replay
+                columns, edges = await catalog(conn)
+                plan = cascade_plan(payload['selection']['kind'], edges, columns)
+                await lock_inventory(conn, columns, plan)
+                row = await conn.fetchrow('SELECT * FROM command_results WHERE id=$1 AND command=$2 FOR UPDATE', UUID(str(preview_id)), COMMAND)
+                if not row:
+                    raise HTTPException(404, 'Deletion preview not found')
+                payload, replay = inspect_execution_record(row, approval_id, preview_hash=preview_hash,
+                    kind=kind, entity_id=entity_id, selection=selection)
+                if replay is not None:
+                    return replay
+                now = datetime.now(timezone.utc)
+                approval = await conn.fetchrow('SELECT * FROM approval_receipts WHERE id=$1 FOR UPDATE', UUID(str(approval_id)))
+                validate_approval(approval, row, payload, approval_id, now)
+                roots = [UUID(v) for v in payload['manifest']['root_ids']]
+                # Repeat the complete inventory AFTER all writer/hold locks are held.
+                current, plan = await inventory(conn, payload['selection'], roots, columns, edges)
+                if current['blockers']:
+                    raise HTTPException(409, {'message': 'Deletion is blocked', 'blockers': current['blockers']})
+                if not secrets.compare_digest(digest(hashable(current)), payload['preview_hash']):
+                    raise HTTPException(409, 'Records or ownership changed; inspect a new preview')
+                # The approved manifest is confirmed. Under it: cancel unfinished rows that were
+                # never picked up or that nothing has touched for a while (live work blocked
+                # above), and stop automatic work on the targets so nothing is dispatched behind
+                # this deletion. Both change rows the hash covered, so they come after the check.
+                input_kind = current['kind'] in inputs.INPUT_KINDS
+                if current['kind'] in records.RECORD_KINDS:
+                    # Only the selected record's own abandoned work, never its target's.
+                    cancelled = await records.cancel_abandoned(conn, current['kind'], roots, columns)
+                else:
+                    cancelled = {} if input_kind else await cancel_abandoned(conn, columns, current['owners'])
+                targets_rooted = current['kind'] in ('target', 'domain')
+                if targets_rooted:
+                    await quiesce_targets(conn, columns, roots)
+                # Capture what must be erased before any owner disappears: evidence the deleted
+                # rows own or reference, artifacts and result files of the deleted scans.
+                captured = await erasure.capture(conn, plan[0], columns, roots)
+                hunt_ids = ([str(r['id']) for r in await conn.fetch(
+                    f"SELECT r.id FROM hunt_runs r WHERE {plan[0]['hunt_runs']}", roots)]
+                    if 'hunt_runs' in plan[0] else [])
+                detached_references = {}
+                if input_kind:
+                    detached_references = await inputs.detach_references(conn, current['kind'], roots, columns)
+                    order = tuple(table for table, _ in inputs.CREDENTIAL_OWNED)
+                else:
+                    order = records.DELETE_ORDER if current['kind'] in records.RECORD_KINDS else OWNED_DELETE_ORDER
+                root = root_table(current['kind'])
+                if current['kind'] in records.RECORD_KINDS:
+                    # A finding another Hunt also verified stays, with that Hunt as its owner.
+                    await records.hand_over_shared_findings(conn, current['kind'], roots, columns)
+                if plan[1].get('scans'):
+                    # Surviving scans that used a deleted scan as their comparison baseline.
+                    await conn.execute(f"UPDATE scans r SET baseline_scan_id=NULL WHERE {plan[1]['scans']}", roots)
+                for table in order:
+                    # The root table itself is deleted last, by id, so its count can be checked.
+                    if table in plan[0] and table != root:
+                        await conn.execute(f'DELETE FROM public.{ident(table)} r WHERE {plan[0][table]}', roots)
+                removed = await conn.fetch(f'DELETE FROM public.{ident(root)} WHERE id=ANY($1::uuid[]) RETURNING id', roots)
+                evidence_uris = await erasure.delete_evidence(conn, captured, columns)
+                await erasure.delete_owner_stats(conn, columns, [scan['id'] for scan in captured['scans']], hunt_ids)
+                if len(removed) != len(roots):
+                    raise HTTPException(409, 'Records changed during deletion; no changes committed')
+                for owner, table in (('target_id', 'targets'), ('device_target_id', 'device_targets'), ('ai_target_id', 'ai_targets')):
+                    ids = [UUID(v) for v in current['owners'][owner]]
+                    if ids and 'active_findings_count' in columns.get(table, set()):
+                        await conn.execute(f"""UPDATE {table} t SET active_findings_count=(
+                            SELECT COUNT(*) FROM findings f WHERE f.{owner}=t.id AND f.status='active'), updated_at=NOW()
+                            WHERE t.id=ANY($1::uuid[])""", ids)
+                result = {'status': 'deleted', 'operation_id': str(preview_id), 'preview_id': str(preview_id),
+                          'approval_receipt_id': str(approval_id), 'kind': current['kind'],
+                          'cancelled_unfinished': cancelled, 'detached_references': detached_references,
+                          'deleted_ids': current['root_ids'], 'deleted': len(removed),
+                          'deleted_records': {k: v['count'] for k, v in current['records']['delete'].items()},
+                          'detached_records': {k: v['count'] for k, v in current['records']['detach'].items()},
+                          'retained': current['retained'], 'external_files_deleted': False,
+                          'files': {'pending': True}, 'dry_run': False, 'idempotent_replay': False}
+                payload['result'] = result
+                await conn.execute("""UPDATE command_results SET status='completed', dry_run=false,
+                    approval_receipt_id=$2, operator_message='Record deletion completed; erasing files',
+                    result_json=$3::jsonb WHERE id=$1""", UUID(str(preview_id)), UUID(str(approval_id)), json.dumps(payload))
+        # Files can only be erased once the rows naming them are committed away; the outcome,
+        # including anything that could not be erased, is added to the same durable receipt.
+        # The records are committed: nothing below may report the deletion as rolled back.
+        try:
+            async with pool.acquire() as conn:
+                files = await erasure.erase_files(conn, captured, evidence_uris)
+                result = {**result, 'files': files, 'external_files_deleted': files['complete']}
+                payload['result'] = result
+                await conn.execute("""UPDATE command_results SET operator_message=$2, result_json=$3::jsonb
+                    WHERE id=$1""", UUID(str(preview_id)),
+                    'Record deletion completed; files erased' if files['complete'] else
+                    'Record deletion completed; some files could not be erased', json.dumps(payload))
+        except Exception as exc:  # noqa: BLE001 - reported on the result instead
+            result = {**result, 'files': {'complete': False, 'error': type(exc).__name__}}
+        return result
+    except Exception as exc:
+        if getattr(exc, 'sqlstate', '') in {'55P03', '57014', '40001', '40P01', '23503', '23514'}:
+            raise HTTPException(409, 'Deletion conflicted with active work or ownership; no changes committed. Retry or inspect a new preview.') from exc
+        raise

@@ -1,0 +1,412 @@
+"""Deploy gate: a DAST deploy decision must reflect the TARGET's unresolved risk, not
+just the current scan's findings. Pure-function tests of build_deployment_decision
+(no DB) — covers the target_active_findings merge + dedup that was previously
+live-verified only."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
+import api  # noqa: E402
+from scan.finding_identity import canonical_finding_fingerprint  # noqa: E402
+
+
+def _scan(findings, status="completed", run_kind="web_dast", scan_type="smart"):
+    return {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "status": status, "scan_type": scan_type, "run_kind": run_kind,
+        "result": {"findings": findings}, "score": 93, "grade": "A",
+        "options": {"environment": "staging"},
+    }
+
+
+def _crit(fid, fp, title="SQL Injection"):
+    return {"id": fid, "fingerprint": fp, "title": title, "severity": "critical"}
+
+
+def test_clean_scan_blocks_on_target_active_criticals():
+    # This scan found nothing blockable, but the target has an unresolved critical.
+    decision = api.build_deployment_decision(_scan([]), target_active_findings=[_crit("f1", "fp1")])
+    assert decision["decision"] == "block"
+    assert decision["blocking_findings"], "target-active critical must appear as blocking"
+    assert any(f.get("from_target_active") for f in decision["blocking_findings"])
+
+
+def test_no_target_active_clean_scan_allows():
+    decision = api.build_deployment_decision(_scan([]), target_active_findings=[])
+    assert decision["decision"] == "allow"
+
+
+def test_target_active_deduped_against_this_scan_finding():
+    # Same fingerprint found by THIS scan and present as target-active -> counted once.
+    scan = _scan([_crit("f1", "fp1")])
+    decision = api.build_deployment_decision(scan, target_active_findings=[_crit("f1", "fp1")])
+    fps = [f.get("fingerprint") for f in decision["blocking_findings"]]
+    assert fps.count("fp1") == 1
+    assert decision["decision"] == "block"
+
+
+def test_target_active_only_marks_provenance():
+    # A target-active finding NOT found by this scan is flagged from_target_active.
+    decision = api.build_deployment_decision(_scan([]), target_active_findings=[_crit("f9", "fp9")])
+    match = [f for f in decision["blocking_findings"] if f.get("fingerprint") == "fp9"]
+    assert match and match[0].get("from_target_active") is True
+
+
+_EXPOSURE = {"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}
+
+
+def _persisted(fid, fingerprint, *, scan_id, last_seen_scan_id):
+    active = {**_crit(fid, fingerprint, _EXPOSURE["title"]), **{k: _EXPOSURE[k] for k in ("severity", "tool", "url")}}
+    row = {"id": fid, "fingerprint": fingerprint, "severity": "high",
+           "scan_id": scan_id, "last_seen_scan_id": last_seen_scan_id}
+    return active, row
+
+
+def test_reobserved_persisted_finding_does_not_duplicate_an_unfingerprinted_report():
+    scan = _scan([dict(_EXPOSURE)])
+    active, row = _persisted("f1", canonical_finding_fingerprint(_EXPOSURE), scan_id="old-scan",
+                             last_seen_scan_id=scan["id"])
+    history = {"rows": [row], "total": 1, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=[active], target_history=history)
+    assert decision["decision"] == "block"
+    assert len(decision["blocking_findings"]) == 1
+    assert decision["carried_over"]["count"] == 0
+    assert not decision["blocking_findings"][0].get("from_target_active")
+    assert decision["blocking_findings"][0]["id"] == "f1"
+
+
+def test_an_earlier_scan_is_not_double_counted_after_a_later_scan_takes_the_row_over():
+    """findings.scan_id and last_seen_scan_id move to the newest scan that re-observed a row.
+    Viewing the earlier scan's decision must still count its report row and the persisted row
+    once (live: 17 blockers for 9 findings on the first of two Juice Shop scans)."""
+    scan = _scan([dict(_EXPOSURE)])
+    active, row = _persisted("f1", canonical_finding_fingerprint(_EXPOSURE), scan_id="later-scan",
+                             last_seen_scan_id="later-scan")
+    history = {"rows": [row], "total": 1, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=[active], target_history=history)
+    assert len(decision["blocking_findings"]) == 1
+    assert decision["carried_over"]["count"] == 0
+
+
+def test_an_exception_on_the_persisted_finding_covers_the_scan_that_reported_it():
+    scan = _scan([dict(_EXPOSURE)])
+    active, row = _persisted("f1", canonical_finding_fingerprint(_EXPOSURE), scan_id=scan["id"],
+                             last_seen_scan_id=scan["id"])
+    exception = {"id": "e1", "finding_id": "f1", "status": "active", "policy_id": None,
+                 "target_id": "t1", "owner": "o", "approver": "a", "reason": "r",
+                 "compensating_controls": "c", "expires_at": "2099-01-01T00:00:00+00:00"}
+    decision = api.build_deployment_decision(
+        scan, target_active_findings=[active], target_history={"rows": [row], "total": 1, "complete": True},
+        db_exceptions=[exception],
+    )
+    assert decision["blocking_findings"] == []
+    assert [item["id"] for item in decision["applied_exceptions"]] == ["f1"]
+    assert decision["decision"] == "needs_approval"
+
+
+def test_same_display_text_with_a_different_fingerprint_remains_a_separate_blocker():
+    scan = _scan([dict(_EXPOSURE)])
+    active, row = _persisted("f1", "t:another-finding", scan_id="old-scan", last_seen_scan_id="old-scan")
+    history = {"rows": [row], "total": 1, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=[active], target_history=history)
+    assert len(decision["blocking_findings"]) == 2
+    assert decision["blocking_findings"][1]["from_target_active"] is True
+    assert decision["carried_over"]["count"] == 1
+
+
+def test_one_report_row_cannot_hide_two_active_rows():
+    scan = _scan([dict(_EXPOSURE)])
+    first, first_row = _persisted("f1", canonical_finding_fingerprint(_EXPOSURE), scan_id="old-scan",
+                                  last_seen_scan_id=scan["id"])
+    second, second_row = _persisted("f2", "t:f2", scan_id="old-scan", last_seen_scan_id=scan["id"])
+    history = {"rows": [first_row, second_row], "total": 2, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=[first, second], target_history=history)
+    assert [item["id"] for item in decision["blocking_findings"]] == ["f1", "f2"]
+    assert decision["decision"] == "block"
+
+
+def test_decision_carries_the_target_history_summary_over_all_severities():
+    scan = _scan([{"id": "f1", "fingerprint": "fp1", "title": "Seen", "severity": "low"}])
+    history = {"rows": [
+        {"severity": "medium", "scan_id": "old", "last_seen_scan_id": "old", "fingerprint": "fp-med", "status": "active"},
+        {"severity": "low", "scan_id": "old", "last_seen_scan_id": "old", "fingerprint": "fp1", "status": "active"},
+    ], "total": 2, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=[], target_history=history)
+    assert decision["carried_over"] == {
+        "count": 1, "from_hunts": 0, "from_other": 0, "material": 1, "highest": "medium", "complete": True,
+        "total_active": 2, "unloaded_active": 0,
+    }
+    # The gate itself is unchanged: a medium does not block under the default profile.
+    assert decision["decision"] == "allow"
+
+
+def test_decision_marks_an_incomplete_history_instead_of_claiming_an_all_clear():
+    history = {"rows": [], "total": 12, "complete": False}
+    decision = api.build_deployment_decision(_scan([]), target_active_findings=[], target_history=history)
+    assert decision["carried_over"]["complete"] is False
+    assert decision["carried_over"]["unloaded_active"] == 12
+
+
+def test_an_exception_bound_to_its_row_still_applies_after_the_row_is_rekeyed():
+    """Endpoint findings gained a |service= qualifier and their rows were re-keyed. Reconciliation
+    binds the old exception to the row's id; the earlier fingerprint alone is not authority (see the
+    next test), so the row id is what keeps the exception applying."""
+    import hashlib
+
+    from findings import pre_service_templated_finding_identity
+
+    finding = {"id": "r1", "title": "SQL Injection", "severity": "critical", "tool": "sqlmap",
+               "cwe": "CWE-89", "url": "https://app.example.test/search?q=1",
+               "evidence": {"method": "GET", "param": "q"}}
+    finding["fingerprint"] = canonical_finding_fingerprint(finding)
+    earlier = "t:" + hashlib.sha256(pre_service_templated_finding_identity(finding).encode()).hexdigest()[:16]
+    assert earlier != finding["fingerprint"]
+    exception = {"id": "e1", "finding_id": "r1", "fingerprint": earlier, "status": "active", "approver": "a",
+                 "expires_at": "2099-01-01T00:00:00+00:00"}
+    remaining, applied = api._apply_policy_exceptions([finding], [exception])
+    assert remaining == [] and [item["id"] for item in applied] == ["r1"]
+    unrelated = {**exception, "finding_id": "other-row", "fingerprint": "t:0000000000000000"}
+    remaining, applied = api._apply_policy_exceptions([finding], [unrelated])
+    assert [item["id"] for item in remaining] == ["r1"] and applied == []
+
+
+def test_legacy_exception_aliases_never_expand_across_services_routes_or_checks():
+    import hashlib
+    from findings import pre_service_templated_finding_identity, pre_check_templated_finding_identity
+    base = {"id": "first", "title": "SQL Injection", "severity": "critical", "tool": "sqlmap",
+            "cwe": "CWE-89", "url": "https://app.example.test/search?q=1", "evidence": {"method": "GET", "param": "q"}}
+    dom = {**base, "cwe": "CWE-79", "evidence": {"param": "q", "client_route": "/search?q=1"}}
+    tls = {**base, "cwe": "CWE-295", "url": "https://app.example.test/", "evidence": {"check": "untrusted"}}
+    pairs = [
+        (base, {**base, "id": "second", "url": "https://app.example.test:8443/search?q=1"}, pre_service_templated_finding_identity),
+        (dom, {**dom, "id": "second", "evidence": {"param": "q", "client_route": "/profile?q=1"}}, pre_service_templated_finding_identity),
+        (tls, {**tls, "id": "second", "evidence": {"check": "expired"}}, pre_check_templated_finding_identity),
+    ]
+    for first, second, historical in pairs:
+        first["fingerprint"] = canonical_finding_fingerprint(first)
+        second["fingerprint"] = canonical_finding_fingerprint(second)
+        assert first["fingerprint"] != second["fingerprint"]
+        alias = "t:" + hashlib.sha256(historical(first).encode()).hexdigest()[:16]
+        exception = {"id": "exception", "fingerprint": alias, "status": "active", "approver": "operator",
+                     "expires_at": "2099-01-01T00:00:00Z"}
+        remaining, applied = api._apply_policy_exceptions([first, second], [exception])
+        assert remaining == [first, second] and applied == []
+        remaining, applied = api._apply_policy_exceptions([first, second], [{**exception, "finding_id": "first"}])
+        assert remaining == [second] and applied == [first]
+
+
+def test_migrated_exact_exception_covers_a_report_without_a_database_row_id():
+    finding = {"title": "SQL Injection", "severity": "critical", "tool": "sqlmap", "cwe": "CWE-89",
+               "url": "https://app.example.test/search?q=1", "evidence": {"method": "GET", "param": "q"}}
+    exception = {"id": "exception", "finding_id": "persisted-row", "status": "active", "approver": "operator",
+                 "fingerprint": canonical_finding_fingerprint(finding), "expires_at": "2099-01-01T00:00:00Z"}
+    decision = api.build_deployment_decision(_scan([finding]), db_exceptions=[exception])
+    assert decision["blocking_findings"] == []
+    assert len(decision["applied_exceptions"]) == 1
+    assert decision["decision"] == "needs_approval"
+    other_service = {**finding, "url": "https://app.example.test:8443/search?q=1"}
+    decision = api.build_deployment_decision(_scan([other_service]), db_exceptions=[exception])
+    assert len(decision["blocking_findings"]) == 1
+    assert decision["applied_exceptions"] == []
+
+
+def test_a_projected_row_never_gains_a_broader_recomputed_fingerprint():
+    full = {"title": "Certificate is untrusted", "severity": "high", "tool": "tls.inspect", "cwe": "CWE-295",
+            "url": "https://app.example.test/", "evidence": {"check": "certificate_untrusted"}}
+    projected = {k: v for k, v in full.items() if k != "evidence"}
+    projected["fingerprint"] = canonical_finding_fingerprint(full)
+    broader = canonical_finding_fingerprint(projected)
+    assert broader != projected["fingerprint"]
+    exception = {"id": "exception", "status": "active", "approver": "operator", "fingerprint": broader,
+                 "expires_at": "2099-01-01T00:00:00Z"}
+    remaining, applied = api._apply_policy_exceptions([projected], [exception])
+    assert remaining == [projected] and applied == []
+
+
+def test_an_exception_on_the_canonical_fingerprint_covers_a_finding_reported_without_one():
+    """Rows that never stored a fingerprint (non-DAST producers) are matched by their canonical
+    identity. Comparing the empty stored value could never match, so an approved exception kept
+    blocking the deployment."""
+    finding = {"title": "SQL Injection", "severity": "critical", "tool": "sqlmap", "cwe": "CWE-89",
+               "url": "https://app.example.test/search?q=1", "evidence": {"method": "GET", "param": "q"}}
+    exception = {"id": "exception", "status": "active", "approver": "operator",
+                 "fingerprint": canonical_finding_fingerprint(finding), "expires_at": "2099-01-01T00:00:00Z"}
+    remaining, applied = api._apply_policy_exceptions([finding], [exception])
+    assert remaining == [] and applied == [finding]
+    other_service = {**finding, "url": "https://app.example.test:8443/search?q=1"}
+    remaining, applied = api._apply_policy_exceptions([other_service], [exception])
+    assert remaining == [other_service] and applied == []
+
+
+def _exposure(path, severity="high"):
+    return {"title": f"Exposure {path}", "severity": severity, "tool": "shakerscan_exposure_probe",
+            "url": f"https://honey.example.test{path}", "cwe": "CWE-538"}
+
+
+def _lab_scan():
+    """The home-lab honey scan: 6 critical and 16 high verified exposures, persisted as rows
+    this scan wrote, plus 6 rows a concurrent Hunt created on the same target."""
+    report = [_exposure(f"/c{i}", "critical") for i in range(6)] + [_exposure(f"/h{i}") for i in range(16)]
+    scan = _scan([dict(item) for item in report])
+    persisted = [
+        {"id": f"row-{i}", "fingerprint": canonical_finding_fingerprint(item), "title": item["title"],
+         "severity": item["severity"], "tool": item["tool"], "url": item["url"], "scan_id": scan["id"],
+         "last_seen_scan_id": scan["id"], "hunt_run_id": None}
+        for i, item in enumerate(report)
+    ]
+    hunt = [
+        {"id": f"hunt-row-{i}", "fingerprint": f"t:hunt{i}", "title": f"Hunt exposure {i}", "severity": "high",
+         "tool": "hunt", "url": f"https://honey.example.test/h{i}", "scan_id": None,
+         "last_seen_scan_id": None, "hunt_run_id": "hunt-1"}
+        for i in range(6)
+    ]
+    history = {"rows": [dict(row) for row in persisted + hunt], "total": 28, "complete": True}
+    return scan, report, persisted, hunt, history
+
+
+def test_the_gate_counts_every_blocking_finding_of_the_scan():
+    """A 20-row cap made a 22-finding scan read "20 high/critical" and dropped two highs."""
+    scan, report, persisted, hunt, history = _lab_scan()
+    decision = api.build_deployment_decision(
+        scan, target_active_findings=api.gate_findings_from_rows(persisted + hunt), target_history=history,
+    )
+    assert decision["decision"] == "block"
+    assert decision["rationale"].startswith("22 high/critical")
+    from_scan = [item for item in decision["blocking_findings"] if item["origin"] == "this_scan"]
+    assert sorted(item["url"] for item in from_scan) == sorted(item["url"] for item in report)
+    assert len(decision["blocking_findings"]) == 28
+
+
+def test_every_blocker_carries_its_persisted_id():
+    scan, _report, persisted, hunt, history = _lab_scan()
+    decision = api.build_deployment_decision(
+        scan, target_active_findings=api.gate_findings_from_rows(persisted + hunt), target_history=history,
+    )
+    assert all(item["id"] for item in decision["blocking_findings"])
+    assert {item["id"] for item in decision["blocking_findings"]} == {row["id"] for row in persisted + hunt}
+    assert not any("identity_keys" in item for item in decision["blocking_findings"])
+
+
+def test_report_rows_outside_the_active_set_take_their_id_from_the_scan_rows():
+    scan, report, persisted, _hunt, _history = _lab_scan()
+    by_fingerprint = {row["fingerprint"]: row["id"] for row in persisted}
+    decision = api.build_deployment_decision(scan, persisted_finding_ids=by_fingerprint)
+    assert len(decision["blocking_findings"]) == len(report)
+    assert {item["id"] for item in decision["blocking_findings"]} == set(by_fingerprint.values())
+
+
+def test_hunt_findings_are_attributed_to_the_hunt_not_to_earlier_scans():
+    scan, _report, persisted, hunt, history = _lab_scan()
+    earlier = {"id": "old-row", "fingerprint": "t:old", "title": "Old exposure", "severity": "high",
+               "tool": "probe", "url": "https://honey.example.test/old", "scan_id": "older-scan",
+               "hunt_run_id": None}
+    # A Hunt re-proving a scan's row stamps hunt_run_id on it; the row stays a scan finding.
+    reproved = {**earlier, "id": "reproved-row", "fingerprint": "t:reproved", "hunt_run_id": "hunt-1"}
+    history["rows"] += [dict(earlier, last_seen_scan_id="older-scan"), dict(reproved, last_seen_scan_id="older-scan")]
+    history["total"] += 2
+    decision = api.build_deployment_decision(
+        scan, target_active_findings=api.gate_findings_from_rows(persisted + hunt + [earlier, reproved]),
+        target_history=history,
+    )
+    origins = {item["id"]: item["origin"] for item in decision["blocking_findings"]}
+    assert [origins[row["id"]] for row in hunt] == ["hunt"] * 6
+    assert origins["old-row"] == "earlier_scan" and origins["reproved-row"] == "earlier_scan"
+    assert all(origins[row["id"]] == "this_scan" for row in persisted)
+    assert decision["carried_over"]["count"] == 8
+    assert decision["carried_over"]["from_hunts"] == 6
+
+
+def _alias(finding, historical):
+    import hashlib
+    return "t:" + hashlib.sha256(historical(finding).encode()).hexdigest()[:16]
+
+
+def _alias_scenario(stored_finding, report_finding, historical):
+    """An active row stored under a legacy alias, waived by an exception on its id, and a new
+    report finding that shares the alias but is a different finding (another check, another
+    service). Aliases are not authority: the new finding must still block."""
+    alias = _alias(stored_finding, historical)
+    assert alias == _alias(report_finding, historical)
+    assert canonical_finding_fingerprint(report_finding) != alias
+    stored = {"id": "legacy-row", "fingerprint": alias, "title": stored_finding["title"],
+              "severity": "critical", "tool": stored_finding["tool"], "url": stored_finding["url"],
+              "scan_id": "older-scan", "hunt_run_id": None}
+    exception = {"id": "e1", "finding_id": "legacy-row", "status": "active", "policy_id": None,
+                 "approver": "a", "owner": "o", "reason": "r", "expires_at": "2099-01-01T00:00:00+00:00"}
+    history = {"rows": [{**stored, "last_seen_scan_id": "older-scan", "status": "active"}], "total": 1, "complete": True}
+    return api.build_deployment_decision(
+        _scan([dict(report_finding)]), target_active_findings=api.gate_findings_from_rows([stored]),
+        target_history=history, db_exceptions=[exception],
+    )
+
+
+def test_a_pre_check_alias_never_carries_an_exception_to_another_check():
+    from findings import pre_check_templated_finding_identity
+    waived = {"title": "Certificate is untrusted", "severity": "critical", "tool": "tls.inspect", "cwe": "CWE-295",
+              "url": "https://app.example.test/", "evidence": {"check": "untrusted"}}
+    new = {**waived, "title": "Certificate chain is not trusted", "evidence": {"check": "expired"}}
+    decision = _alias_scenario(waived, new, pre_check_templated_finding_identity)
+    assert decision["decision"] == "block"
+    report = [item for item in decision["blocking_findings"] if item["origin"] == "this_scan"]
+    assert len(report) == 1 and report[0]["id"] != "legacy-row"
+
+
+def test_a_pre_service_alias_never_carries_an_exception_to_another_service():
+    from findings import pre_service_templated_finding_identity
+    waived = {"title": "SQL Injection", "severity": "critical", "tool": "sqlmap", "cwe": "CWE-89",
+              "url": "https://app.example.test:8443/search?q=1", "evidence": {"method": "GET", "param": "q"}}
+    new = {**waived, "url": "https://app.example.test/search?q=1"}
+    decision = _alias_scenario(waived, new, pre_service_templated_finding_identity)
+    assert decision["decision"] == "block"
+    # The exception still covers its own row, and only that row.
+    assert [item["id"] for item in decision["applied_exceptions"]] == ["legacy-row"]
+    assert [item["url"] for item in decision["blocking_findings"]] == [new["url"]]
+
+
+def test_rows_with_neither_a_scan_nor_a_hunt_are_not_called_earlier_scans():
+    manual = {"id": "manual-row", "fingerprint": "t:manual", "title": "Manual finding", "severity": "high",
+              "tool": "manual", "url": "https://app.example.test/m", "scan_id": None, "hunt_run_id": None}
+    history = {"rows": [{**manual, "last_seen_scan_id": None, "status": "active"}], "total": 1, "complete": True}
+    decision = api.build_deployment_decision(
+        _scan([]), target_active_findings=api.gate_findings_from_rows([manual]), target_history=history,
+    )
+    assert [item["origin"] for item in decision["blocking_findings"]] == ["other"]
+    assert decision["carried_over"]["from_other"] == 1 and decision["carried_over"]["from_hunts"] == 0
+
+
+def _truncated(rows, total):
+    return {"rows": rows, "total": total, "complete": False}
+
+
+def test_a_truncated_target_active_set_fails_closed_instead_of_allowing():
+    decision = api.build_deployment_decision(_scan([]), target_active_findings=[], target_active=_truncated([], 6000))
+    assert decision["decision"] == "needs_review"
+    assert any(item["id"] == "target_active_findings_complete" and item["total"] == 6000
+               for item in decision["required_evidence_missing"])
+
+
+def test_a_truncated_set_cannot_turn_exception_coverage_into_approval():
+    scan = _scan([dict(_EXPOSURE)])
+    exception = {"id": "e1", "fingerprint": canonical_finding_fingerprint(_EXPOSURE), "status": "active",
+                 "approver": "a", "owner": "o", "reason": "r", "expires_at": "2099-01-01T00:00:00+00:00"}
+    decision = api.build_deployment_decision(scan, db_exceptions=[exception], target_active=_truncated([], 9000))
+    assert decision["decision"] == "needs_review"
+
+
+def test_a_truncated_set_keeps_a_block_and_counts_blockers():
+    scan = _scan([_exposure(f"/h{i}") for i in range(3)])
+    decision = api.build_deployment_decision(scan, target_active=_truncated([], 9000))
+    assert decision["decision"] == "block"
+    assert decision["blocking_count"] == 3 == len(decision["blocking_findings"])
+
+
+def test_agents_get_a_bounded_blocker_list_with_the_full_count():
+    from scan.deployment_gate_rows import AGENT_BLOCKER_LIMIT, summarize_for_agent
+    scan = _scan([_exposure(f"/h{i}") for i in range(AGENT_BLOCKER_LIMIT + 7)])
+    decision = api.build_deployment_decision(scan)
+    summary = summarize_for_agent(decision)
+    assert summary["blocking_count"] == AGENT_BLOCKER_LIMIT + 7
+    assert len(summary["blocking_findings"]) == AGENT_BLOCKER_LIMIT
+    assert summary["blocking_findings_truncated"] is True and summary["blocking_findings_omitted"] == 7
+    small = api.build_deployment_decision(_scan([_exposure("/one")]))
+    assert summarize_for_agent(small) is small

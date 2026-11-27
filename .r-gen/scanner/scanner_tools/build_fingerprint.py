@@ -1,0 +1,223 @@
+"""Single source manifest for API, worker, and scanner build fingerprints."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from pathlib import Path
+
+# logical name, source-checkout relative path, container-runtime relative path
+FINGERPRINT_SOURCE_FILES: tuple[tuple[str, str, str], ...] = (
+    ("scanner.py", "scanner/scanner.py", "scanner.py"),
+    ("active_checks.py", "scanner/scanner_tools/active_checks.py", "scanner_tools/active_checks.py"),
+    ("parallel_scan.py", "api/parallel_scan.py", "parallel_scan.py"),
+    ("finding_validator.py", "scanner/scanner_tools/finding_validator.py", "scanner_tools/finding_validator.py"),
+    ("worker.py", "api/worker.py", "worker.py"),
+    ("constants.py", "scanner/constants.py", "constants.py"),
+    ("findings.py", "scanner/findings.py", "findings.py"),
+    ("grading.py", "scanner/grading.py", "grading.py"),
+    ("reporting.py", "scanner/reporting.py", "reporting.py"),
+    ("data_exposure.py", "scanner/scanner_tools/data_exposure.py", "scanner_tools/data_exposure.py"),
+    ("webhook_checks.py", "scanner/scanner_tools/webhook_checks.py", "scanner_tools/webhook_checks.py"),
+    ("approval_checks.py", "scanner/scanner_tools/approval_checks.py", "scanner_tools/approval_checks.py"),
+    ("access_control_checks.py", "scanner/scanner_tools/access_control_checks.py", "scanner_tools/access_control_checks.py"),
+    ("attempt_telemetry.py", "scanner/scanner_tools/attempt_telemetry.py", "scanner_tools/attempt_telemetry.py"),
+    ("request_meter.py", "scanner/scanner_tools/request_meter.py", "scanner_tools/request_meter.py"),
+    ("auth_session.py", "scanner/scanner_tools/auth_session.py", "scanner_tools/auth_session.py"),
+    ("oauth_auth.py", "scanner/scanner_tools/oauth_auth.py", "scanner_tools/oauth_auth.py"),
+    ("infrastructure_checks.py", "scanner/scanner_tools/infrastructure_checks.py", "scanner_tools/infrastructure_checks.py"),
+    ("model_intake.py", "scanner/scanner_tools/model_intake.py", "scanner_tools/model_intake.py"),
+    ("redaction.py", "scanner/redaction.py", "redaction.py"),
+    ("ai_gate_scan.py", "api/ai_gate_scan.py", "ai_gate_scan.py"),
+    ("build_fingerprint.py", "scanner/scanner_tools/build_fingerprint.py", "scanner_tools/build_fingerprint.py"),
+)
+
+# These packages define the canonical V2 authority and executable capability surface. A worker
+# running stale code in any one of them must never advertise the same build fingerprint.
+V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
+    "agent_routes",
+    "ai_targets",
+    "arsenal_routes",
+    "authenticated_assurance",
+    "evidence_routes",
+    "local_agent_routes",
+    "retest_routes",
+    "capabilities",
+    "capture",
+    "devices",
+    "data_lifecycle",
+    "exposure",
+    "finding_detail",
+    "finding_exceptions",
+    "finding_routes",
+    "fleet_routes",
+    "hunt",
+    "interactive",
+    "investigation_routes",
+    "model_intake",
+    "operations",
+    "policy_profiles",
+    "runtime",
+    "scan",
+    "schedules",
+    "scope",
+    "settings_routes",
+    "targets",
+    "worker_handlers",
+)
+_NATIVE_V2_FINGERPRINT_MARKER = "_shakerscan_v2_package_fingerprint"
+
+
+def _is_runtime_source(path: Path) -> bool:
+    return "__pycache__" not in path.parts and path.suffix != ".pyc" and path.is_file()
+
+
+def _add_tree(files: dict[str, str], root: Path, logical_root: str) -> None:
+    if not root.is_dir():
+        return
+    for path in sorted(root.rglob("*")):
+        if _is_runtime_source(path):
+            files[f"{logical_root}/{path.relative_to(root).as_posix()}"] = str(path)
+
+
+def _add_v2_api_packages(files: dict[str, str], api_root: Path) -> None:
+    for package in V2_API_RUNTIME_PACKAGES:
+        _add_tree(files, api_root / package, package)
+
+
+def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
+    """Map deterministic source/config copied into the API/worker image.
+
+    Freshness must change for security rules, corpora, wordlists, dependency locks, the
+    canonical V2 authority packages, and the fixed Firecracker runtime as well as Python.
+    Otherwise a worker can report current source while executing stale policy or adapters.
+
+    Coupling recorded in 2.2.0 (plan item D4): the Model Intake tool locks are hashed under
+    ``model_intake_locks`` even though only the Model Intake image executes those tools, so the
+    slim API image must keep carrying ``/opt/model-intake-locks`` for its expected-worker
+    fingerprint to match the fleet. Dropping the locks from the API image without removing them
+    from this map would mark every worker stale. Revisit when the API image stops carrying them.
+    """
+    root = Path(workspace_root)
+    files: dict[str, str] = {}
+    scanner_root = root / "scanner"
+    api_root = root / "api"
+    # The curl installer deliberately packages a small host-side api/ support
+    # directory under /workspace, but it is not a source checkout. Treating any
+    # api/*.py file as proof of a checkout produces a partial checksum that can
+    # never match the worker image. Require both execution anchors before
+    # enumerating a workspace; otherwise return the complete legacy manifest so
+    # require_all=True fails and callers correctly fall back to /app.
+    if not _is_file(scanner_root / "scanner.py") or not _is_file(api_root / "worker.py"):
+        return {
+            name: os.path.join(workspace_root, source_relative)
+            for name, source_relative, _ in FINGERPRINT_SOURCE_FILES
+        }
+    if scanner_root.is_dir():
+        for path in sorted(scanner_root.glob("*.py")):
+            files[path.name] = str(path)
+    if api_root.is_dir():
+        for path in sorted(api_root.glob("*.py")):
+            files[path.name] = str(path)
+    for package_root, logical_root in (
+        (scanner_root / "scanner_tools", "scanner_tools"),
+        (api_root / "ai_gate", "ai_gate"),
+        (scanner_root / "wordlists", "wordlists"),
+        (scanner_root / "payloads", "payloads"),
+    ):
+        _add_tree(files, package_root, logical_root)
+    _add_v2_api_packages(files, api_root)
+    # Bound Hunt methodology changes capability selection, budget narrowing,
+    # planner preconditions, and promotion guidance. It is therefore part of
+    # the executable API contract and must invalidate fleet freshness.
+    _add_tree(files, root / "skills" / "web", "hunt_skills")
+    _add_tree(files, scanner_root / "model_intake_tools", "model_intake_locks")
+    auxiliary = (
+        ("runtime/requirements.lock", scanner_root / "requirements.lock"),
+        ("runtime/entrypoint.sh", scanner_root / "entrypoint.sh"),
+        ("runtime/scanner.Dockerfile", scanner_root / "Dockerfile"),
+        ("runtime/apt_install.sh", scanner_root / "apt_install.sh"),
+        ("model_intake_locks/firecracker-runtime.lock", root / "runner" / "guest" / "requirements.lock"),
+        ("model_intake_locks/firecracker-guest-worker.py", root / "runner" / "guest" / "guest_worker.py"),
+        ("model_intake_locks/firecracker-guest-init", root / "runner" / "guest" / "guest-init"),
+        ("model_intake_locks/firecracker-guest.Dockerfile", root / "runner" / "guest" / "Dockerfile"),
+    )
+    for logical_name, path in auxiliary:
+        if path.is_file():
+            files[logical_name] = str(path)
+    return files
+
+
+def runtime_file_map(
+    runtime_root: str = "/app",
+    model_intake_lock_root: str = "/opt/model-intake-locks",
+    build_input_root: str = "/opt/build-inputs",
+) -> dict[str, str]:
+    """Map the image runtime layout using the same logical keys as source_file_map."""
+    root = Path(runtime_root)
+    files: dict[str, str] = {}
+    if root.is_dir():
+        for path in sorted(root.glob("*.py")):
+            files[path.name] = str(path)
+        for logical_root in ("scanner_tools", "ai_gate", "wordlists", "payloads"):
+            package_root = root / logical_root
+            _add_tree(files, package_root, logical_root)
+        _add_v2_api_packages(files, root)
+        _add_tree(files, root / "skills" / "web", "hunt_skills")
+        lock_root = Path(model_intake_lock_root)
+        _add_tree(files, lock_root, "model_intake_locks")
+        auxiliary = (
+            ("runtime/requirements.lock", root / "requirements.lock"),
+            ("runtime/entrypoint.sh", root / "entrypoint.sh"),
+            ("runtime/scanner.Dockerfile", Path(build_input_root) / "scanner.Dockerfile"),
+            ("runtime/apt_install.sh", Path(build_input_root) / "apt_install.sh"),
+            ("model_intake_locks/firecracker-runtime.lock", lock_root / "firecracker-runtime.lock"),
+            ("model_intake_locks/firecracker-guest-worker.py", lock_root / "firecracker-guest-worker.py"),
+            ("model_intake_locks/firecracker-guest-init", lock_root / "firecracker-guest-init"),
+            ("model_intake_locks/firecracker-guest.Dockerfile", lock_root / "firecracker-guest.Dockerfile"),
+        )
+        for logical_name, path in auxiliary:
+            if path.is_file():
+                files[logical_name] = str(path)
+    if files:
+        return files
+    return {
+        name: os.path.join(runtime_root, runtime_relative)
+        for name, _, runtime_relative in FINGERPRINT_SOURCE_FILES
+    }
+
+
+def _is_file(path: Path) -> bool:
+    """``Path.is_file`` that reads an unreadable path as absent.
+
+    ``is_file`` swallows only "not found" errors and raises on permission denied, so a workspace
+    the API cannot enter turned every /health call into HTTP 500 instead of falling back to /app.
+    """
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def hash_source_files(file_map: dict[str, str], *, require_all: bool = False) -> str | None:
+    if require_all and not all(os.path.exists(path) for path in file_map.values()):
+        return None
+    digest = hashlib.sha256()
+    hashed = 0
+    for name in sorted(file_map):
+        try:
+            with open(file_map[name], "rb") as handle:
+                digest.update(name.encode())
+                digest.update(b"\0")
+                digest.update(handle.read())
+            hashed += 1
+        except OSError:
+            if require_all:
+                return None
+    return digest.hexdigest()[:16] if hashed else None
+
+
+# Mixed-version images still import the former compatibility shim. Mark the native functions so
+# that shim becomes a no-op rather than wrapping the same behavior twice.
+setattr(source_file_map, _NATIVE_V2_FINGERPRINT_MARKER, True)
+setattr(runtime_file_map, _NATIVE_V2_FINGERPRINT_MARKER, True)

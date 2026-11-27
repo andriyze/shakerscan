@@ -1,0 +1,21 @@
+{
+  "middleware": [
+    "GatewayIdentityMiddleware",
+    "TrustedHostGuardMiddleware",
+    "SameHostCorsMiddleware",
+    "CORSMiddleware",
+    "UnsafeOriginGuardMiddleware",
+    "RequestGuardMiddleware",
+    "PublicV2BodyLimitMiddleware",
+    "PublicV2IdempotencyMiddleware",
+    "ListETagMiddleware"
+  ],
+  "exception_handlers": [
+    "HTTPException",
+    "QueryCanceledError",
+    "RequestValidationError",
+    "ValueError",
+    "WebSocketRequestValidationError"
+  ],
+  "route_count": 490
+}

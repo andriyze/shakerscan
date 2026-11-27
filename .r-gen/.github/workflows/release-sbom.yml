@@ -1,0 +1,153 @@
+name: Release SBOM contracts
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release-sbom.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/publish-client.yml'
+      - '.github/actions/sbom-tools/**'
+      - '.github/requirements/sbom-tools.*'
+      - 'scripts/release_sbom*.py'
+      - 'scripts/build-model-intake-guest-rootfs.sh'
+      - 'tests/test_release_sbom*.py'
+      - 'install/release-images.json'
+      - 'docker-compose.release.yml'
+      - 'security/sbom/**'
+      - 'runner/guest/**'
+      - 'client/**'
+      - 'ui/package*.json'
+      - 'scanner/Dockerfile*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - uses: ./.github/actions/sbom-tools
+      - name: Offline contracts
+        run: python -m unittest discover -s tests -p 'test_release_sbom*.py' -v
+      - name: Build and inventory real client archives
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r .github/requirements/client-build.lock
+          python -m build --outdir dist client
+          version="$(awk -F '\"' '/^__version__ = / {print $2}' client/src/shakerscan/__init__.py)"
+          python scripts/release_sbom.py client --dist dist --version "$version" \
+            --source-sha "$(git rev-parse HEAD)" --generator-source-sha "$(git rev-parse HEAD)" \
+            --source-root . \
+            --repository "$GITHUB_REPOSITORY" --output client-sbom-smoke
+          python scripts/release_sbom.py verify --directory client-sbom-smoke --dist dist
+      - name: Validate real client formats
+        run: |
+          python3 scripts/release_sbom_stage2.py --directory client-sbom-smoke \
+            --source-root . --tools "$SHAKERSCAN_SBOM_TOOLS" --output client-sbom-expanded
+          python3 scripts/release_sbom.py verify --directory client-sbom-expanded --dist dist
+          python3 -m unittest discover -s tests -p test_release_sbom_stage2.py -v
+      - name: Preserve pinned validation toolchain
+        if: always()
+        run: |
+          test -n "$SHAKERSCAN_SBOM_TOOLS"
+          tar -czf sbom-toolchain.tar.gz -C "$SHAKERSCAN_SBOM_TOOLS" .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: pinned-sbom-validation-toolchain
+          path: sbom-toolchain.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve exact validation source inputs
+        if: always()
+        run: |
+          mkdir -p sbom-validation-inputs
+          git rev-parse HEAD > sbom-validation-inputs/SOURCE_COMMIT
+          git ls-tree -r HEAD > sbom-validation-inputs/source-tree.txt
+          git archive --format=tar HEAD | gzip -n > sbom-validation-inputs/source.tar.gz
+          (cd sbom-validation-inputs && sha256sum SOURCE_COMMIT source-tree.txt source.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: unsigned-sbom-validation-inputs
+          path: sbom-validation-inputs/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Read only: export a known existing release, without running its containers or
+  # publishing anything. This catches real Buildx/SPDX shape drift as well as the fixtures.
+  registry-smoke:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # True only when the read-only Docker Hub secrets exist; forks and Dependabot get false
+      # and keep pulling anonymously, as before.
+      HAS_DH_READ: ${{ secrets.DOCKERHUB_READ_USERNAME != '' && secrets.DOCKERHUB_READ_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      # Docker Hub pulls go through mirror.gcr.io first, so they work without the read token.
+      - name: Pull Docker Hub images through mirror.gcr.io
+        uses: ./.github/actions/docker-hub-mirror
+      # Authenticated, read-only Docker Hub pulls avoid the anonymous pull rate limit (429
+      # toomanyrequests). Skipped, so pulls stay anonymous, when the read secrets are absent.
+      - name: Log in to Docker Hub for read-only pulls
+        if: env.HAS_DH_READ == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6
+        with:
+          username: ${{ secrets.DOCKERHUB_READ_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          # The docker-container builder ignores the daemon's mirrors; give BuildKit (and
+          # `buildx imagetools`, which reads this builder's registry config) the same mirror.
+          # The builder's own image comes from the mirror as well, not through the daemon.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Download immutable smoke fixture metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v2.4.0 --repo "$GITHUB_REPOSITORY" \
+            --pattern release-candidate-receipt.json --dir fixture
+          git fetch --depth=1 origin tag v2.4.0
+          git show 'v2.4.0:install/release-images.json' > fixture/release-images.json
+      - name: Export existing amd64 and arm64 image SBOMs
+        run: |
+          python3 scripts/release_sbom.py engine \
+            --receipt fixture/release-candidate-receipt.json --inventory fixture/release-images.json \
+            --version 2.4.0 --source-sha "$(git rev-parse 'v2.4.0^{commit}')" \
+            --generator-source-sha "$(git rev-parse HEAD)" \
+            --repository "$GITHUB_REPOSITORY" --output engine-sbom-smoke
+          python3 scripts/release_sbom.py verify --directory engine-sbom-smoke
+      - uses: ./.github/actions/sbom-tools
+      - name: Independent catalogs, supporting services and coverage checks
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/sbom-release-source" 'v2.4.0^{commit}'
+          python3 scripts/release_sbom_stage2.py --directory engine-sbom-smoke \
+            --source-root "$RUNNER_TEMP/sbom-release-source" --tools "$SHAKERSCAN_SBOM_TOOLS" \
+            --output engine-sbom-expanded
+          python3 scripts/release_sbom.py verify --directory engine-sbom-expanded
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-engine-sbom-smoke
+          path: engine-sbom-expanded/
+          if-no-files-found: error
+          retention-days: 7
+      # Why a Docker pull did not use the mirror: dockerd logs each endpoint it falls back from.
+      - name: Show Docker daemon registry fallbacks
+        if: failure()
+        run: |
+          sudo journalctl -u docker --since -15min --no-pager \
+            | grep -iE 'mirror|fallback|next endpoint|toomanyrequests|error' | tail -n 100 || true

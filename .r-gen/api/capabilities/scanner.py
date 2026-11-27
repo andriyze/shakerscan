@@ -1,0 +1,399 @@
+"""Shared-executor adapter for fixed-template external scanner processes."""
+
+from __future__ import annotations
+
+import sys
+from typing import Any, Awaitable, Callable, Mapping
+
+from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+from runtime.capability_registry import CapabilitySpec
+from scan.external_process import (
+    ExternalProcessContractError,
+    validate_enforcement_receipt,
+)
+
+try:
+    from scanner_tools import http_archive_capture as _scan_capture
+except (ImportError, ModuleNotFoundError):  # package import layout
+    from scanner.scanner_tools import http_archive_capture as _scan_capture
+
+
+ScannerProcessRunner = Callable[..., Awaitable[Mapping[str, Any]]]
+
+
+def settled_request_bound(
+    *,
+    reserved: int,
+    enforcement: Mapping[str, Any],
+    observed_minimum: int,
+    elapsed_seconds: int,
+) -> tuple[int, str]:
+    """Charge an unmeasured run its tightest proven bound, not the whole reservation.
+
+    A tool whose traffic crosses the pinned tunnel as TLS has no wire count, and charging it
+    the full hold made a crawl that ran 14 of its 300 seconds cost 1,500 requests and a
+    content sweep of a 108-entry wordlist cost 2,000 or 6,000: "HTTP requests used" overstated
+    the traffic several times over and the reservation stopped reflecting the work done. The
+    run's own launch proof still bounds it from above -- the hard ceiling (an exact wordlist,
+    a reviewed template allowlist) and, for a rate-limited tool, the enforced rate over the
+    seconds it actually ran plus its initial burst. The charge is the smallest of those and
+    the hold, never below what the proxy saw. The hold itself is unchanged and still enforced.
+    """
+    hold = max(0, int(reserved))
+    bound, basis = hold, "reservation"
+    hard = dict(enforcement.get("hard_budget") or {}) if enforcement else {}
+    hard_http = int(hard.get("http_requests") or 0)
+    if 0 < hard_http < bound:
+        bound, basis = hard_http, "process_upper_bound"
+    rate_bound = enforcement.get("rate_bound") if enforcement else None
+    if isinstance(rate_bound, Mapping):
+        rate = int(rate_bound.get("rate_per_second") or 0)
+        burst = int(rate_bound.get("startup_burst") or 0)
+        if rate > 0 and elapsed_seconds > 0:
+            elapsed_bound = rate * int(elapsed_seconds) + max(1, burst)
+            if elapsed_bound < bound:
+                bound, basis = elapsed_bound, "rate_time_bound"
+    observed = max(0, int(observed_minimum))
+    if observed > bound:
+        return min(hold, observed), "observed_minimum"
+    return bound, basis
+
+
+class ScannerExecutionAdapter:
+    """Normalize a fixed-template scanner process into one capability result."""
+
+    manages_cancellation = True
+
+    def __init__(
+        self,
+        *,
+        specification: CapabilitySpec,
+        process_payload: Mapping[str, Any],
+        process_runner: ScannerProcessRunner,
+        requested_budget: Mapping[str, int],
+        redacted_execution: Mapping[str, Any],
+        archive_capability_name: str | None = None,
+        mutation_dimension: str = "state_changing_requests",
+    ) -> None:
+        self.capability_name = specification.name
+        # The Scan action this run belongs to (a batch runs its legacy capability per
+        # candidate); the request archive judges completeness per Scan action capability.
+        self._archive_capability_name = archive_capability_name or specification.name
+        self.adapter_name = specification.adapter
+        self.adapter_version = specification.adapter_version
+        self._specification = specification
+        self._process_payload = dict(process_payload)
+        self._process_runner = process_runner
+        self._requested_budget = {
+            str(key): int(value)
+            for key, value in dict(requested_budget).items()
+        }
+        self._redacted_execution = dict(redacted_execution)
+        scanner_options = (
+            dict(self._process_payload.get("scanner_options") or {})
+            if isinstance(self._process_payload.get("scanner_options"), Mapping)
+            else {}
+        )
+        self._body_state_changing = (
+            bool(scanner_options.get("body_field_names"))
+            and str(scanner_options.get("method") or "GET").upper()
+            not in {"GET", "HEAD", "OPTIONS"}
+        )
+        # Active Nuclei runs non-GET templates only when state-changing HTTP is
+        # authorized; the server marks that here. The former "GET-only" settlement
+        # charged zero state-changing units for a run that POSTed credentials.
+        self._nuclei_state_changing = bool(
+            scanner_options.get("nuclei_active_state_changing")
+        )
+        self._state_changing = self._body_state_changing or self._nuclei_state_changing
+        # The ledger dimension every possibly mutating request is held and settled in: a Scan's
+        # state-changing ceiling, or a Hunt verifier's own verifier-write ceiling (the Hunt's
+        # state-changing ceiling bounds the planner's own writes).
+        if mutation_dimension not in {"state_changing_requests", "verifier_write_requests"}:
+            raise ValueError("scanner mutation dimension is invalid")
+        self._mutation_dimension = mutation_dimension
+        if self._state_changing and int(
+            self._requested_budget.get(mutation_dimension) or 0
+        ) < int(self._requested_budget.get("http_requests") or 0):
+            raise ValueError(
+                "state-changing scanner requires a conservative state-changing reservation"
+            )
+        self.process_result: dict[str, Any] = {}
+
+    async def execute(
+        self,
+        *,
+        heartbeat: Heartbeat,
+        cancelled: Cancelled,
+    ) -> CapabilityAdapterResult:
+        if cancelled():
+            return CapabilityAdapterResult(
+                status="cancelled",
+                errors=("cancelled_before_execution",),
+                actual_budget={name: 0 for name in self._requested_budget},
+                execution_started=False,
+                parser_version=self._specification.output_schema,
+                redacted_execution=self._redacted_execution,
+            )
+        # The shared executor checks cancellation immediately before this call.
+        # The process runner uses the opaque job identity for in-flight Redis
+        # cancellation and invokes the durable heartbeat supplied here.
+        process_payload = dict(self._process_payload)
+        # This callback never crosses a queue or receipt boundary. The worker's
+        # subprocess loop polls it so Scan cancellation remains distinct and
+        # stops the external child rather than waiting for its hard timeout.
+        process_payload["_cancelled"] = cancelled
+        # The reservation is injected at the last in-memory boundary. The
+        # worker's authoritative builder must derive argv from this exact hold.
+        process_payload["_reserved_budget"] = dict(self._requested_budget)
+        process_result = dict(await self._process_runner(
+            process_payload,
+            heartbeat=heartbeat,
+        ))
+        tunnel = process_result.pop("tunnel", None)
+        if isinstance(tunnel, Mapping):
+            # Only a Scan worker has a capture open; elsewhere this records nothing. The
+            # archive never decides the action's outcome.
+            options = self._process_payload.get("scanner_options")
+            options = options if isinstance(options, Mapping) else {}
+            try:
+                _scan_capture.record_tunnel(
+                    tunnel, capability_name=self._archive_capability_name,
+                    tool=str(self._process_payload.get("tool_name") or ""),
+                    elapsed_ms=max(0, int(process_result.get("elapsed_seconds") or 0)) * 1_000,
+                    error=str(process_result.get("error") or "") or None,
+                    # The request the tool was given: an encrypted tunnel's only record of it.
+                    tool_input={
+                        "url": self._process_payload.get("execution_target"),
+                        "method": options.get("method"),
+                        "body_field_names": options.get("body_field_names"),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[http-archive] {self._archive_capability_name}: tunnel not recorded: "
+                      f"{type(exc).__name__}", file=sys.stderr, flush=True)
+        self.process_result = process_result
+        settlement = (
+            dict(process_result.get("settlement") or {})
+            if isinstance(process_result.get("settlement"), Mapping)
+            else {}
+        )
+        not_executed = str(settlement.get("source") or "") == "not_executed"
+        enforcement: dict[str, Any] = {}
+        enforcement_error = ""
+        if not not_executed:
+            try:
+                enforcement = validate_enforcement_receipt(
+                    process_result.get("process_enforcement")
+                    if isinstance(process_result.get("process_enforcement"), Mapping)
+                    else {},
+                    reserved=self._requested_budget,
+                )
+                expected_tool = str(
+                    self._specification.process_tool_name
+                    or self._specification.adapter
+                )
+                if str(enforcement.get("tool_name") or "") != expected_tool:
+                    raise ExternalProcessContractError(
+                        "process enforcement tool identity mismatch"
+                    )
+                if str(enforcement.get("parser_version") or "") != str(
+                    self._specification.output_schema
+                ):
+                    raise ExternalProcessContractError(
+                        "process enforcement parser identity mismatch"
+                    )
+                hard_http = int(
+                    dict(enforcement.get("hard_budget") or {}).get("http_requests")
+                    or 0
+                )
+                observed_wire = (
+                    int(settlement.get("actual") or 0)
+                    if str(settlement.get("mode") or "") == "exact"
+                    else int(settlement.get("observed_minimum") or 0)
+                )
+                if hard_http > 0 and observed_wire > hard_http:
+                    raise ExternalProcessContractError(
+                        "wire limiter reported traffic above the hard ceiling"
+                    )
+            except (ExternalProcessContractError, TypeError, ValueError) as exc:
+                enforcement_error = f"external_process_contract:{str(exc)[:200]}"
+                process_result["status"] = "failed"
+                process_result["error"] = enforcement_error
+                process_result["execution_uncertain"] = True
+                self.process_result = process_result
+        typed_output = (
+            dict(process_result.get("typed_output") or {})
+            if isinstance(process_result.get("typed_output"), Mapping)
+            else {}
+        )
+        observations = tuple(
+            dict(item)
+            for item in typed_output.get("records") or ()
+            if isinstance(item, Mapping)
+        )[:5000]
+        parser_errors = [
+            str(item) for item in typed_output.get("errors") or ()
+        ][:20]
+        process_status = str(process_result.get("status") or "failed")
+        timed_out = bool(process_result.get("timed_out"))
+        partial = bool(process_result.get("partial") or timed_out)
+        if process_status == "success":
+            status = "partial" if partial else "success"
+        elif process_status == "cancelled":
+            status = "cancelled"
+        elif partial:
+            status = "partial"
+        else:
+            status = "failed"
+
+        primary_error = str(process_result.get("error") or "").strip()
+        errors = ([primary_error] if primary_error else []) + parser_errors
+        execution_started = not not_executed
+        charge_basis = "reservation"
+        if process_result.get("execution_uncertain"):
+            actual = dict(self._requested_budget)
+            execution_started = True
+        else:
+            actual: dict[str, int] = {}
+            if "tool_wall_seconds" in self._requested_budget:
+                actual["tool_wall_seconds"] = min(
+                    int(self._requested_budget["tool_wall_seconds"]),
+                    max(0, int(process_result.get("elapsed_seconds") or 0)),
+                )
+            if "http_requests" in self._requested_budget:
+                if str(settlement.get("mode") or "") == "exact":
+                    actual["http_requests"] = min(
+                        int(self._requested_budget["http_requests"]),
+                        max(0, int(settlement.get("actual") or 0)),
+                    )
+                    charge_basis = "wire_count"
+                elif execution_started:
+                    actual["http_requests"], charge_basis = settled_request_bound(
+                        reserved=int(self._requested_budget["http_requests"]),
+                        enforcement=enforcement,
+                        observed_minimum=int(settlement.get("observed_minimum") or 0),
+                        elapsed_seconds=int(process_result.get("elapsed_seconds") or 0),
+                    )
+            mutation = self._mutation_dimension
+            if mutation in self._requested_budget:
+                reserved_state_changing = int(self._requested_budget[mutation])
+                if not (self._state_changing and execution_started):
+                    actual[mutation] = 0
+                else:
+                    # Settle the mutation dimension to the HTTP requests charged, never
+                    # the whole hold. Both a body attempt and an active state-changing
+                    # template run reserve the two dimensions equal and count every
+                    # request as a possible mutation, so the HTTP charge is a sound upper
+                    # bound: exact when the wire was measured, the full hold when it was
+                    # not. Charging the hold regardless reported 240 of 240 mutations
+                    # for a dalfox body attempt that sent six requests, and the batch's
+                    # next body candidate went unfunded (insufficient_plan_budget).
+                    actual[mutation] = min(
+                        reserved_state_changing,
+                        int(actual.get("http_requests", reserved_state_changing)),
+                    )
+            if "browser_actions" in self._requested_budget:
+                # A headless crawl emits no per-action telemetry we parse, so
+                # there is nothing exact to charge. Retain the full hold once
+                # execution started, exactly as an HTTP tool without wire
+                # telemetry does above: reserving a dimension and then settling
+                # it at zero is not accounting, and it left every Scan reporting
+                # browser actions 0 of the profile's ceiling while a real
+                # browser was driving the crawl.
+                actual["browser_actions"] = (
+                    int(self._requested_budget["browser_actions"])
+                    if execution_started else 0
+                )
+
+        redacted_execution = dict(self._redacted_execution)
+        if enforcement:
+            redacted_execution["process_enforcement"] = enforcement
+            hard_budget = dict(enforcement.get("hard_budget") or {})
+            raw_network = (
+                dict(process_result.get("network_telemetry") or {})
+                if isinstance(process_result.get("network_telemetry"), Mapping)
+                else {}
+            )
+            redacted_execution["wire_telemetry"] = {
+                "schema_version": "external-wire-telemetry/v1",
+                "accounting_mode": (
+                    "exact"
+                    if str(settlement.get("mode") or "") == "exact" and not process_result.get("execution_uncertain")
+                    else "conservative"
+                ),
+                "actual_http_requests": (
+                    max(0, int(settlement.get("actual") or 0))
+                    if str(settlement.get("mode") or "") == "exact" and not process_result.get("execution_uncertain")
+                    else None
+                ),
+                "observed_http_requests_minimum": max(
+                    0, int(settlement.get("observed_minimum") or 0),
+                ),
+                "http_request_upper_bound": int(
+                    hard_budget.get("http_requests") or 0
+                ),
+                # What the HTTP charge rests on. Only `wire_count` is a measurement; the
+                # others are bounds on what the tool could have sent, so the charge they
+                # produce is an estimate from above, never below the observed minimum.
+                "http_charge_basis": charge_basis,
+                "http_charge_estimated": charge_basis != "wire_count",
+                "tcp_attempt_upper_bound": int(
+                    hard_budget.get("tcp_ports_attempted") or 0
+                ),
+                "connections_attempted": max(
+                    0, int(raw_network.get("connections_attempted") or 0),
+                ),
+                "connections_opened": max(
+                    0, int(raw_network.get("connections_opened") or 0),
+                ),
+                "targets": max(0, int(raw_network.get("targets") or 0)),
+                "wall_seconds": max(
+                    0, int(process_result.get("elapsed_seconds") or 0),
+                ),
+                "limiter_status": (
+                    "failed"
+                    if enforcement_error
+                    or str(process_result.get("error") or "")
+                    == "connection_limit_exceeded"
+                    else "within_ceiling"
+                ),
+            }
+        record_limit = typed_output.get("record_limit")
+        if isinstance(record_limit, Mapping):
+            # How many parsed records the receipt kept against how many the tool emitted:
+            # a bounded set is labelled as one, never presented as the whole output.
+            redacted_execution["record_limit"] = {
+                name: (
+                    bool(record_limit.get(name)) if name == "truncated"
+                    else max(0, int(record_limit.get(name) or 0))
+                )
+                for name in ("kept", "seen", "limit", "lines_dropped", "truncated")
+            }
+        browser_profile = process_result.get("browser_profile")
+        if isinstance(browser_profile, Mapping) and browser_profile:
+            redacted_execution["browser_profile"] = {
+                "schema_version": str(browser_profile.get("schema_version") or ""),
+                "kind": str(browser_profile.get("kind") or ""),
+                "seeded_items": max(
+                    0, int(browser_profile.get("seeded_items") or 0),
+                ),
+                "target_requests": max(
+                    0, int(browser_profile.get("target_requests") or 0),
+                ),
+                "secret_values_visible": False,
+            }
+        return CapabilityAdapterResult(
+            status=status,
+            observations=observations,
+            errors=tuple(errors[:20]),
+            actual_budget=actual,
+            partial=partial,
+            timed_out=timed_out,
+            execution_started=execution_started,
+            parser_version=str(
+                typed_output.get("parser")
+                or self._specification.output_schema
+            ),
+            redacted_execution=redacted_execution,
+        )

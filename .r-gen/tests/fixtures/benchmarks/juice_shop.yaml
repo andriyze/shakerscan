@@ -1,0 +1,170 @@
+# Benchmark scorecard fixture — OWASP Juice Shop (DAST quality target).
+# Consumed by scripts/benchmark_targets.py (submit -> wait -> fetch -> score).
+# Juice Shop is a BENCHMARK to measure the universal engine, never a target to
+# hardcode against. Expected families describe the vuln CLASSES a competent DAST
+# should prove on this app; matching is by class + route token, not app secrets.
+name: juice-shop
+target_url: http://host.docker.internal:3001
+# One deterministic Scan runs serially so global and browser proof remain in the
+# same immutable workload. The thorough preset is the production verifier budget.
+scan_options:
+  parallel: false
+  budget_profile: thorough
+# auth: bearer tokens minted at runtime (see benchmark_targets.py --auth). BFLA is
+# a cross-principal differential, so qualification requires two fresh accounts.
+auth:
+  user1_login: { url: /rest/user/login, email_field: email, password_field: password }
+  user2_login: { url: /rest/user/login, email_field: email, password_field: password }
+  requires_two_users: true
+
+# Per-target pass/fail gates.
+# The standard this benchmark exists to measure against. Evaluated and reported on EVERY run, and
+# deliberately NOT part of `passed`: the gates below hold the line against regression, this says how
+# far the engine still is from the bar. Setting only the shipped numbers would make a green
+# scorecard read as "meets its bar" when it means "no worse than the day we lowered it".
+quality_bar:
+  # The release bar is set at the SHIPPED level (operator decision, 2026-09-06). Four releases,
+  # 2.0.0 through 2.2.0, certified with this bar waived as declared debt while measuring the same
+  # 0.44 each time; the decision is to stop renewing that waiver, hold the measured level as the
+  # bar, and move the effort to Hunt. The answer key (`expected`) is unchanged and the five
+  # unreachable classes stay declared under `gates`, so the distance to the intended standard
+  # (0.67, a browser-proven DOM XSS, a reliable grade, no gaps) stays visible on every card through
+  # the gap list, and a NEW miss, a recall drop, or a sixth gap still fails.
+  # Reconciled 2.3.1 (proof-policy correction): the exposure engine no longer promotes a file's
+  # mere reachability to a verified confidential finding — reachability is not confidentiality.
+  # The two deterministic server-state exposures (an autoindexed /ftp directory, a served /metrics)
+  # are still proven, so exposed-metrics and exposed-ftp-listing remain found; exposed-confidential
+  # (the specific document's confidentiality) is not deterministically provable and moves to a
+  # declared gap, kept VISIBLE below rather than hidden. This is a characterized change to what the
+  # benchmark measures, not a blanket threshold cut: the answer key is unchanged, the new gap names
+  # its reason, and a NEW miss, a recall drop below the reconciled level, or a seventh gap still fails.
+  min_expected_recall: 0.33          # 3 of 9: sqli-search + the two deterministic exposures (metrics, ftp listing)
+  require_browser_proven_xss: false  # xss-dom-search is a declared gap: no DOM/fragment discovery exists
+  require_reliable_grade: false      # out of reach of budget tuning inside the wall ceiling (below)
+  max_known_expectation_gaps: 6      # the declared gaps; grew by one (exposed-confidential) for the reconciliation above
+  # This subset is a developer progress signal only. Release qualification uses
+  # --enforce-quality, which always binds every check in the complete bar.
+  # `grade_reliable` requires every selected family complete AND no unproven critical/high, and
+  # a thorough scan has not funded that inside its wall ceiling (BUDGET_PROFILES["thorough"].
+  # max_duration_seconds in api/scan/contracts.py: 10,800 s since 2.2.0, not 3,600) -- funding the proof
+  # families enough time to reach a verdict is what pushed the passive-template and exposure
+  # continuation batches into `insufficient_plan_budget`. That trade is correct (proof outranks
+  # breadth) and it puts the check out of reach of budget tuning.
+  enforced: []
+
+# The expectations below are NOT reduced to what the engine currently proves: they describe what a
+# competent DAST should find on this app, and shrinking them would destroy the measurement. The
+# classes not yet reachable are declared instead, so the shortfall stays visible and any NEW miss
+# still fails. Each gap names why and is tracked for a later release.
+gates:
+  min_expected_recall: 0.33          # 3 of 9 after the exposure proof-policy correction (see the exposed-confidential gap). Raise as gaps close.
+  # 2.11 severity calibration (severity-basis/v1): a served /metrics and a browsable directory are
+  # medium, so only sqli-search counts as verified High/Critical, and the single unconfirmed sqlmap
+  # High is now one of two High/Critical findings instead of one of four. Both exposures must still
+  # be verified (their answer-key severity is medium); see benchmark-integrity-ledger 2026-10-17.
+  min_verified_high_critical: 1      # sqli-search; the two deterministic exposures are medium since 2.11
+  require_verified_sqli: true        # Juice Shop must prove Critical SQLi
+  require_browser_proven_xss: false  # see the xss-dom-search gap: no DOM/fragment discovery yet
+  max_unverified_high_ratio: 0.5     # 1 unconfirmed High of 2 High/Critical (was 1 of 4 before 2.11)
+  # This scan runs a real budget over a large surface, so some families legitimately report partial
+  # coverage. The value is still recorded on every card; it is not treated as a release failure.
+  require_reliable_grade: false
+  require_auth_workflow_ready: true
+  known_expectation_gaps:
+    - id: sqli-login
+      reason: >-
+        The engine finds this (verified against the worker's own sqlmap: "(custom) POST parameter
+        'JSON email' is vulnerable") but only when the endpoint's body shape is known. Body field
+        names currently come from seeded endpoints, not from discovery, and the finding lands as
+        suspected high rather than the verified critical this expectation requires.
+      needs: discovery-carried request bodies, plus body candidates routed to the proof capability
+    - id: xss-dom-search
+      reason: >-
+        The injection is in a URL fragment (#/search), which is never sent to the server. Proving it
+        needs DOM/hash-route candidate discovery, which does not exist.
+      needs: DOM candidate discovery
+    - id: xss-reflected
+      reason: Not detected by the current reflected-XSS candidate construction on this route.
+      needs: investigation
+    - id: bfla-users
+      reason: >-
+        Qualification now mints and validates two distinct principals and selects the BFLA family,
+        but the exact-SHA live benchmark has not yet proven this expectation.
+      needs: exact-SHA live differential proof, then detector investigation if the route still misses
+    - id: nosqli-reviews
+      reason: >-
+        The family now has the state-changing authority it requires, but this route is still not
+        detected.
+      needs: investigation
+    - id: exposed-confidential
+      reason: >-
+        Reconciled with the 2.3.1 exposure proof policy: a file's reachability is not proof of its
+        confidentiality. The browsable /ftp directory IS proven (exposed-ftp-listing), and its files
+        are recorded as listed-file observations, but "acquisitions.md is confidential" needs
+        content-specific proof this engine deliberately does not infer from a filename or a listing.
+      needs: content-specific confidentiality proof, or an approved per-target sensitivity assertion
+
+# Expected bug classes (class + route anchor + min severity + proof expectation).
+# `proof` is what the matching finding must carry; only matches that carry it count toward
+# expected_recall (PROOF_REQUIREMENTS in scripts/benchmark_targets.py):
+#   verified, deterministic -- proven by a deterministic proof contract, i.e. the finding's server
+#                              `verified` flag. Both spellings demand exactly the same thing;
+#                              "deterministic" is also the default when `proof` is omitted.
+#   browser                 -- verified AND a ShakerScan headless-browser execution proof.
+# A match by class, route and severity that lacks the proof is reported separately as
+# expected_detected_unproven, a diagnostic that is never counted as found.
+expected:
+  - id: sqli-search
+    family: sqli
+    route: /rest/products/search
+    min_severity: critical
+    proof: verified
+  - id: sqli-login
+    family: sqli
+    route: /rest/user/login
+    min_severity: critical
+    proof: verified
+  - id: xss-dom-search
+    family: xss
+    route: "#/search"
+    min_severity: high
+    proof: browser
+  - id: xss-reflected
+    family: xss
+    route: /rest/track-order
+    min_severity: high
+    proof: browser
+  - id: bfla-users
+    family: broken_access_control
+    route: /api/Users
+    min_severity: high
+    proof: deterministic
+  - id: exposed-metrics
+    family: sensitive_exposure
+    route: /metrics
+    min_severity: medium
+    proof: deterministic
+  - id: exposed-ftp-listing
+    family: sensitive_exposure
+    route: /ftp
+    min_severity: medium
+    proof: deterministic
+  - id: exposed-confidential
+    family: sensitive_exposure
+    route: /ftp/acquisitions.md
+    min_severity: high
+    proof: deterministic
+  - id: nosqli-reviews
+    family: nosqli
+    route: /rest/products/reviews
+    min_severity: high
+    proof: deterministic
+
+# Known hard-tail (beyond generic black-box DAST): tracked but NOT counted in the
+# min_verified_high_critical gate, so the benchmark stays fair.
+hard_tail:
+  - jwt-forged-rsa       # needs RSA pubkey recovery + HS/RS confusion
+  - rce-yaml-deser       # auth-gated, crafted YAML
+  - open-redirect-bypass # allowlist-bypass only; naive payloads 406
+  - product-blueprint    # static .stl asset
+  - stored-xss-header    # header-injection stored XSS

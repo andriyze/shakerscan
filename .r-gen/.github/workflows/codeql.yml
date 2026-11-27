@@ -1,0 +1,55 @@
+name: CodeQL analysis
+
+on:
+  push:
+    branches: [main, v2]
+  pull_request:
+    branches: [main, v2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    timeout-minutes: 30
+    concurrency:
+      group: codeql-${{ github.ref }}-${{ matrix.language }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches what the repository's default setup covered, so disabling
+        # that setup loses no coverage: javascript-typescript analyses both
+        # JavaScript and TypeScript, and actions analyses the workflows
+        # themselves. This configuration additionally runs security-extended,
+        # which the default query suite does not.
+        language: [python, javascript-typescript, actions]
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+          # Scoped, justified exclusions for rules that fire on this DAST
+          # scanner's intended behavior; every other security-extended rule runs.
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # No build step: CodeQL extracts Python and JavaScript/TypeScript from
+      # source. Running autobuild made the javascript-typescript matrix leg try
+      # to build the Next.js UI during database generation, which fails and took
+      # the whole analysis down with it -- the checked-in generated contract is
+      # already present, so nothing needs producing first.
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:${{ matrix.language }}

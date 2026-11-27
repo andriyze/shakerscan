@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.16.1}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INSTALL_ROOT="${MODEL_INTAKE_RUNNER_INSTALL_ROOT:-/opt/shakerscan/model-intake-runner}"
+SHARED_RESULTS_ROOT="${MODEL_INTAKE_RUNNER_SHARED_RESULTS_ROOT:-/var/lib/shakerscan/model-intake-results}"
+KERNEL_URL="${MODEL_INTAKE_KERNEL_URL:-}"
+KERNEL_SHA256="${MODEL_INTAKE_KERNEL_SHA256:-}"
+ROOTFS_SOURCE="${MODEL_INTAKE_ROOTFS_SOURCE:-}"
+ROOTFS_SHA256="${MODEL_INTAKE_ROOTFS_SHA256:-}"
+ROOTFS_INPUTS_SHA256="${MODEL_INTAKE_ROOTFS_INPUTS_SHA256:-}"
+# The API reaches the runner over HTTP. It runs in a container, so a loopback
+# bind is unreachable from it; the installer passes the Docker bridge address.
+# The deny-all egress policy and the internal token are what keep that safe.
+RUNNER_BIND_HOST="${MODEL_INTAKE_RUNNER_BIND_HOST:-127.0.0.1}"
+RUNNER_BIND_PORT="${MODEL_INTAKE_RUNNER_BIND_PORT:-8092}"
+TEMP_DIR="$(mktemp -d)"
+
+cleanup() { rm -rf "$TEMP_DIR"; }
+trap cleanup EXIT
+
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "Run as root on the dedicated Linux/KVM runner host" >&2
+    exit 1
+fi
+if [[ ! -e /dev/kvm ]]; then
+    echo "/dev/kvm is unavailable; nested virtualization or a bare-metal KVM host is required" >&2
+    exit 1
+fi
+if [[ -z "$KERNEL_URL" || ! "$KERNEL_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "MODEL_INTAKE_KERNEL_URL and its pinned MODEL_INTAKE_KERNEL_SHA256 are required" >&2
+    exit 1
+fi
+if [[ -z "$ROOTFS_SOURCE" || ! -f "$ROOTFS_SOURCE" || -L "$ROOTFS_SOURCE" ]]; then
+    echo "MODEL_INTAKE_ROOTFS_SOURCE must name a regular, non-symlink guest rootfs" >&2
+    exit 1
+fi
+if [[ ! "$ROOTFS_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "MODEL_INTAKE_ROOTFS_SHA256 must integrity-bind the guest rootfs" >&2
+    exit 1
+fi
+if [[ ! "$ROOTFS_INPUTS_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "MODEL_INTAKE_ROOTFS_INPUTS_SHA256 must bind the exact guest source inputs" >&2
+    exit 1
+fi
+if [[ "$SHARED_RESULTS_ROOT" != /* ]]; then
+    echo "MODEL_INTAKE_RUNNER_SHARED_RESULTS_ROOT must be an absolute host path" >&2
+    exit 1
+fi
+for command in curl debugfs docker ip mkfs.ext4 nft python3 sha256sum tar; do
+    command -v "$command" >/dev/null || { echo "Required runner command is unavailable: $command" >&2; exit 1; }
+done
+
+arch="$(uname -m)"
+case "$arch" in x86_64) ;; *) echo "The current hash-locked guest runtime supports x86_64 only: $arch" >&2; exit 1;; esac
+archive="firecracker-${FIRECRACKER_VERSION}-${arch}.tgz"
+release="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}"
+curl -fsSLo "$TEMP_DIR/$archive" "$release/$archive"
+curl -fsSLo "$TEMP_DIR/$archive.sha256.txt" "$release/$archive.sha256.txt"
+(cd "$TEMP_DIR" && sha256sum -c "$archive.sha256.txt")
+tar -C "$TEMP_DIR" -xzf "$TEMP_DIR/$archive"
+
+mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/kernel" "$INSTALL_ROOT/rootfs" "$INSTALL_ROOT/app" /srv/jailer
+release_dir="$TEMP_DIR/release-${FIRECRACKER_VERSION}-${arch}"
+# The official archive contains runnable binaries and same-prefix `.debug`
+# shared objects. Select the exact release names; `find | head` can choose the
+# debug artifact, which segfaults even for `--version`.
+install -m 0755 "$release_dir/firecracker-${FIRECRACKER_VERSION}-${arch}" "$INSTALL_ROOT/bin/firecracker"
+install -m 0755 "$release_dir/jailer-${FIRECRACKER_VERSION}-${arch}" "$INSTALL_ROOT/bin/jailer"
+"$INSTALL_ROOT/bin/firecracker" --version
+"$INSTALL_ROOT/bin/jailer" --version
+curl -fsSLo "$TEMP_DIR/vmlinux" "$KERNEL_URL"
+echo "$KERNEL_SHA256  $TEMP_DIR/vmlinux" | sha256sum -c -
+install -m 0644 "$TEMP_DIR/vmlinux" "$INSTALL_ROOT/kernel/vmlinux"
+echo "$ROOTFS_SHA256  $ROOTFS_SOURCE" | sha256sum -c -
+install -m 0644 "$ROOTFS_SOURCE" "$INSTALL_ROOT/rootfs/rootfs.ext4"
+echo "$ROOTFS_SHA256  $INSTALL_ROOT/rootfs/rootfs.ext4" | sha256sum -c -
+install -m 0644 \
+    "$ROOT_DIR/api/model_intake_control_plane.py" \
+    "$ROOT_DIR/api/model_intake_components.py" \
+    "$ROOT_DIR/api/model_intake_loader_profiles.py" \
+    "$ROOT_DIR/api/model_intake_runner_inputs.py" \
+    "$ROOT_DIR/api/model_intake_runner_controller.py" \
+    "$ROOT_DIR/api/model_intake_runner_storage.py" \
+    "$ROOT_DIR/api/model_intake_runner_receipts.py" \
+    "$ROOT_DIR/api/model_intake_firecracker_runner.py" \
+    "$ROOT_DIR/api/model_intake_runner_service.py" \
+    "$INSTALL_ROOT/app/"
+python3 -m venv "$INSTALL_ROOT/venv"
+"$INSTALL_ROOT/venv/bin/pip" install --no-cache-dir --require-hashes -r "$ROOT_DIR/runner/host/requirements.lock"
+
+mkdir -p /sys/fs/cgroup/shakerscan-model-intake
+for controller in cpu memory pids; do
+    grep -qw "$controller" /sys/fs/cgroup/cgroup.controllers || {
+        echo "Required cgroup-v2 controller unavailable: $controller" >&2
+        exit 1
+    }
+done
+echo '+cpu +memory +pids' > /sys/fs/cgroup/cgroup.subtree_control || true
+echo '+cpu +memory +pids' > /sys/fs/cgroup/shakerscan-model-intake/cgroup.subtree_control || true
+
+install -d -m 0700 /etc/shakerscan
+RUNNER_ENV=/etc/shakerscan/model-intake-runner.env
+read_runner_env() {
+    local key="$1"
+    if [[ -f "$RUNNER_ENV" ]]; then
+        sed -n "s/^${key}=//p" "$RUNNER_ENV" | tail -1
+    fi
+}
+runner_token="$(read_runner_env MODEL_INTAKE_RUNNER_INTERNAL_TOKEN)"
+if [[ -z "$runner_token" ]]; then
+    runner_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+fi
+signer_backend="$(read_runner_env MODEL_INTAKE_RUNNER_SIGNER_BACKEND)"
+allow_local_pem="$(read_runner_env MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM)"
+signing_key_file="$(read_runner_env MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM_FILE)"
+signer_key_id="$(read_runner_env MODEL_INTAKE_RUNNER_SIGNER_KEY_ID)"
+builder_id="$(read_runner_env MODEL_INTAKE_RUNNER_BUILDER_ID)"
+max_input_bytes="$(read_runner_env MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES)"
+max_output_bytes="$(read_runner_env MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES)"
+min_free_bytes="$(read_runner_env MODEL_INTAKE_RUNNER_MIN_FREE_BYTES)"
+disk_reserve_percent="$(read_runner_env MODEL_INTAKE_RUNNER_DISK_RESERVE_PERCENT)"
+auto_cleanup="$(read_runner_env MODEL_INTAKE_RUNNER_AUTO_CLEANUP)"
+work_retention_hours="$(read_runner_env MODEL_INTAKE_RUNNER_WORK_RETENTION_HOURS)"
+job_retention_days="$(read_runner_env MODEL_INTAKE_RUNNER_JOB_RETENTION_DAYS)"
+RUNNER_ENV_TEMP="${RUNNER_ENV}.partial"
+cat > "$RUNNER_ENV_TEMP" <<EOF
+MODEL_INTAKE_RUNNER_INTERNAL_TOKEN=$runner_token
+MODEL_INTAKE_RUNNER_JOB_ROOT=/var/lib/shakerscan/model-intake-runner/jobs
+MODEL_INTAKE_RUNNER_QUARANTINE_ROOT=$SHARED_RESULTS_ROOT
+MODEL_INTAKE_RUNNER_WORK_ROOT=/var/lib/shakerscan/model-intake-runner/work
+MODEL_INTAKE_RUNNER_CONVERSION_ROOT=$SHARED_RESULTS_ROOT/model-intake-conversions
+MODEL_INTAKE_JAILER_ROOT=/srv/jailer
+MODEL_INTAKE_FIRECRACKER_BIN=$INSTALL_ROOT/bin/firecracker
+MODEL_INTAKE_FIRECRACKER_SHA256=$(sha256sum "$INSTALL_ROOT/bin/firecracker" | awk '{print $1}')
+MODEL_INTAKE_JAILER_BIN=$INSTALL_ROOT/bin/jailer
+MODEL_INTAKE_JAILER_SHA256=$(sha256sum "$INSTALL_ROOT/bin/jailer" | awk '{print $1}')
+MODEL_INTAKE_KERNEL_IMAGE=$INSTALL_ROOT/kernel/vmlinux
+MODEL_INTAKE_KERNEL_SHA256=$(sha256sum "$INSTALL_ROOT/kernel/vmlinux" | awk '{print $1}')
+MODEL_INTAKE_ROOTFS_IMAGE=$INSTALL_ROOT/rootfs/rootfs.ext4
+MODEL_INTAKE_ROOTFS_SHA256=$(sha256sum "$INSTALL_ROOT/rootfs/rootfs.ext4" | awk '{print $1}')
+MODEL_INTAKE_ROOTFS_INPUTS_SHA256=$ROOTFS_INPUTS_SHA256
+MODEL_INTAKE_RUNNER_EGRESS_POLICY=deny-all
+MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES=${max_input_bytes:-137438953472}
+MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES=${max_output_bytes:-274877906944}
+MODEL_INTAKE_RUNNER_MIN_FREE_BYTES=${min_free_bytes:-10737418240}
+MODEL_INTAKE_RUNNER_DISK_RESERVE_PERCENT=${disk_reserve_percent:-10}
+MODEL_INTAKE_RUNNER_AUTO_CLEANUP=${auto_cleanup:-true}
+MODEL_INTAKE_RUNNER_WORK_RETENTION_HOURS=${work_retention_hours:-24}
+MODEL_INTAKE_RUNNER_JOB_RETENTION_DAYS=${job_retention_days:-30}
+EOF
+for preserved in \
+    "MODEL_INTAKE_RUNNER_SIGNER_BACKEND=$signer_backend" \
+    "MODEL_INTAKE_RUNNER_ALLOW_LOCAL_PEM=$allow_local_pem" \
+    "MODEL_INTAKE_RUNNER_SIGNING_KEY_PEM_FILE=$signing_key_file" \
+    "MODEL_INTAKE_RUNNER_SIGNER_KEY_ID=$signer_key_id" \
+    "MODEL_INTAKE_RUNNER_BUILDER_ID=$builder_id"; do
+    [[ "$preserved" == *= ]] || printf '%s\n' "$preserved" >> "$RUNNER_ENV_TEMP"
+done
+chmod 0600 "$RUNNER_ENV_TEMP"
+mv -f "$RUNNER_ENV_TEMP" "$RUNNER_ENV"
+install -d -m 0700 \
+    /var/lib/shakerscan/model-intake-runner/jobs \
+    /var/lib/shakerscan/model-intake-runner/work \
+    "$SHARED_RESULTS_ROOT/model-intake-conversions"
+cat > /etc/systemd/system/shakerscan-model-intake-runner.service <<EOF
+[Unit]
+Description=ShakerScan physical Model Intake Firecracker runner
+After=network.target
+ConditionPathExists=/dev/kvm
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=$INSTALL_ROOT/app
+EnvironmentFile=/etc/shakerscan/model-intake-runner.env
+ExecStart=$INSTALL_ROOT/venv/bin/uvicorn model_intake_runner_service:app --host $RUNNER_BIND_HOST --port $RUNNER_BIND_PORT --no-access-log
+Restart=on-failure
+RestartSec=3
+UMask=0077
+PrivateTmp=true
+ProtectHome=tmpfs
+# Preserve ProtectHome while exposing only the shared scan subjects. The
+# subject tree is read-only; conversion output alone receives a writable bind.
+BindReadOnlyPaths="$SHARED_RESULTS_ROOT"
+BindPaths="$SHARED_RESULTS_ROOT/model-intake-conversions"
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=false
+# ip/netns and nft telemetry require netlink control sockets. This does not add
+# a guest network device; the created namespace still has a deny-all policy.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+
+cat <<EOF
+MODEL_INTAKE_FIRECRACKER_BIN=$INSTALL_ROOT/bin/firecracker
+MODEL_INTAKE_FIRECRACKER_SHA256=$(sha256sum "$INSTALL_ROOT/bin/firecracker" | awk '{print $1}')
+MODEL_INTAKE_JAILER_BIN=$INSTALL_ROOT/bin/jailer
+MODEL_INTAKE_JAILER_SHA256=$(sha256sum "$INSTALL_ROOT/bin/jailer" | awk '{print $1}')
+MODEL_INTAKE_KERNEL_IMAGE=$INSTALL_ROOT/kernel/vmlinux
+MODEL_INTAKE_KERNEL_SHA256=$(sha256sum "$INSTALL_ROOT/kernel/vmlinux" | awk '{print $1}')
+MODEL_INTAKE_ROOTFS_IMAGE=$INSTALL_ROOT/rootfs/rootfs.ext4
+MODEL_INTAKE_ROOTFS_SHA256=$(sha256sum "$INSTALL_ROOT/rootfs/rootfs.ext4" | awk '{print $1}')
+MODEL_INTAKE_ROOTFS_INPUTS_SHA256=$ROOTFS_INPUTS_SHA256
+MODEL_INTAKE_RUNNER_EGRESS_POLICY=deny-all
+EOF
+
+if [ "${MODEL_INTAKE_RUNNER_MANAGED_INSTALL:-0}" = "1" ]; then
+    # The runner CLI enables the unit and wires the API itself; this advice is for a manual install.
+    echo "Runner service installed; the installer enables it next."
+else
+    echo "Runner service installed but not enabled. Configure a production receipt signer and builder identity"
+    echo "in /etc/shakerscan/model-intake-runner.env, copy its internal token to the API secret store, then run:"
+    echo "  systemctl enable --now shakerscan-model-intake-runner"
+fi

@@ -1,0 +1,152 @@
+import hashlib
+import asyncio
+import json
+import uuid
+
+from api.hunt.deterministic_findings import (
+    _verified_xss_fingerprint,
+    verified_xss_observations,
+    materialize_verified_hunt_findings,
+)
+from scanner.findings import templated_finding_identity
+
+
+def test_verified_xss_observations_accept_only_bound_content_free_proof():
+    records = verified_xss_observations([
+        {
+            "kind": "xss_alert",
+            "proof_state": "verified",
+            "url": "https://app.example.test/search?q=%3Cscript%3E",
+            "param": "q",
+            "payload_sha256": "a" * 64,
+            "message": "raw tool text must not survive",
+        },
+        {
+            "kind": "xss_alert",
+            "proof_state": "candidate",
+            "url": "https://app.example.test/search?q=signal",
+            "payload_sha256": "b" * 64,
+        },
+        {
+            "kind": "xss_alert",
+            "proof_state": "verified",
+            "url": "https://other.example.test/search?q=proof",
+            "payload_sha256": "c" * 64,
+        },
+    ], target_url="https://app.example.test")
+
+    assert records == [{
+        "url": "https://app.example.test/search?q=",
+        "path": "/search",
+        "param": "q",
+        "payload_sha256": "a" * 64,
+        "alert_type": None,
+    }]
+
+
+def test_verified_xss_observations_require_payload_receipt():
+    assert verified_xss_observations([{
+        "kind": "xss_alert",
+        "proof_state": "verified",
+        "url": "https://app.example.test/search?q=test",
+    }], target_url="https://app.example.test") == []
+
+
+def test_dom_xss_observations_keep_value_free_client_routes_distinct():
+    records = verified_xss_observations([
+        {
+            "kind": "xss_alert",
+            "proof_state": "verified",
+            "url": "https://app.example.test/",
+            "client_route": "/search?q=",
+            "payload_sha256": "a" * 64,
+        },
+        {
+            "kind": "xss_alert",
+            "proof_state": "verified",
+            "url": "https://app.example.test:443/",
+            "client_route": "/profile?name=",
+            "payload_sha256": "b" * 64,
+        },
+    ], target_url="https://app.example.test")
+
+    assert [record["url"] for record in records] == [
+        "https://app.example.test/#/search?q=",
+        "https://app.example.test:443/#/profile?name=",
+    ]
+    assert len({
+        _verified_xss_fingerprint(
+            record, method="GET", target_url="https://app.example.test",
+        ) for record in records
+    }) == 2
+
+
+def test_reflected_xss_uses_the_canonical_scan_fingerprint():
+    proof = {
+        "url": "https://app.example.test/search?q=",
+        "path": "/search",
+        "param": "q",
+    }
+    identity = templated_finding_identity({
+        "cwe": "CWE-79",
+        "tool": "dalfox",
+        "url": proof["url"],
+        "evidence": {"method": "GET", "param": "q"},
+    })
+    expected = "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+
+    assert _verified_xss_fingerprint(
+        proof, method="GET", target_url="https://app.example.test",
+    ) == expected
+
+
+def test_materialized_xss_has_execution_evidence_not_an_invented_impact_score():
+    class DB:
+        async def fetchrow(self, query, *args): return None
+        async def fetchval(self, query, *args):
+            self.query, self.evidence, self.severity = query, json.loads(args[4]), args[9]
+            return uuid.uuid4()
+        async def execute(self, *args): pass
+
+    db = DB()
+    ids = asyncio.run(materialize_verified_hunt_findings(
+        db, uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), "https://app.example.test",
+        "xss.verify", uuid.uuid4(), {"path": "/search"}, [{
+            "kind": "xss_alert", "proof_state": "verified", "param": "q",
+            "url": "https://app.example.test/search?q=payload", "payload_sha256": "a" * 64,
+        }],
+    ))
+    assert len(ids) == 1
+    # Severity high, and no CVSS score: the column after severity is a literal NULL.
+    assert db.severity == "high"
+    assert "$10,NULL" in db.query
+    assert "8.1" not in db.query
+    assert db.evidence["cvss"]["status"] == "not_assessed"
+    assert db.evidence["execution_sink"]["parameter"] == "q"
+    assert db.evidence["proof_state"] == "verified"
+
+
+def test_device_proof_and_verification_use_the_device_inventory():
+    class DB:
+        def __init__(self): self.queries = []
+        async def fetchrow(self, query, *args):
+            self.queries.append(query)
+            return None
+        async def fetchval(self, query, *args):
+            self.queries.append(query)
+            return uuid.uuid4()
+        async def execute(self, query, *args): self.queries.append(query)
+
+    db = DB()
+    ids = asyncio.run(materialize_verified_hunt_findings(
+        db, uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), "http://192.0.2.10",
+        "xss.verify", uuid.uuid4(), {}, [{
+            "kind": "xss_alert", "proof_state": "verified", "param": "q",
+            "url": "http://192.0.2.10/?q=payload", "payload_sha256": "a" * 64,
+        }], target_kind="device",
+    ))
+    assert len(ids) == 1
+    # The Hunt verification ledger (D21) names the finding, not its inventory.
+    assert all("device_target_id" in query for query in db.queries
+               if "finding_hunt_verifications" not in query)
+    assert "UPDATE device_targets" in db.queries[-1]

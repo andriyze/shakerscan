@@ -209,3 +209,20 @@ def test_the_authorization_gate_itself_still_refuses():
             "target_id": TARGET, "target_kind": "web", "goal": "g",
             "policy": {"active_testing": True, "authorization_confirmed": True},
         })
+
+
+def test_account_creation_is_off_by_default_and_implies_state_changing_http_and_active_testing():
+    assert start({"active_testing": True}).policy.allow_account_creation is False
+    contract = start({"allow_account_creation": True})
+    policy = contract.policy
+    assert policy.allow_account_creation and policy.allow_state_changing_http and policy.active_testing
+    assert any("allow_state_changing_http was enabled" in line and "allow_account_creation" in line
+               for line in contract.adjustments), contract.adjustments
+    assert any("active_testing was enabled" in line for line in contract.adjustments)
+
+
+def test_account_creation_needs_confirmed_authorization_like_every_active_authority():
+    from hunt.start_contract import HuntStartContractError
+    with pytest.raises(HuntStartContractError, match="authorization_confirmed"):
+        normalize_hunt_start_payload({"target_id": TARGET, "target_kind": "web", "goal": "g",
+                                      "policy": {"allow_account_creation": True}})

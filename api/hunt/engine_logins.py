@@ -26,6 +26,12 @@ class EngineLogins:
         self.feature_writes_done: set[tuple[str, str, str]] = set()
         self.object_authz_done = False
 
+    def _record(self, key: str, entry: Mapping[str, Any], limit: int = 200) -> None:
+        """Append to a clean-up list in the discovery state (the coverage report and debrief show it)."""
+        entries = self.state.setdefault(key, [])
+        if len(entries) < limit:
+            entries.append(dict(entry))
+
     def adopt_login(self, label: str, bindings: list[dict[str, str]] | None, *,
                     account: Mapping[str, str] | None = None, refs: Mapping[str, str] | None = None) -> None:
         """A login the sweep established (an account it made, a default pair it found accepted)."""
@@ -55,8 +61,12 @@ class EngineLogins:
                     self._note(f"engine account: signed up on {path} but could not sign in as it")
                     break
                 made += 1
-                self.adopt_login(f"account {chr(96 + made)} ({path})", login["bindings"], account=account,
+                label = f"account {chr(96 + made)} ({path})"
+                self.adopt_login(label, login["bindings"], account=account,
                                  refs={**(signed_up.get("refs") or {}), **(login.get("refs") or {})})
+                # For the operator's clean-up: what was made on the target (never the password).
+                self._record("engine_accounts", {"label": label, "signup_route": f"POST {path}",
+                                                 "email": account["email"], "username": account["username"]})
 
     async def _sign_up(self, path: str, params: Sequence[str], account: Mapping[str, str]) -> dict[str, Any] | None:
         body = ea.signup_body(params, account)
@@ -148,6 +158,8 @@ class EngineLogins:
             if path is None:
                 return  # a templated write to an object that is not this account's own
             body = {name: ea.field_value(name, login["account"], login["refs"]) for name in list(params)[:20]}
+            self._record("engine_writes", {"login": login["label"], "request": f"{method} {path}",
+                                           "fields": sorted(body)[:20]})
             async with gate:
                 await self._safe("http.request", {"method": method, "path": path,
                                                   "json_body": body, "follow_redirects": False,

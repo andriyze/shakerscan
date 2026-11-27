@@ -1,0 +1,224 @@
+"""The Model Intake toolchain lives in its own image, not in the scanner or API images.
+
+The scanner and API images ship to every worker; the Model Intake artifact toolchain (semgrep,
+modelscan, trivy, osv-scanner, their databases, and the pip-audit virtual environment) is ~2GB and
+only the Model Intake worker and sandbox need it. This split builds
+it as an overlay on the exact scanner runtime -- the same base the API image uses -- so the Model
+Intake services run the identical code and tool paths, while the scanner and API images shrink and
+the release carries no build-tool vulnerability waivers.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import re
+
+import yaml
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+SCANNER = (ROOT / "scanner" / "Dockerfile").read_text(encoding="utf-8")
+MI = (ROOT / "scanner" / "Dockerfile.model-intake").read_text(encoding="utf-8")
+
+
+def test_the_scanner_image_no_longer_builds_the_model_intake_toolchain():
+    for token in (
+        "/opt/model-intake-tools/${tool}",
+        "ARG TRIVY_VERSION",
+        "ARG OSV_SCANNER_VERSION",
+        "model_intake_safetensors_selftest.py",
+        "model_intake_adapter_self_test.py",
+        "/opt/tools/trivy --version",
+    ):
+        assert token not in SCANNER, f"scanner image still builds the toolchain: {token}"
+    # The web/DAST toolchain stays and is still verified.
+    assert "/opt/tools/katana -version" in SCANNER
+    assert "/opt/tools/gungnir -h | head -1" in SCANNER
+    # The tiny Model Intake dependency locks stay in the scanner image: the runtime build
+    # fingerprint hashes /opt/model-intake-locks, so all three images must carry them to stay on one
+    # fingerprint. The heavy toolchain that consumes them does not.
+    assert "COPY scanner/model_intake_tools /opt/model-intake-locks" in SCANNER
+
+
+def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():
+    assert "ARG SCANNER_RUNTIME_IMAGE" in MI
+    assert "FROM ${SCANNER_RUNTIME_IMAGE}" in MI
+    # It carries the whole toolchain and runs the adapter self-test that gates the image.
+    for token in (
+        "COPY scanner/model_intake_tools /opt/model-intake-locks",
+        "for tool in modelscan fickling semgrep safetensors pip-audit;",
+        "ARG TRIVY_VERSION=0.74.0",
+        "ARG OSV_SCANNER_VERSION=2.5.1",
+        "model_intake_safetensors_selftest.py",
+        "model_intake_adapter_self_test.py",
+    ):
+        assert token in MI, f"Model Intake image is missing {token}"
+    # The scanner base purged the C toolchain and pip/venv machinery; the overlay restores them to
+    # build the venvs, then purges again.
+    assert "python3-pip-whl python3-setuptools-whl" in MI
+    assert MI.count("apt-get purge -y --auto-remove") == 1
+    assert "AS model-intake-go-tools" in MI
+    assert "golang:1.26.11-bookworm@sha256:" in MI
+    assert "golang.org/x/crypto@v0.58.0" in MI
+    assert "golang.org/x/net@v0.62.0" in MI
+    assert MI.count("check_dep \"$tool\" golang.org/x/net v0.62.0") == 1
+    assert "google.golang.org/grpc@v1.83.2" in MI
+    # Trivy 0.74.0 is built with go-jose v4.1.4 (CVE-2026-116587, fixed in 4.1.6): the Trivy build
+    # lifts it, and the builder proves the lifted version in the binary's metadata.
+    trivy_lifts = MI.split("cd /src/trivy;", 1)[1].split("go build", 1)[0]
+    assert "github.com/go-jose/go-jose/v4@v4.1.6" in trivy_lifts
+    assert MI.count("check_dep trivy github.com/go-jose/go-jose/v4 v4.1.6") == 1
+    assert "COPY --from=model-intake-go-tools /out/trivy /out/osv-scanner /out/" in MI
+    # The image installs exactly the two binaries, through the binaries-only stage, so cached
+    # builds need not restore the Go build stage.
+    assert "FROM scratch AS model-intake-go-tools-out" in MI
+    assert "COPY --from=model-intake-go-tools-out /out/trivy /opt/tools/trivy" in MI
+    assert "COPY --from=model-intake-go-tools-out /out/osv-scanner /opt/tools/osv-scanner" in MI
+    assert MI.count("COPY --from=model-intake-go-tools") == 3
+    assert "aquasecurity/trivy/releases/download" not in MI
+
+
+def test_the_release_images_have_no_vulnerability_waivers():
+    waivers = json.loads((ROOT / "security" / "image-vulnerability-waivers.json").read_text())["waivers"]
+    assert waivers == []
+    validator = (ROOT / "scripts" / "validate_vulnerability_waivers.py").read_text()
+    # The validator derives its image set from the canonical inventory, so the Model Intake
+    # image is a known waiver target without a literal copy of the name.
+    assert "release_image_inventory" in validator
+    inventory = json.loads((ROOT / "install" / "release-images.json").read_text())
+    assert "model_intake" in {item["key"] for item in inventory["images"]}
+
+
+def _locked_version(lock: pathlib.Path, package: str) -> tuple[int, ...]:
+    match = re.search(rf"^{package}==([0-9.]+) ", lock.read_text(encoding="utf-8"), re.MULTILINE)
+    assert match, f"{package} is not pinned in {lock}"
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def test_pyjwt_stays_above_the_token_forgery_fix_despite_semgreps_pin():
+    # Semgrep pins pyjwt~=2.13.0; 2.13.x fails the image gate (CVE-2026-102268 and five highs,
+    # fixed in 2.14.0). The Semgrep lock overrides that pin rather than waiving the finding.
+    for lock in ("scanner/model_intake_tools/semgrep.lock", "scanner/requirements.lock"):
+        assert _locked_version(ROOT / lock, "pyjwt") >= (2, 14, 0), lock
+    semgrep_lock = (ROOT / "scanner" / "model_intake_tools" / "semgrep.lock").read_text(encoding="utf-8")
+    # Regenerating the lock from its recorded command must keep the override...
+    assert "--override scanner/model_intake_tools/semgrep-overrides.txt" in semgrep_lock.splitlines()[1]
+    # ...and pip must install the overridden graph as locked instead of re-resolving Semgrep's pin.
+    assert 'if [ "${tool}" = "semgrep" ]; then deps="--no-deps"; fi;' in MI
+
+
+def test_model_intake_pip_audit_environment_removes_avoidable_build_tools():
+    lock = ROOT / "scanner" / "model_intake_tools" / "pip-audit.lock"
+
+    # GHSA-6v7p-g79w-8964 affects msgpack <=1.2.0 and CVE-2026-114613 (GHSA-j586-36cw-2gc2, a
+    # memory leak on a strict_map_key failure) affects 1.2.1; 1.2.3 carries both fixes.
+    assert _locked_version(lock, "msgpack") >= (1, 2, 3)
+    # setuptools is seeded by some distro venv implementations but is not in the
+    # hash-locked runtime graph. Remove it and prove it is absent during the build.
+    # The four tool venvs lose pip (whose vendor.txt names msgpack 1.1.2 and setuptools 70.3.0)
+    # and setuptools outright. pip-audit keeps pip for pip-api but loses the two vendored
+    # packages; the build proves the stripped pip still serves pip-audit and its cache build.
+    assert 'for tool in modelscan fickling semgrep safetensors; do' in MI
+    assert '-m pip uninstall -y pip setuptools' in MI
+    assert 'rm -rf "$vendor/msgpack" "$vendor/pkg_resources"' in MI
+    assert "sed -i '/^msgpack==/d; /^setuptools==/d' \"$vendor/vendor.txt\"" in MI
+    assert 'find_spec("pip._vendor.msgpack") is None' in MI
+    assert MI.index('rm -rf "$vendor/msgpack"') < MI.index("/opt/tools/pip-audit-offline --build-cache")
+    offline = (ROOT / "scanner" / "model_intake_tools" / "pip_audit_offline.py").read_text()
+    assert "--disable-pip" in offline
+
+
+def _service(compose_path, name):
+    return yaml.safe_load(compose_path.read_text(encoding="utf-8"))["services"][name]
+
+
+def test_both_model_intake_services_run_the_model_intake_image():
+    release = ROOT / "docker-compose.release.yml"
+    for name in ("model-intake-worker", "model-intake-sandbox"):
+        assert "MODEL_INTAKE_IMAGE" in _service(release, name)["image"], name
+    dev = ROOT / "docker-compose.yml"
+    for name in ("model-intake-worker", "model-intake-sandbox"):
+        assert "MODEL_INTAKE_SANDBOX_IMAGE" in _service(dev, name)["image"], name
+
+
+def test_the_local_build_builds_the_model_intake_overlay():
+    scanner_sh = (ROOT / "scanner.sh").read_text(encoding="utf-8")
+    assert "-f scanner/Dockerfile.model-intake" in scanner_sh
+    assert "SCANNER_RUNTIME_IMAGE=${worker_image}" in scanner_sh
+    # It is built after the worker runtime and reuses it, never rebuilding the scanner base.
+    assert scanner_sh.index("scanner_runtime compose build") < scanner_sh.index("model_intake_overlay docker build")
+
+
+def test_the_scanner_image_removes_the_base_images_virtualenv_remnants():
+    # The Playwright base ships virtualenv, whose embedded pip wheels vendor msgpack and setuptools;
+    # those were the only findings left on the scanner and API images after the toolchain split.
+    assert "pip uninstall -y --break-system-packages virtualenv" in SCANNER
+    assert "rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv" in SCANNER
+    assert 'find_spec("virtualenv") is None' in SCANNER
+    # The removal happens in the scanner base, which the API and Model Intake images build from.
+    assert SCANNER.index("uninstall -y --break-system-packages virtualenv") < SCANNER.index("uninstall -y --break-system-packages pip")
+
+
+def test_the_base_images_virtualenv_and_its_dependencies_leave_before_the_locked_python_tree():
+    # virtualenv 21 requires filelock<4, and an --ignore-installed install left the base's filelock
+    # 3.x metadata beside the locked 4.x one, which the image vulnerability gate reports. The API
+    # copies the scanner's Python tree over the same base, so it removes them before that copy.
+    removal = "pip uninstall -y --break-system-packages virtualenv python-discovery distlib platformdirs filelock"
+    api = (ROOT / "scanner" / "Dockerfile.api").read_text(encoding="utf-8")
+    assert SCANNER.index(removal) < SCANNER.index("-r /app/requirements.lock")
+    assert api.index(removal) < api.index("COPY --from=scanner-runtime /usr/local/lib/python3.12")
+    # The Playwright base also ships its own packaging distribution: both images remove it before
+    # their locked tree lands, or the duplicate check below fails the build (Playwright 1.65 base).
+    assert SCANNER.index("uninstall -y --break-system-packages packaging") < SCANNER.index("-r /app/requirements.lock")
+    api_removal = api[api.index(removal):].split("\n", 1)[0]
+    assert " packaging" in api_removal
+    # Both images fail the build when a distribution is installed twice under /usr/local.
+    duplicate_check = 'md.distributions(path=["/usr/local/lib/python3.12/dist-packages"])'
+    assert SCANNER.index("pip check") < SCANNER.index(duplicate_check) < SCANNER.index("COPY scanner/model_intake_tools")
+    assert api.index("COPY --from=scanner-runtime /usr/local/lib/python3.12") < api.index(duplicate_check)
+
+
+def test_fleet_overlays_carry_no_model_intake_service():
+    """Fleet workers never consume the Model Intake queue (worker_queue_policy), and after the
+    split the fleet worker image has no toolchain, so a Model Intake sandbox on a fleet node
+    would only fail on start. The overlays must not define one."""
+    for name in ("docker-compose.worker.yml", "docker-compose.broker-worker.yml"):
+        overlay = yaml.safe_load((ROOT / name).read_text(encoding="utf-8"))
+        services = set((overlay.get("services") or {}).keys())
+        assert not {s for s in services if "model-intake" in s}, (name, sorted(services))
+        assert "model_intake_sandbox.py" not in (ROOT / name).read_text(encoding="utf-8")
+
+
+def test_model_intake_image_prunes_pip_sbom_and_scans_itself_with_the_release_policy():
+    """The image that ships a vulnerability scanner proves its own toolchain clean at build time.
+
+    Candidates 7d85939f and ba415089 failed the image gate on msgpack 1.1.2 and setuptools
+    70.3.0 after the vendored code had been removed: pip's CycloneDX SBOM still listed them and
+    Trivy reports from it. The Dockerfile now prunes the SBOM and then runs the release gate's
+    exact policy (severity, fixed-only rule, exit code, waiver file, skip list) over the toolchain
+    and its own native scanners, so a finding fails the build instead of certification.
+    """
+    import yaml
+
+    dockerfile = (ROOT / "scanner" / "Dockerfile.model-intake").read_text()
+    assert 'prune_pip_vendor_sbom.py "$vendor/bom.cdx.json" msgpack setuptools' in dockerfile
+    assert (ROOT / "scanner" / "model_intake_tools" / "prune_pip_vendor_sbom.py").is_file()
+    assert "! grep -Eq '\"name\": *\"(msgpack|setuptools)\"' \"$vendor/bom.cdx.json\"" in dockerfile
+    self_scan = dockerfile[dockerfile.index("COPY security/image-vulnerability-waivers.json"):]
+    assert "/opt/tools/trivy rootfs --cache-dir /opt/trivy-cache --skip-db-update" in self_scan
+    assert "for root in /opt/model-intake-tools /tmp/image-gate/native; do" in self_scan
+    assert "--image model-intake" in self_scan and '--skip-dirs "" --skip-files ""' in self_scan
+
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "release-candidate.yml").read_text())
+    job = workflow["jobs"]["vulnerability-scan"]
+    gate = next(step for step in job["steps"] if step.get("name") == "Reject high or critical image vulnerabilities")["with"]
+    target = next(item for item in job["strategy"]["matrix"]["target"] if item["name"] == "model-intake")
+    assert f"--severity {gate['severity']}" in self_scan
+    assert ("--ignore-unfixed" in self_scan) is bool(gate["ignore-unfixed"])
+    assert f"--exit-code {gate['exit-code']}" in self_scan
+    assert f"--scanners {gate['scanners']}" in self_scan
+    assert target["skip_dirs"] == "" and target["skip_files"] == ""
+    assert "security/image-vulnerability-waivers.json" in self_scan
+    # The self-scan runs after the offline database is baked and before the runtime gates.
+    assert self_scan.index("trivy rootfs") < self_scan.index("model_intake_safetensors_selftest.py")
+    assert dockerfile.index("--download-db-only") < dockerfile.index("trivy rootfs")

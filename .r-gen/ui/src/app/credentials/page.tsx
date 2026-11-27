@@ -1,0 +1,833 @@
+'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
+import AuthenticationProfiles from '@/components/AuthenticationProfiles'
+
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Plus, RefreshCw, RotateCw, Search, Share2, ShieldCheck, Trash2, X } from 'lucide-react'
+import { targetOptions, targetSearchNote } from '@/lib/pickerOptions'
+import { ShareCredentialDialog } from '@/components/credentials/ShareCredentialDialog'
+import {
+  createTargetPolicyApprovalReceipt,
+} from '@/lib/api'
+import {
+  createCredentialProfile,
+  deactivateCredentialProfile,
+  listCredentialCapabilities,
+  listCredentialLibrary,
+  listCredentialProfiles,
+  revokeCredentialGrant,
+  type CredentialCapabilityOption,
+  rotateCredentialProfile,
+  type CredentialAuthKind,
+  type CredentialPrincipalSlot,
+  type CredentialProfile,
+  type CredentialSecretPayload,
+  type CredentialTargetKind,
+} from '@/lib/credentialApi'
+import {
+  Button,
+  Card,
+  ConfirmDialog,
+  EmptyState,
+  Field,
+  Input,
+  Modal,
+  PageHeader,
+  Select,
+  Combobox,
+  Textarea,
+  useToast,
+} from '@/components/ui'
+import { getTargetAsset, searchTargetAssets } from '@/lib/targetAssetApi'
+import { useTargetSearch } from '@/lib/useTargetSearch'
+import { useUrlFilters } from '@/lib/useUrlFilters'
+import { LIST_V1_MAX_LIMIT } from '@/lib/listPage.mjs'
+import { readFailureText, resolveTargetByOrigin } from '@/lib/targetSearchModel.mjs'
+
+const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
+  { value: 'bearer_token', label: 'Bearer token' },
+  { value: 'authorization_header', label: 'Authorization header' },
+  { value: 'api_key_header', label: 'API key header' },
+  { value: 'cookie', label: 'Cookie' },
+  { value: 'basic_auth', label: 'Basic authentication' },
+  { value: 'form_login', label: 'Form login' },
+  { value: 'json_login', label: 'JSON login' },
+  { value: 'oauth_client_credentials', label: 'OAuth client credentials' },
+  { value: 'oauth_password', label: 'OAuth password flow' },
+  { value: 'custom_headers', label: 'Custom headers' },
+  { value: 'query_parameter', label: 'Query parameter' },
+]
+const SSH_KINDS: { value: CredentialAuthKind; label: string }[] = [
+  { value: 'ssh_password', label: 'SSH password' },
+  { value: 'ssh_private_key', label: 'SSH private key' },
+  { value: 'ssh_private_key_with_passphrase', label: 'SSH key + passphrase' },
+]
+
+type Draft = {
+  name: string
+  authKind: CredentialAuthKind
+  principalLabel: string
+  principalSlot: CredentialPrincipalSlot
+  secret: string
+  username: string
+  secondarySecret: string
+  headerName: string
+  browserStorageKey: string
+  endpointUrl: string
+  clientId: string
+  scopes: string
+  customHeaders: string
+  expiresAt: string
+  capabilities: string
+  allowActiveCapabilities: boolean
+}
+
+type DraftErrors = Partial<Record<keyof Draft, string>>
+
+const EMPTY_DRAFT: Draft = {
+  name: '',
+  authKind: 'bearer_token',
+  principalLabel: '',
+  principalSlot: 'primary',
+  secret: '',
+  username: '',
+  secondarySecret: '',
+  headerName: 'X-API-Key',
+  browserStorageKey: '',
+  endpointUrl: '',
+  clientId: '',
+  scopes: '',
+  customHeaders: '',
+  expiresAt: '',
+  capabilities: '',
+  allowActiveCapabilities: false,
+}
+
+function splitValues(value: string): string[] {
+  return Array.from(new Set(value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean)))
+}
+
+function customHeaders(value: string): Record<string, string> | undefined {
+  if (!value.trim()) return undefined
+  const result: Record<string, string> = {}
+  for (const line of value.split('\n').map((item) => item.trim()).filter(Boolean)) {
+    const separator = line.indexOf(':')
+    if (separator < 1 || !line.slice(separator + 1).trim()) {
+      throw new Error('Each custom header must use “Name: value” on its own line.')
+    }
+    result[line.slice(0, separator).trim()] = line.slice(separator + 1).trim()
+  }
+  return result
+}
+
+function isSsh(kind: CredentialAuthKind): boolean {
+  return kind.startsWith('ssh_')
+}
+
+// Mirrors IDENTITY_PAIR_KINDS in api/runtime/credentials.py. These flows accept either half
+// of the username/secret pair on its own, so neither field is individually required -- but at
+// least one must be present. A UI test asserts this list matches the backend constant.
+const IDENTITY_PAIR_KINDS: CredentialAuthKind[] = ['basic_auth', 'form_login', 'oauth_password', 'json_login']
+
+function isIdentityPair(kind: CredentialAuthKind): boolean {
+  return IDENTITY_PAIR_KINDS.includes(kind)
+}
+
+// Which kinds show a username field at all. SSH additionally requires it.
+function showsUsername(kind: CredentialAuthKind): boolean {
+  return isIdentityPair(kind) || isSsh(kind)
+}
+
+function needsEndpoint(kind: CredentialAuthKind): boolean {
+  return ['form_login', 'oauth_client_credentials', 'oauth_password', 'json_login'].includes(kind)
+}
+
+function validateDraft(draft: Draft, rotating: boolean): DraftErrors {
+  const errors: DraftErrors = {}
+  if (!rotating && !draft.name.trim()) errors.name = 'Enter a profile name.'
+  if (!rotating && isSsh(draft.authKind) && !splitValues(draft.capabilities).length) {
+    errors.capabilities = 'Select at least one explicitly approved SSH capability.'
+  }
+  if (isSsh(draft.authKind) && !draft.username.trim()) errors.username = 'Enter the username for this identity.'
+  if ((draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && !draft.headerName.trim()) {
+    errors.headerName = draft.authKind === 'query_parameter' ? 'Enter the parameter name.' : 'Enter the header name.'
+  }
+  if (draft.authKind === 'bearer_token' && draft.browserStorageKey.trim() && !/^[A-Za-z0-9_.:-]{1,200}$/.test(draft.browserStorageKey.trim())) {
+    errors.browserStorageKey = 'Use 1–200 letters, numbers, dots, colons, underscores, or hyphens.'
+  }
+  if (needsEndpoint(draft.authKind) && !draft.endpointUrl.trim()) errors.endpointUrl = 'Enter the login or token endpoint.'
+  if (draft.authKind === 'oauth_client_credentials' && !draft.clientId.trim()) errors.clientId = 'Enter the OAuth client ID.'
+  if (draft.authKind === 'custom_headers') {
+    if (!draft.customHeaders.trim()) errors.customHeaders = 'Enter at least one Name: value header.'
+  } else if (isIdentityPair(draft.authKind)) {
+    if (!draft.username.trim() && !draft.secret.trim()) {
+      const message = 'Enter a username, a secret, or both.'
+      errors.username = message
+      errors.secret = message
+    }
+  } else if (!draft.secret.trim()) {
+    errors.secret = draft.authKind.startsWith('ssh_private_key') ? 'Paste the private key.' : 'Enter the secret value.'
+  }
+  if (draft.authKind === 'ssh_private_key_with_passphrase' && !draft.secondarySecret.trim()) {
+    errors.secondarySecret = 'Enter the private-key passphrase.'
+  }
+  return errors
+}
+
+function secretPayload(draft: Draft): CredentialSecretPayload {
+  const kind = draft.authKind
+  const payload: CredentialSecretPayload = {}
+  // A pair kind omits the half it does not hold rather than sending an empty string, so the
+  // stored envelope records absence instead of a blank value.
+  if (isIdentityPair(kind)) {
+    if (draft.secret.trim()) payload.secret = draft.secret
+    if (draft.username.trim()) payload.username = draft.username
+  } else {
+    if (kind !== 'custom_headers') payload.secret = draft.secret
+    if (showsUsername(kind)) payload.username = draft.username
+  }
+  if (kind === 'ssh_private_key_with_passphrase') payload.secondary_secret = draft.secondarySecret
+  if (kind === 'api_key_header') payload.header_name = draft.headerName
+  if (kind === 'query_parameter') payload.parameter_name = draft.headerName
+  if (kind === 'bearer_token' && draft.browserStorageKey.trim()) {
+    payload.browser_storage_key = draft.browserStorageKey.trim()
+  }
+  if (needsEndpoint(kind)) payload.endpoint_url = draft.endpointUrl
+  if ((kind === 'oauth_client_credentials' || kind === 'oauth_password') && draft.clientId.trim()) {
+    payload.client_id = draft.clientId
+  }
+  if (kind === 'oauth_client_credentials' || kind === 'oauth_password') {
+    payload.scopes = splitValues(draft.scopes)
+  }
+  if (kind === 'custom_headers') payload.custom_headers = customHeaders(draft.customHeaders)
+  if (draft.expiresAt) payload.expires_at = new Date(draft.expiresAt).toISOString()
+  return payload
+}
+
+// Content-free description of which half of a username/secret pair a profile holds. Only
+// meaningful for pair kinds, where either half alone is a valid identity.
+function identityComposition(profile: CredentialProfile): string | null {
+  if (!isIdentityPair(profile.auth_kind)) return null
+  const hasUsername = profile.configuration.username_configured
+  const hasSecret = profile.configuration.secret_configured
+  if (hasUsername && hasSecret) return 'username + secret'
+  if (hasUsername) return 'username only'
+  if (hasSecret) return 'secret only'
+  return null
+}
+
+function statusClass(profile: CredentialProfile): string {
+  if (profile.status === 'active' && !profile.refresh_required) {
+    return 'bg-emerald-500/10 text-emerald-300'
+  }
+  if (profile.status === 'expired' || profile.refresh_required) {
+    return 'bg-amber-500/10 text-amber-300'
+  }
+  return 'bg-gray-800 text-gray-400'
+}
+
+const TARGET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network', 'device']
+
+export default function CredentialsPage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-sm text-gray-400">Loading credential targets…</div>}>
+      <CredentialsContent />
+    </Suspense>
+  )
+}
+
+function CredentialsContent() {
+  const toast = useToast()
+  const appliedDeepLink = useRef(false)
+  // The selected target lives in the URL, so reload, Back and links keep it.
+  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string; target?: string }>()
+  const targetKind: CredentialTargetKind = TARGET_KINDS.includes(filters.target_kind as CredentialTargetKind)
+    ? filters.target_kind as CredentialTargetKind
+    : 'web'
+  const targetId = filters.target_id || ''
+  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, target: undefined }), [setFilters])
+  const [missingTarget, setMissingTarget] = useState<string | null>(null)
+  // A URL link the search could neither find nor rule out: the page bound was reached, or a page
+  // read failed (`failure` says why).
+  const [unconfirmedTarget, setUnconfirmedTarget] = useState<{url: string; scanned: number; failure?: string} | null>(null)
+  const latestProfileRequest = useRef(0)
+  const [profiles, setProfiles] = useState<CredentialProfile[]>([])
+  const [includeInactive, setIncludeInactive] = useState(false)
+  const [profilesLoading, setProfilesLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [rotating, setRotating] = useState<CredentialProfile | null>(null)
+  const [deactivating, setDeactivating] = useState<CredentialProfile | null>(null)
+  const [sharing, setSharing] = useState<CredentialProfile | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
+  const [draftErrors, setDraftErrors] = useState<DraftErrors>({})
+  const [editorError, setEditorError] = useState<string | null>(null)
+  const [capabilityOptions, setCapabilityOptions] = useState<CredentialCapabilityOption[]>([])
+  const [capabilitiesLoading, setCapabilitiesLoading] = useState(false)
+
+  // The target picker searches the inventory on the server, one bounded page per query; the
+  // selected target (from a link or a choice) is read on its own below.
+  // A web or API credential belongs to a web app: the scan form offers only the profiles of the web
+  // target it scans, so a web credential saved on the app's host was never offered there.
+  const targetSearch = useTargetSearch({ includeServices: true, webOnly: targetKind === 'web' || targetKind === 'api' })
+  const { remember } = targetSearch
+  const selectedAsset = targetId ? targetSearch.byId(targetId) : undefined
+  // The matches, plus the selection (read on its own below) so it stays a choice while the
+  // operator searches for something else.
+  const assets = useMemo(() => selectedAsset && !targetSearch.assets.some((asset) => asset.id === selectedAsset.id)
+    ? [...targetSearch.assets, selectedAsset] : targetSearch.assets, [selectedAsset, targetSearch.assets])
+  // A selected id that is neither known nor reported missing is still being read.
+  const resolvingTarget = Boolean(targetId) && !selectedAsset && missingTarget !== targetId
+  const searchReady = targetSearch.ready
+
+  const selectedChoice = useMemo(() => selectedAsset ? {
+    id: selectedAsset.id, label: selectedAsset.name || selectedAsset.locator,
+    detail: /^https?:\/\//i.test(selectedAsset.url) ? selectedAsset.url : selectedAsset.locator,
+  } : undefined, [selectedAsset])
+  const targetOptionList = useMemo(() => targetOptions(assets), [assets])
+  // Narrow the loaded list without another request: text, principal slot and status.
+  const [search, setSearch] = useState('')
+  const [slotFilter, setSlotFilter] = useState<'' | CredentialProfile['principal_slot']>('')
+  const [statusFilter, setStatusFilter] = useState<'' | 'active' | 'expiring' | 'expired' | 'inactive'>('')
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const visibleProfiles = useMemo(() => {
+    const words = search.toLowerCase().split(/\s+/).filter(Boolean)
+    return profiles.filter((profile) => {
+      if (slotFilter && profile.principal_slot !== slotFilter) return false
+      if (statusFilter === 'expiring' && !(profile.refresh_required && profile.status === 'active')) return false
+      if (statusFilter && statusFilter !== 'expiring' && profile.status !== statusFilter) return false
+      const text = [profile.name, profile.principal_label, profile.auth_kind, profile.principal_slot,
+        profile.home_target_name, profile.home_target_locator].filter(Boolean).join(' ').toLowerCase()
+      return words.every((word) => text.includes(word))
+    })
+  }, [profiles, search, slotFilter, statusFilter])
+  const slotCounts = useMemo(() => profiles.reduce<Record<string, number>>((counts, profile) => {
+    counts[profile.principal_slot] = (counts[profile.principal_slot] || 0) + 1
+    return counts
+  }, {}), [profiles])
+
+  // A link may name a target by URL (?target=) or id (?target_id=). The URL is resolved by a
+  // server search for its host, read page by page (bounded) until a row with the same origin is
+  // found or the matches run out: the search sorts by name, so the exact origin can follow many
+  // other matches (an apex domain behind its subdomains). "Not found" is said only once every
+  // matching page was read; a failed read (server error, refused cursor, lost connection) is shown
+  // as such and keeps the link. The id is read directly.
+  useEffect(() => {
+    const requestedUrl = typeof filters.target === 'string' ? filters.target : ''
+    if (targetId || !requestedUrl) return
+    let requested: URL
+    try { requested = new URL(requestedUrl) } catch { setMissingTarget(requestedUrl); return }
+    const controller = new AbortController()
+    resolveTargetByOrigin({
+      url: requested.href,
+      signal: controller.signal,
+      fetchPage: (position: string | number | null) => searchTargetAssets({
+        search: requested.host, limit: LIST_V1_MAX_LIMIT, includeServices: true, webOnly: true, position,
+      }, controller.signal),
+    })
+      .then((result) => {
+        if (result.target) { remember(result.target); setFilters({target_id:result.target.id,target:undefined}) }
+        else if (result.status === 'unconfirmed') setUnconfirmedTarget({url: requestedUrl, scanned: result.scanned})
+        else if (result.status === 'failed') setUnconfirmedTarget({url: requestedUrl, scanned: result.scanned, failure: result.error})
+        else setMissingTarget(requestedUrl)
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) setUnconfirmedTarget({url: requestedUrl, scanned: 0, failure: readFailureText(reason)})
+      })
+    return () => controller.abort()
+  },[filters.target,remember,setFilters,targetId])
+
+  // Read the selected id on its own only once the first search page answered without it.
+  useEffect(() => {
+    if (!targetId || selectedAsset || !searchReady) return
+    let cancelled = false
+    getTargetAsset(targetId).then((result) => {
+      if (cancelled) return
+      if (!result.target.is_active) {setMissingTarget(targetId);return}
+      const origin = result.origins.find((item) => item.id === targetId)
+      const exact = origin ? {...result.target,...origin,asset_id:result.target.id,locator:origin.url} : result.target
+      if (exact.id !== targetId || !exact.is_active) {setMissingTarget(targetId);return}
+      remember(exact)
+    }).catch(() => {if (!cancelled) setMissingTarget(targetId)})
+    return () => {cancelled = true}
+  },[remember,searchReady,selectedAsset,targetId])
+
+  const loadProfiles = useCallback(async () => {
+    // Only the latest request may fill the list: a slower answer for a target that is no longer
+    // selected would show its profiles under the new target, and Rotate or Deactivate would act on them.
+    const request = ++latestProfileRequest.current
+    // A linked ID is queried only once it is a known target: an unknown one gets the notice above
+    // rather than an API error.
+    if (targetId && !selectedChoice) {
+      // Still being read: keep the loading state instead of an empty list.
+      if (resolvingTarget) setProfilesLoading(true)
+      else { setProfiles([]); setProfilesLoading(false) }
+      return
+    }
+    setProfilesLoading(true)
+    try {
+      // No target selected: the library of every credential, with where each is shared.
+      const result = targetId
+        ? await listCredentialProfiles({
+            target_kind: targetKind,
+            target_id: targetId,
+            include_inactive: includeInactive,
+          })
+        : await listCredentialLibrary({ include_inactive: includeInactive, limit: 500 })
+      if (request !== latestProfileRequest.current) return
+      setProfiles(result.profiles || [])
+      setError(null)
+    } catch (cause) {
+      if (request !== latestProfileRequest.current) return
+      setProfiles([])
+      setError(cause instanceof Error ? cause.message : 'Failed to load credential profiles')
+    } finally {
+      if (request === latestProfileRequest.current) setProfilesLoading(false)
+    }
+  }, [includeInactive, resolvingTarget, selectedChoice, targetId, targetKind])
+
+  useEffect(() => { void loadProfiles() }, [loadProfiles])
+
+  const availableKinds = ['network','device'].includes(targetKind) ? [...HTTP_KINDS, ...SSH_KINDS] : HTTP_KINDS
+
+  function openCreate() {
+    const firstKind = availableKinds[0]?.value || 'bearer_token'
+    setRotating(null)
+    setDraft({
+      ...EMPTY_DRAFT,
+      authKind: firstKind,
+      principalSlot: isSsh(firstKind) ? 'ssh' : 'primary',
+    })
+    setDraftErrors({})
+    setEditorError(null)
+    setEditorOpen(true)
+  }
+
+  useEffect(() => {
+    if (!editorOpen || rotating) return
+    let cancelled = false
+    setCapabilitiesLoading(true)
+    listCredentialCapabilities({ target_kind: targetKind, auth_kind: draft.authKind })
+      .then((result) => {
+        if (cancelled) return
+        setCapabilityOptions(result.capabilities || [])
+        setDraft((current) => ({
+          ...current,
+          capabilities: (result.safe_defaults || []).join(', '),
+          allowActiveCapabilities: false,
+        }))
+      })
+      .catch((cause) => {
+        if (!cancelled) setEditorError(cause instanceof Error ? cause.message : 'Failed to load capability registry')
+      })
+      .finally(() => { if (!cancelled) setCapabilitiesLoading(false) })
+    return () => { cancelled = true }
+  }, [draft.authKind, editorOpen, rotating, targetKind])
+
+  function openRotate(profile: CredentialProfile) {
+    setRotating(profile)
+    setDraft({
+      ...EMPTY_DRAFT,
+      name: profile.name,
+      authKind: profile.auth_kind,
+      principalLabel: profile.principal_label || '',
+      principalSlot: profile.principal_slot,
+      headerName: profile.configuration.parameter_name || profile.configuration.header_name || 'X-API-Key',
+      browserStorageKey: profile.configuration.browser_storage_key || '',
+      capabilities: profile.allowed_capabilities.join(', '),
+    })
+    setDraftErrors({})
+    setEditorError(null)
+    setEditorOpen(true)
+  }
+
+  function updateDraft(patch: Partial<Draft>) {
+    setDraft((current) => ({ ...current, ...patch }))
+    setDraftErrors((current) => {
+      const next = { ...current }
+      for (const key of Object.keys(patch) as (keyof Draft)[]) delete next[key]
+      return next
+    })
+    setEditorError(null)
+  }
+
+  function changeTargetKind(kind: CredentialTargetKind) {
+    if (kind === targetKind) return
+    // Switching capability views preserves the asset identity and shared records.
+    setProfiles([])
+    setError(null)
+    setMissingTarget(null)
+    setUnconfirmedTarget(null)
+    setFilters({ target_kind: kind === 'web' ? undefined : kind, target: undefined })
+  }
+
+  async function saveProfile() {
+    if (!targetId) return
+    const validationErrors = validateDraft(draft, Boolean(rotating))
+    if (Object.keys(validationErrors).length) {
+      setDraftErrors(validationErrors)
+      setEditorError('Complete the highlighted required fields before saving this credential.')
+      return
+    }
+    setEditorError(null)
+    setBusy(true)
+    try {
+      const material = secretPayload(draft)
+      if (rotating) {
+        await rotateCredentialProfile(rotating.id, {
+          ...material,
+          expected_record_version: rotating.record_version,
+          created_by: 'credentials_ui',
+        })
+        toast.success('Credential rotated. Existing jobs remain bound to their admitted version.')
+      } else {
+        const selectedTarget = selectedChoice
+        const activeApproval = draft.allowActiveCapabilities && selectedTarget
+          ? await createTargetPolicyApprovalReceipt({
+              targetId,
+              targetUrl: selectedTarget.detail,
+              riskTier: 'credential',
+              environment: targetKind === 'device' || targetKind === 'network' ? 'lab' : 'production',
+            })
+          : null
+        await createCredentialProfile({
+          ...material,
+          target_kind: targetKind,
+          target_id: targetId,
+          name: draft.name.trim(),
+          auth_kind: draft.authKind,
+          principal_label: draft.principalLabel.trim() || undefined,
+          principal_slot: draft.principalSlot,
+          allowed_capabilities: splitValues(draft.capabilities),
+          allow_active_capabilities: draft.allowActiveCapabilities,
+          approval_receipt_id: activeApproval?.approvalReceiptId,
+          created_by: 'credentials_ui',
+        })
+        toast.success('Encrypted credential profile created')
+      }
+      setEditorOpen(false)
+      await loadProfiles()
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Credential update failed'
+      setEditorError(message)
+      toast.error(message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Viewing a target a credential is shared with: remove the share for this target only.
+  async function stopSharingHere(profile: CredentialProfile) {
+    if (!targetId) return
+    setBusy(true)
+    try {
+      await revokeCredentialGrant(profile.id, targetId)
+      toast.success(`${profile.name} is no longer shared with this target`)
+      await loadProfiles()
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : 'Failed to stop sharing')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function deactivate() {
+    if (!deactivating) return
+    setBusy(true)
+    try {
+      await deactivateCredentialProfile(deactivating.id)
+      toast.success('Credential profile deactivated')
+      setDeactivating(null)
+      await loadProfiles()
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : 'Failed to deactivate profile')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+
+  return (
+    <div className="mx-auto max-w-6xl">
+      <PageHeader
+        title="Credentials"
+        description="Encrypted identities for Scan and Hunt. Each belongs to one target and can be shared with others. Secret values are accepted only when creating or rotating, and never shown again."
+        actions={<><Button variant="secondary" onClick={() => void loadProfiles()} disabled={!targetId || profilesLoading}><RefreshCw className="h-4 w-4" /> Refresh</Button><Button onClick={openCreate} disabled={!targetId}><Plus className="h-4 w-4" /> New profile</Button></>}
+      />
+
+      <Card className="mb-5 p-5">
+        <div className="grid gap-4 md:grid-cols-[180px_minmax(0,1fr)_auto] md:items-end">
+          <Field label="Target type">
+            <Select value={targetKind} onChange={(event) => changeTargetKind(event.target.value as CredentialTargetKind)}>
+              <option value="web">Web</option>
+              <option value="api">API</option>
+              {featureEnabled('network_testing') && <option value="network">Network / SSH</option>}
+              {featureEnabled('devices') && <option value="device">Connected device</option>}
+            </Select>
+          </Field>
+          <Field label="Target">
+            <Combobox value={selectedChoice ? targetId : ''} options={targetOptionList} noneLabel="All targets"
+              searchPlaceholder="Search targets by name, host or environment…"
+              onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} optionsQuery={targetSearch.answeredQuery} footerNote={targetSearchNote(targetSearch)}
+              onChange={(value) => { setMissingTarget(null); setUnconfirmedTarget(null); setTargetId(value) }} />
+          </Field>
+          <label className="flex h-10 items-center gap-2 text-sm text-gray-400">
+            <input type="checkbox" checked={includeInactive} onChange={(event) => setIncludeInactive(event.target.checked)} />
+            Show inactive
+          </label>
+        </div>
+        <div className="mt-4 flex flex-col gap-3 border-t border-gray-800 pt-4 lg:flex-row lg:items-center">
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-gray-500" aria-hidden="true" />
+            <input aria-label="Search credentials" value={search} onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search by name, principal, authentication type or owner…"
+              className="h-9 w-full rounded-lg border border-gray-700 bg-gray-800 pl-9 pr-8 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden" />
+            {search && <button type="button" aria-label="Clear credential search" onClick={() => setSearch('')} className="absolute right-2 top-2.5 text-gray-500 hover:text-gray-200"><X className="h-4 w-4" /></button>}
+          </div>
+          <div role="group" aria-label="Filter by slot" className="flex flex-wrap gap-1">
+            {(['', 'primary', 'secondary', 'service', 'ssh'] as const).map((slot) => (
+              <button key={slot || 'all'} type="button" aria-pressed={slotFilter === slot} onClick={() => setSlotFilter(slot)}
+                className={`rounded-lg px-2.5 py-1.5 text-xs ${slotFilter === slot ? 'bg-blue-500/15 text-blue-200 ring-1 ring-inset ring-blue-400/30' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'}`}>
+                {slot ? `${slot === 'ssh' ? 'SSH' : slot.charAt(0).toUpperCase() + slot.slice(1)} ${slotCounts[slot] || 0}` : `All ${profiles.length}`}
+              </button>
+            ))}
+          </div>
+          <Select fullWidth={false} aria-label="Credential status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)} className="h-9 py-1.5">
+            <option value="">Any status</option>
+            <option value="active">Active</option>
+            <option value="expiring">Expiring soon</option>
+            <option value="expired">Expired</option>
+            {includeInactive && <option value="inactive">Inactive</option>}
+          </Select>
+        </div>
+      </Card>
+
+      {missingTarget && (
+        <div role="alert" className="mb-4 rounded-sm border border-amber-900/60 bg-amber-950/30 p-3 text-sm text-amber-200">
+          The linked target {missingTarget} was not found among active targets that can hold credentials. Choose a target above.
+        </div>
+      )}
+      {unconfirmedTarget && (
+        <div role="alert" className="mb-4 rounded-sm border border-amber-900/60 bg-amber-950/30 p-3 text-sm text-amber-200">
+          {unconfirmedTarget.failure
+            ? <>Could not finish searching for the linked target {unconfirmedTarget.url}: {unconfirmedTarget.failure}. Search for it above, or reload to try again.</>
+            : <>Could not find the linked target {unconfirmedTarget.url} among the first {unconfirmedTarget.scanned} targets matching its host. Search for it above.</>}
+        </div>
+      )}
+      {targetId && (targetKind === 'web' || targetKind === 'api') && <AuthenticationProfiles targetId={targetId} credentials={profiles} />}
+      {error && <div className="mb-4 rounded-sm border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">{error}</div>}
+      {profilesLoading ? (
+        <Card className="p-6 text-sm text-gray-400">Loading profiles…</Card>
+      ) : !profiles.length ? (
+        <EmptyState
+          message={targetId ? 'No credentials for this target' : 'No credentials yet'}
+          hint={targetId
+            ? 'Create one for this target, or share an existing credential from another target. Workers decrypt it only after approval and destination checks pass.'
+            : 'Choose a target to create a credential. You can then share it with other targets.'}
+          action={targetId ? { label: 'Create profile', onClick: openCreate } : undefined}
+        />
+      ) : (
+        <div className="space-y-3">
+          {!visibleProfiles.length && <Card className="p-6 text-center text-sm text-gray-500">No credentials match these filters.</Card>}
+          {visibleProfiles.map((profile) => (
+            <Card key={profile.id} className="p-5">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="font-semibold text-white">{profile.name}</h2>
+                    <span className={`rounded-sm px-2 py-0.5 text-xs ${statusClass(profile)}`}>
+                      {profile.refresh_required && profile.status === 'active' ? 'expiring soon' : profile.status}
+                    </span>
+                    <span className="rounded-sm bg-blue-500/10 px-2 py-0.5 text-xs text-blue-300">{profile.principal_slot}</span>
+                    {profile.shared && (
+                      <span className="rounded-sm bg-violet-500/10 px-2 py-0.5 text-xs text-violet-300" data-testid="shared-from">
+                        shared from {profile.home_target_name || 'another target'}
+                      </span>
+                    )}
+                    {!targetId && (profile.shared_target_count || 0) > 0 && (
+                      <span className="rounded-sm bg-violet-500/10 px-2 py-0.5 text-xs text-violet-300">
+                        shared with {profile.shared_target_count} {profile.shared_target_count === 1 ? 'target' : 'targets'}
+                      </span>
+                    )}
+                  </div>
+                  {!targetId && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      Owner{' '}
+                      <button
+                        type="button"
+                        className="text-blue-300 hover:text-blue-200"
+                        onClick={() => setFilters({ target_kind: profile.target_kind === 'web' ? undefined : profile.target_kind, target_id: profile.target_id })}
+                      >
+                        {profile.home_target_name || profile.home_target_locator || 'its target'}
+                      </button>
+                      {profile.home_target_name && profile.home_target_locator ? <span className="font-mono"> · {profile.home_target_locator}</span> : null}
+                    </p>
+                  )}
+                  <p className="mt-1 text-sm text-gray-400">
+                    {profile.auth_kind.replaceAll('_', ' ')} · version {profile.current_version}
+                    {identityComposition(profile) ? ` · ${identityComposition(profile)}` : ''}
+                    {profile.principal_label ? ` · ${profile.principal_label}` : ''}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
+                    {profile.allowed_capabilities.length
+                      ? <>
+                          {(expanded.has(profile.id) ? profile.allowed_capabilities : profile.allowed_capabilities.slice(0, 6)).map((item) => <span key={item} className="rounded-sm bg-gray-900 px-2 py-1">{item}</span>)}
+                          {profile.allowed_capabilities.length > 6 && (
+                            <button type="button" className="rounded-sm px-2 py-1 text-blue-300 hover:bg-blue-500/10"
+                              aria-expanded={expanded.has(profile.id)}
+                              onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(profile.id)) next.delete(profile.id); else next.add(profile.id); return next })}>
+                              {expanded.has(profile.id) ? 'Show fewer' : `+${profile.allowed_capabilities.length - 6} more capabilities`}
+                            </button>
+                          )}
+                        </>
+                      : <span className="rounded-sm bg-amber-500/10 px-2 py-1 text-amber-300">no capabilities · legacy profile is unusable until narrowed explicitly</span>}
+                    {profile.expires_at && <span>expires {new Date(profile.expires_at).toLocaleString()}</span>}
+                  </div>
+                  <p className="mt-3 flex items-center gap-1.5 text-xs text-emerald-400">
+                    <ShieldCheck className="h-3.5 w-3.5" /> encrypted storage · secret values hidden
+                  </p>
+                </div>
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  {profile.shared ? (
+                    // Rotate and deactivate belong to the owner; here it can only stop being shared.
+                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => void stopSharingHere(profile)}><X className="h-4 w-4" /> Stop sharing here</Button>
+                  ) : (
+                    <>
+                      {profile.is_active && <Button size="sm" variant="secondary" onClick={() => setSharing(profile)}><Share2 className="h-4 w-4" /> Share…</Button>}
+                      {profile.is_active && <Button size="sm" variant="secondary" onClick={() => openRotate(profile)}><RotateCw className="h-4 w-4" /> Rotate</Button>}
+                      {profile.is_active && <Button size="sm" variant="ghost" onClick={() => setDeactivating(profile)}><Trash2 className="h-4 w-4" /> Deactivate</Button>}
+                      <DeleteRecordsButton selection={{ kind: 'credential_profile', id: profile.id }} label="Delete permanently"
+                        variant="ghost" subject={`credential ${profile.name}`} onDeleted={() => void loadProfiles()}
+                        className="text-red-300 hover:text-red-200" />
+                    </>
+                  )}
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      <Modal
+        open={editorOpen}
+        title={rotating ? `Rotate ${rotating.name}` : 'New credential profile'}
+        onClose={() => { if (!busy) setEditorOpen(false) }}
+        footer={<><Button variant="secondary" disabled={busy} onClick={() => setEditorOpen(false)}>Cancel</Button><Button loading={busy} onClick={() => void saveProfile()}>{rotating ? 'Rotate credential' : 'Create profile'}</Button></>}
+      >
+        {editorError && (
+          <div role="alert" className="mb-4 rounded-sm border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">
+            {editorError}
+          </div>
+        )}
+        <div className="grid gap-4 sm:grid-cols-2">
+          {!rotating && <Field label="Profile name" error={draftErrors.name} required><Input value={draft.name} onChange={(event) => updateDraft({ name: event.target.value })} /></Field>}
+          <Field label="Authentication type" required>
+            <Select
+              value={draft.authKind}
+              disabled={Boolean(rotating)}
+              onChange={(event) => {
+                const kind = event.target.value as CredentialAuthKind
+                updateDraft({
+                  authKind: kind,
+                  principalSlot: isSsh(kind) ? 'ssh' : draft.principalSlot === 'ssh' ? 'primary' : draft.principalSlot,
+                  capabilities: '',
+                  allowActiveCapabilities: false,
+                })
+                setDraftErrors({})
+              }}
+            >
+              {availableKinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </Select>
+          </Field>
+          {!rotating && <Field label="Principal slot"><Select value={draft.principalSlot} disabled={isSsh(draft.authKind)} onChange={(event) => updateDraft({ principalSlot: event.target.value as CredentialPrincipalSlot })}><option value="primary">Primary</option><option value="secondary">Secondary</option><option value="service">Service</option>{isSsh(draft.authKind) && <option value="ssh">SSH</option>}</Select></Field>}
+          {!rotating && <Field label="Principal label"><Input value={draft.principalLabel} onChange={(event) => updateDraft({ principalLabel: event.target.value })} placeholder="Optional human-readable identity" /></Field>}
+          {showsUsername(draft.authKind) && <Field label="Username" error={draftErrors.username} required={isSsh(draft.authKind)} hint={isIdentityPair(draft.authKind) ? 'Optional if you supply a secret below.' : undefined}><Input autoComplete="off" value={draft.username} onChange={(event) => updateDraft({ username: event.target.value })} /></Field>}
+          {(draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && <Field label={draft.authKind === 'query_parameter' ? 'Parameter name' : 'Header name'} error={draftErrors.headerName} required><Input value={draft.headerName} onChange={(event) => updateDraft({ headerName: event.target.value })} /></Field>}
+          {draft.authKind === 'bearer_token' && <Field label="Browser localStorage key" error={draftErrors.browserStorageKey} hint="Optional. Set this only when the application reads its bearer token from localStorage."><Input value={draft.browserStorageKey} onChange={(event) => updateDraft({ browserStorageKey: event.target.value })} placeholder="token" /></Field>}
+          {needsEndpoint(draft.authKind) && <Field label="Login / token endpoint" error={draftErrors.endpointUrl} required><Input value={draft.endpointUrl} onChange={(event) => updateDraft({ endpointUrl: event.target.value })} placeholder="/login or https://target/token" /></Field>}
+          {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label={draft.authKind === 'oauth_client_credentials' ? 'Client ID' : 'Client ID (required for Scan)'} error={draftErrors.clientId} required={draft.authKind === 'oauth_client_credentials'}><Input autoComplete="off" value={draft.clientId} onChange={(event) => updateDraft({ clientId: event.target.value })} /></Field>}
+          {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label="OAuth scopes"><Input value={draft.scopes} onChange={(event) => updateDraft({ scopes: event.target.value })} placeholder="openid profile" /></Field>}
+          {draft.authKind !== 'custom_headers' && (draft.authKind === 'ssh_private_key' || draft.authKind === 'ssh_private_key_with_passphrase' ? (
+            <Field className="sm:col-span-2" label="Private key" error={draftErrors.secret} required><Textarea rows={7} value={draft.secret} onChange={(event) => updateDraft({ secret: event.target.value })} /></Field>
+          ) : (
+            <Field className="sm:col-span-2" label={draft.authKind === 'authorization_header' ? 'Full Authorization value' : draft.authKind === 'cookie' ? 'Cookie value' : 'Secret'} error={draftErrors.secret} required={!isIdentityPair(draft.authKind)} hint={isIdentityPair(draft.authKind) ? 'Optional if you supply a username above.' : undefined}><Input type="password" autoComplete="new-password" value={draft.secret} onChange={(event) => updateDraft({ secret: event.target.value })} /></Field>
+          ))}
+          {draft.authKind === 'ssh_private_key_with_passphrase' && <Field className="sm:col-span-2" label="Key passphrase" error={draftErrors.secondarySecret} required><Input type="password" autoComplete="new-password" value={draft.secondarySecret} onChange={(event) => updateDraft({ secondarySecret: event.target.value })} /></Field>}
+          {draft.authKind === 'custom_headers' && <Field className="sm:col-span-2" label="Headers" hint="One Name: value pair per line. Values are encrypted and will not be shown again." error={draftErrors.customHeaders} required><Textarea rows={6} value={draft.customHeaders} onChange={(event) => updateDraft({ customHeaders: event.target.value })} /></Field>}
+          <Field label="Expires at"><Input type="datetime-local" value={draft.expiresAt} onChange={(event) => updateDraft({ expiresAt: event.target.value })} /></Field>
+          {!rotating && (
+            <div className="sm:col-span-2 rounded-lg border border-gray-800 bg-gray-950 p-3">
+              <p className="text-sm font-medium text-gray-200">Allowed capabilities</p>
+              <p className="mt-1 text-xs text-gray-500">
+                {isSsh(draft.authKind)
+                  ? 'SSH profiles require an explicit capability selection and target-bound approval.'
+                  : 'Selected from the canonical registry. No selection resolves to the server\'s safe defaults, never unrestricted access.'}
+              </p>
+              {draftErrors.capabilities && <p className="mt-2 text-xs text-red-300">{draftErrors.capabilities}</p>}
+              {capabilitiesLoading ? (
+                <p className="mt-3 text-xs text-gray-500">Loading canonical capabilities…</p>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {capabilityOptions.map((capability) => {
+                    const selected = splitValues(draft.capabilities).includes(capability.name)
+                    return (
+                      <label key={capability.name} className="flex items-start gap-3 rounded-sm border border-gray-800 p-2 text-xs text-gray-300">
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(event) => {
+                            const values = new Set(splitValues(draft.capabilities))
+                            if (event.target.checked) values.add(capability.name)
+                            else values.delete(capability.name)
+                            updateDraft({ capabilities: Array.from(values).sort().join(', ') })
+                          }}
+                          className="mt-1"
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex flex-wrap items-center gap-2">
+                            <code>{capability.name}</code>
+                            <span className={`rounded-sm px-1.5 py-0.5 ${capability.requires_active_approval ? 'bg-amber-500/10 text-amber-300' : 'bg-emerald-500/10 text-emerald-300'}`}>
+                              {capability.risk_tier}
+                            </span>
+                            {capability.default && <span className="text-blue-300">safe default</span>}
+                          </span>
+                          <span className="mt-1 block text-gray-500">{capability.description}</span>
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+              {capabilityOptions.some((item) => item.requires_active_approval && splitValues(draft.capabilities).includes(item.name)) && (
+                <label className="mt-3 flex items-start gap-2 rounded-sm border border-amber-700/50 bg-amber-500/10 p-2 text-xs text-amber-100">
+                  <input type="checkbox" checked={draft.allowActiveCapabilities} onChange={(event) => updateDraft({ allowActiveCapabilities: event.target.checked })} className="mt-0.5" />
+                  I explicitly elevate this profile for the selected active capabilities. Runtime policy and target-bound approval are still required.
+                </label>
+              )}
+            </div>
+          )}
+        </div>
+        <p className="mt-5 text-xs text-gray-500">The secret is sent once over the local API, encrypted before storage, and resolved only inside an authorized worker action.</p>
+      </Modal>
+
+      <ShareCredentialDialog
+        profile={sharing}
+        onClose={() => setSharing(null)}
+        onChanged={() => void loadProfiles()}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deactivating)}
+        title="Deactivate credential profile?"
+        message="New Scan and Hunt actions will no longer be able to resolve this profile, on its own target or any target it is shared with. Historical receipts remain intact."
+        confirmLabel="Deactivate"
+        danger
+        busy={busy}
+        onConfirm={() => void deactivate()}
+        onCancel={() => setDeactivating(null)}
+      />
+    </div>
+  )
+}

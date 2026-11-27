@@ -1,0 +1,4454 @@
+"""Pure Scan report assembly from terminal action results and observations."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import urllib.parse
+from collections import Counter
+from types import MappingProxyType
+from typing import Any, Mapping, Sequence
+
+from . import scoring
+from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
+from .auth_endpoint_probe import AUTH_ENDPOINT_PACE_UNFUNDED, AUTH_ENDPOINT_PROBE_LIMITED
+from .action_plan import ScanActionPlan
+from .capability_result import (
+    BUDGET_EXHAUSTION_REASONS,
+    CapabilityResultReason,
+    CapabilityResultReference,
+    CapabilityResultStatus,
+)
+from .contracts import (
+    SCAN_APPLICATION_SURFACE_FAMILIES,
+    budget_sufficiency,
+    scan_family_capabilities,
+)
+from .finding_evidence import template_classification, tls_finding_evidence, tls_untrusted_by_leaf_weakness
+from .external_process import (
+    ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND,
+    TEMPLATE_WINDOW_BEYOND_ALLOWLIST,
+    TEMPLATE_WINDOW_PAST_BASES,
+    TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN,
+)
+from .posture_findings import (
+    CORS_PROBE_ACTIONS, OPT_IN_HEADERS, cors_findings, dns_posture_findings, open_redirect_finding,
+    redact_url_queries, weak_header_findings,
+)
+from .negative_control import indistinguishable_from_absent, is_negative_control_url
+from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
+from .severity_calibration import calibrate_findings
+from .sqli_stages import INCONCLUSIVE_RECORD_KIND, sqli_budget_outcomes
+from .verification_extension import PROOF_LEFT_REASONS, superseding_results
+from .continuation import (
+    ScanContinuationError,
+    ScanPlanRevision,
+    root_scan_plan_revision,
+)
+
+# Records that name an endpoint too slow for its checks to settle inside the Scan's budget.
+_SLOW_ENDPOINT_RECORD_KINDS = frozenset({
+    "template_slow_endpoint", "exposure_probe_timeout", INCONCLUSIVE_RECORD_KIND,
+})
+
+
+def _assurance_unavailable_summary(
+    options: Mapping[str, Any], *, interrupted_action_count: int = 0,
+    health_observations: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Stand in for the assurance preview when it cannot be imported.
+
+    `report-rebuild` runs from an installed tree that carries no third-party packages, and the
+    preview's models need pydantic, so importing it must never be required to rebuild a report.
+    This claims nothing: no profile is projected, no health sample is counted, nothing is
+    proven, and the absence is stated in `limitations` rather than left to be inferred from a
+    clean-looking block.
+    """
+    references = options.get("credential_profile_refs") if isinstance(options, Mapping) else None
+    interrupted = max(0, int(interrupted_action_count or 0))
+    return {
+        "schema_version": "authentication-assurance/v1",
+        "authentication_requested": bool(references) or bool(interrupted),
+        "state": "unknown",
+        "reason_code": "authentication_gap" if interrupted else "not_validated",
+        "profiles": [],
+        "coverage": "unverified",
+        "health_sample_count": 0,
+        "valid_health_sample_count": 0,
+        "uncertain_health_sample_count": 0,
+        "health_timeline": [],
+        "interrupted_action_count": interrupted,
+        "continuous_authentication_proven": False,
+        "finding_evidence_preserved": True,
+        "limitations": [
+            "authentication assurance was not available in this runtime;"
+            " no identity state is established by this report"
+        ],
+        "secret_values_visible": False,
+    }
+
+
+try:
+    from authenticated_assurance.evaluation import scan_authentication_summary
+except ImportError:
+    try:
+        from api.authenticated_assurance.evaluation import scan_authentication_summary
+    except ImportError:
+        # Both spellings resolve to the same module; reaching here means a dependency of the
+        # preview is absent, not that the path was wrong.
+        scan_authentication_summary = _assurance_unavailable_summary
+
+
+SCAN_REPORT_SCHEMA = "canonical-scan-report/v2"
+# Reported as missing when absent from a response, so the report says what is not there
+# rather than only what is.
+_EXPECTED_SECURITY_HEADERS: tuple[str, ...] = (
+    "content-security-policy",
+    "referrer-policy",
+    "strict-transport-security",
+    "x-content-type-options",
+    "x-frame-options",
+)
+# The posture headers every baseline response records whether present or not (the HTTP
+# capability's _SECURITY_POSTURE_HEADERS; a test pins the two together). Only for these does an
+# absent key prove the response lacked the header.
+_BASELINE_RECORDED_HEADERS: frozenset[str] = frozenset({
+    "strict-transport-security", "content-security-policy",
+    "content-security-policy-report-only", "x-frame-options", "x-content-type-options",
+    "referrer-policy", "permissions-policy", "cross-origin-opener-policy",
+    "cross-origin-embedder-policy", "cross-origin-resource-policy",
+    "access-control-allow-origin", "access-control-allow-credentials", "server", "x-powered-by",
+})
+# Hosts listed in the report's subdomain section; the discovery capability itself is bounded.
+# Every listed name is what the recording resolves and turns into targets, so the list holds as
+# many names as DNS checks (target_resolution.DISCOVERY_RESOLVE_LIMIT).
+_REPORTED_SUBDOMAIN_LIMIT = 10_000
+_ACTIVE_VERIFIER_CAPABILITIES = frozenset({
+    "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
+    "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
+    "xss.request_verify", "sqli.request_verify", "browser.proof",
+    "xss.request_verify_batch", "sqli.request_verify_batch", "sqli.prove_batch",
+    "xss.browser_prove_batch", "exposure.verify_batch", "nosqli.verify_batch",
+    "authz_surface.verify_batch", "graphql.verify_batch", "injection.verify_batch",
+})
+_TRAFFIC_BUDGETS = frozenset({
+    "http_requests", "state_changing_requests", "browser_actions",
+    "tcp_ports_attempted", "hosts_attempted",
+})
+
+
+def active_verifier_attempted_nothing(
+    capability_name: str, status: Any, consumed: Mapping[str, Any], candidate_count: int,
+) -> bool:
+    """An active verifier that finished with candidates waiting but sent no traffic.
+
+    The report and the coverage explanation both read zero-attempt work through this one
+    predicate, so the page and the stored report always name the same actions.
+    """
+    status_value = getattr(status, "value", status)
+    return (
+        capability_name in _ACTIVE_VERIFIER_CAPABILITIES
+        and candidate_count > 0
+        and status_value in {"success", "partial"}
+        and not any(
+            int(amount or 0) > 0 for name, amount in consumed.items() if name in _TRAFFIC_BUDGETS
+        )
+    )
+
+
+# Context collection is retained in the action ledger but cannot improve or
+# weaken vulnerability coverage, assurance, score, or grade.
+_INFORMATIONAL_CAPABILITIES = frozenset({"infrastructure.inspect"})
+# Every selected-family capability collapsed to the canonical family it serves,
+# so coverage and grade reliability are reported per resolved family.
+# Proof escalation runs over the candidates a verifier already attempted, so it
+# is part of the family's authority but not part of its execution coverage.
+# Folding the two together counted the same candidates twice and let a proof
+# action that was correctly skipped as not_applicable mark a fully-executed
+# family incomplete -- raising a selected-family gap and making the whole grade
+# unreliable for work that had succeeded.
+# A skip for one of these means the escalation was never able to run, not that
+# it ran and produced nothing.
+_PROOF_UNAVAILABLE_REASONS = frozenset({
+    "insufficient_plan_budget",
+    "placement_unavailable",
+    "dependency_incomplete",
+})
+_PROOF_CAPABILITIES = frozenset({
+    "xss.browser_prove_batch",
+    "sqli.prove_batch",
+})
+# Best-effort checks that ride a family's authority without escalating its candidates:
+# capability -> (family, key of the check's own row inside the family's coverage). They are
+# never required, so they do not move the family's status, but a check that ran nothing says
+# so in its own row instead of leaving the report.
+_AUXILIARY_CHECKS: Mapping[str, tuple[str, str]] = MappingProxyType({
+    "redirect.verify_batch": ("xss", "open_redirect"),
+})
+# authz.verify plans one cross-principal ownership comparison over the endpoint manifest and
+# records it as an ``authz_differential``, not as candidate attempts. These reasons say the
+# target offered nothing to compare, as opposed to a comparison that never happened.
+_AUTHZ_NOTHING_TO_EXAMINE = frozenset({"no_target_bound_routes"})
+# Optional surface discovery feeds every later stage. When its own budget cut it short --
+# its output allowance, request ceiling or wall, or the plan could not fund it at all --
+# part of the application was never examined, so the Scan's coverage is not complete even
+# though no required action failed. A crawl that spent 1,500 of 1,500 requests in 21 of
+# 300 seconds and stopped `output_truncated` still reported `coverage: complete`.
+_SURFACE_DISCOVERY_CAPABILITIES = frozenset({
+    "web.crawl", "web.browser_crawl", "web.content_discover", "web.spec_ingest",
+})
+_DISCOVERY_TRUNCATION_REASONS = frozenset({
+    "output_truncated",
+    "timed_out",
+    "http_request_budget_exhausted",
+    "insufficient_plan_budget",
+    "crawler_memory_bound_exceeded",
+    # Killed mid-crawl by a signal (the kernel's OOM killer): cut short like the bound.
+    "process_killed",
+    # Stopped, or never started, because the Scan reached its time limit.
+    "scan_time_limit",
+})
+_DISCOVERY_FAILED_STATUSES = frozenset({
+    CapabilityResultStatus.FAILED, CapabilityResultStatus.BLOCKED,
+})
+# GraphQL checks (capabilities/graphql_probe.py): title and CWE per check.
+_GRAPHQL_CHECKS = {
+    "field_suggestions": ("GraphQL field suggestions enabled", "CWE-200"),
+    "alias_limit_absent": ("GraphQL alias limit absent (100 aliases in one query)", "CWE-770"),
+    "duplicate_field_limit_absent": (
+        "GraphQL duplicate field limit absent (100 duplicates in one query)", "CWE-770",
+    ),
+}
+_GRAPHQL_EXPOSURE_TITLES = {
+    "graphql_introspection_enabled": "GraphQL introspection enabled",
+    "graphql_ide_exposure": "GraphQL IDE served publicly",
+}
+
+
+def _url_without_query(value: Any) -> Any:
+    try:
+        parts = urllib.parse.urlsplit(str(value or ""))
+    except ValueError:
+        return value
+    if not parts.scheme or not parts.netloc:
+        return value
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path or "/", "", ""))
+
+
+_FAMILY_BY_CAPABILITY = {
+    "xss.verify_batch": "xss",
+    "xss.request_verify_batch": "xss",
+    "xss.browser_prove_batch": "xss",
+    "sqli.verify_batch": "sqli",
+    "sqli.request_verify_batch": "sqli",
+    "sqli.prove_batch": "sqli",
+    "templates.passive_batch": "nuclei_passive",
+    "templates.active_batch": "nuclei_active",
+    "exposure.verify_batch": "sensitive_exposure",
+    "nosqli.verify_batch": "nosqli",
+    "injection.verify_batch": "server_injection",
+    "authz_surface.verify_batch": "authz_surface",
+    "graphql.verify_batch": "graphql",
+    "authz.verify": "bola",
+}
+
+# The candidate manifests a family's verifier slices index. A family fed only by these whose
+# manifests hold no entry had nothing to test, so planning no action for it was correct.
+# hunt/discovered_secrets.SECRET_REF_PATTERN; a stored observation's reference is kept only in it.
+_SECRET_REF_RE = re.compile(
+    r"secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+_CANDIDATE_MANIFEST_KINDS_BY_FAMILY: Mapping[str, frozenset[str]] = {
+    "xss": frozenset({"candidate", "request_candidate"}),
+    "sqli": frozenset({"candidate", "request_candidate"}),
+    "nosqli": frozenset({"candidate"}),
+    "server_injection": frozenset({"candidate", "request_candidate"}),
+}
+
+
+# The crawls find the parameterized routes a candidate manifest indexes. One that settled with
+# output (complete, partial or cut short by its wall) examined the surface; one that failed, was
+# refused, skipped or cancelled did not.
+_CANDIDATE_CRAWL_CAPABILITIES = frozenset({"web.crawl", "web.browser_crawl"})
+_CRAWL_EXAMINED_STATUSES = frozenset({
+    CapabilityResultStatus.SUCCESS, CapabilityResultStatus.PARTIAL,
+    CapabilityResultStatus.TIMED_OUT,
+})
+
+
+def _discovery_family_row(
+    family: str, actions: Sequence[Any], action_results: Mapping[str, Any], *, reason: str | None,
+) -> dict[str, Any]:
+    """Coverage for the discovery family: whether the plan's discovery actions settled.
+
+    Discovery has no verifier and no candidates, so its counters are zero and it carries no
+    proof escalation. ``reason`` is why discovery fell short, by the rules the Scan's own
+    coverage uses; None means it settled.
+    """
+    reserved: dict[str, int] = {}
+    consumed: dict[str, int] = {}
+    for action in actions:
+        result = action_results[action.action_id]
+        for name, amount in result.budget_reserved.items():
+            reserved[name] = reserved.get(name, 0) + int(amount)
+        for name, amount in result.budget_consumed.items():
+            consumed[name] = consumed.get(name, 0) + int(amount)
+    return {
+        "family": family, "selected": True,
+        "required": any(action.required for action in actions),
+        "batch_actions": len(actions), "planned_candidates": 0, "attempted_candidates": 0,
+        "unattempted_candidates": 0, "manifest_candidates": 0, "unscheduled_candidates": 0,
+        "verified_findings": 0, "suspected_findings": 0,
+        "budget_reserved": reserved, "budget_consumed": consumed,
+        # How each discovery action ended; the actions themselves are in capability_coverage.
+        "action_statuses": dict(sorted(Counter(
+            action_results[action.action_id].status.value for action in actions
+        ).items())),
+        "coverage_status": "partial" if reason else "complete",
+        "reason": reason,
+    }
+
+
+def _unplanned_family_row(
+    family: str, manifests: Sequence[Mapping[str, Any]], *, no_crawl_examined: bool = False,
+) -> dict[str, Any]:
+    """Coverage for a selected family the plan gave no action at all.
+
+    Soak c4f1cf2e selected xss and sqli, discovery built an empty candidate manifest, the
+    continuation (correctly) planned no verifier -- and both families then vanished from
+    ``family_coverage`` while the Scan read ``complete`` with no reason. The row states what
+    happened: no candidates (counted from the manifests), or work that was never planned.
+
+    An empty candidate manifest shows there was nothing to test only when a crawl examined the
+    surface. When every crawl of the plan failed or never started (``no_crawl_examined``), the
+    family is a gap (``discovery_failed``): nothing was tested and nothing showed the surface
+    offered nothing.
+    """
+    kinds = _CANDIDATE_MANIFEST_KINDS_BY_FAMILY.get(family, frozenset())
+    candidate_manifests = [
+        item for item in manifests
+        if str(item.get("kind") or "") in kinds and item.get("status") != "cancelled"
+    ]
+    entries = sum(max(0, int(item.get("entry_count") or 0)) for item in candidate_manifests)
+    empty = bool(candidate_manifests) and entries == 0
+    discovery_failed = empty and no_crawl_examined
+    no_candidates = empty and not discovery_failed
+    return {
+        "family": family, "selected": True, "required": False,
+        "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
+        "unattempted_candidates": 0,
+        "manifest_candidates": entries,
+        # Entries a manifest held that no action ever scheduled.
+        "unscheduled_candidates": entries,
+        "verified_findings": 0, "suspected_findings": 0,
+        "budget_reserved": {}, "budget_consumed": {},
+        "proof_escalation": {
+            "actions": 0, "attempted_candidates": 0, "status": "not_planned", "reason": None,
+        },
+        # Nothing to test is a settled outcome; a selected family that did no work without
+        # showing it had nothing to do is a gap.
+        "coverage_status": "complete" if no_candidates else "partial",
+        "reason": (
+            "no_candidates" if no_candidates
+            else "discovery_failed" if discovery_failed else "not_planned"
+        ),
+    }
+
+
+class ScanFinalizationError(ValueError):
+    """Terminal receipts are incomplete or inconsistent with the Scan plan."""
+
+
+# The manifest a batch slice indexes, in the order a slice's capability reads them.
+_SLICE_MANIFEST_ARGS = (
+    "request_candidate_manifest_ref", "candidate_manifest_ref",
+    "target_manifest_ref", "endpoint_manifest_ref",
+)
+
+
+def _manifest_lane(action: Any) -> tuple[str, str]:
+    """One worklist: the capability and the digest of the manifest its slices index."""
+    for name in _SLICE_MANIFEST_ARGS:
+        reference = action.capability_args.get(name)
+        if isinstance(reference, Mapping) and reference.get("manifest_digest"):
+            return action.capability_name, str(reference["manifest_digest"])
+    return action.capability_name, ""
+
+
+def _receipt(result: CapabilityResultReference) -> dict[str, Any]:
+    return result.receipt_ref.canonical_dict()
+
+
+
+# authz_surface.verify_batch, capabilities.jwt_forgery: (title, CWE, why it is verified) by technique.
+_JWT_FINDINGS: Mapping[str, tuple[str, str, str]] = {
+    "jwt_signature_not_verified_repeated": (
+        "JSON Web Token signature is not verified", "CWE-347",
+        "The route accepted the signed-in user's token with its signature altered, twice",
+    ),
+    "jwt_alg_none_accepted_repeated": (
+        "JSON Web Token without a signature is accepted (alg none)", "CWE-347",
+        "The route refused an altered signature but accepted the same claims with no signature "
+        "under an algorithm of none, twice",
+    ),
+    "jwt_weak_hmac_secret_reproduced": (
+        "JSON Web Token is signed with a guessable secret", "CWE-1391",
+        "A secret from a short list of well-known values reproduces the token's signature",
+    ),
+}
+
+# injection.verify_batch: (title, severity, CWE, why it is verified) by injection class.
+_INJECTION_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
+    "template_injection": (
+        "Verified server-side template injection", "critical", "CWE-1336",
+        "A template expression sent in the request was evaluated twice; the same numbers "
+        "without template syntax were not",
+    ),
+    "command_injection": (
+        "Verified command injection", "critical", "CWE-78",
+        "A shell command sent in the request ran twice; the same text without shell syntax "
+        "did not",
+    ),
+    "path_traversal": (
+        "Verified path traversal", "high", "CWE-22",
+        "A traversal returned a well-known file's signature twice; the same traversal to a "
+        "file that does not exist did not",
+    ),
+    "ssrf": (
+        "Verified server-side request forgery", "high", "CWE-918",
+        "Given its own loopback address, the application returned its front page twice; a "
+        "loopback address of a page that does not exist returned none of it",
+    ),
+    "xxe": (
+        "Verified XML external entity injection", "high", "CWE-611",
+        "An external entity in an injected document type returned a well-known file's "
+        "signature twice; an entity for a file that does not exist did not",
+    ),
+}
+
+def _canonical_proof_contract_v2(
+    *, capability_name: str, kind: str, receipt: Any,
+) -> dict[str, Any]:
+    """The universal proof envelope for a finding a canonical capability proved live.
+
+    The risk scorer trusts only this envelope (a bare verified flag can come from coarse
+    heuristics), and every branch below that stamps ``proof_state: verified`` does so from a
+    receipt-backed deterministic capability execution. Without the envelope those findings were
+    scored as suspected: half the severity weight and the softer grade ceiling, so a verified
+    critical graded C. The execution itself is the proof run, so no separate re-execution is
+    required; the receipt binds the verifier. Shape mirrors the legacy adapter in
+    ``scanner/ai_verdict_policy.py`` so one reader validates both producers.
+    """
+    return {
+        "schema_version": "proof-contract/v2",
+        "contract_id": f"scan.{capability_name}.{kind}"[:160],
+        "contract_version": "1.0.0",
+        "family": str(kind)[:80],
+        "reexecution": {
+            "required": False,
+            "performed": True,
+            "verifier_build": str(capability_name)[:160],
+        },
+        "controls": [{
+            "canonical_capability": capability_name,
+            "normalization_boundary": "scan_finalizer",
+        }],
+        "observations": [{"proof_basis": "canonical_capability_execution"}],
+        "proof_basis": "canonical_capability_execution",
+        "capability_receipt": receipt,
+        "predicate": {
+            "satisfied": True,
+            "reason": "receipt-backed canonical capability proved the finding live",
+            "requirements": ["deterministic_proof"],
+            "met": ["deterministic_proof"],
+            "missing": [],
+            "refuted_by": [],
+        },
+        "verdict": "verified",
+        "promotable": True,
+        "traffic_receipt_id": None,
+        "tool_receipt_ids": [],
+    }
+
+
+try:
+    from capabilities.exposure_probe import (
+        exposure_observation_contract,
+        SECRET_MATERIAL_CLASSES,
+        is_sensitive_exposure_class,
+    )
+    from capabilities.graphql_probe import GRAPHQL_PROOF_CONTRACTS
+except ModuleNotFoundError:
+    from ..capabilities.exposure_probe import (
+        exposure_observation_contract,
+        SECRET_MATERIAL_CLASSES,
+        is_sensitive_exposure_class,
+    )
+    from ..capabilities.graphql_probe import GRAPHQL_PROOF_CONTRACTS
+
+try:
+    from scanner_tools.xss_evidence import apply_xss_execution_evidence as _apply_xss_execution_evidence
+except ModuleNotFoundError:
+    from scanner.scanner_tools.xss_evidence import apply_xss_execution_evidence as _apply_xss_execution_evidence
+try:
+    from scanner_tools.corporate_identity import corporate_surface as _corporate_surface
+except ModuleNotFoundError:
+    from scanner.scanner_tools.corporate_identity import corporate_surface as _corporate_surface
+
+
+def _base_finding(
+    *,
+    tool: str,
+    title: str,
+    severity: str,
+    cwe: str,
+    url: Any,
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "title": title,
+        "description": title,
+        "severity": severity,
+        # CWE-79 has no universal score: the deterministic proof does not establish
+        # a particular impact vector. The qualitative severity remains independent.
+        "cvss_score": None if cwe == "CWE-79" else {
+            "critical": 9.5, "high": 8.0, "medium": 5.5, "low": 3.0,
+        }.get(severity),
+        "tool": tool,
+        "source": "dast",
+        "cwe": cwe,
+        "cwe_name": None,
+        "owasp": None,
+        "url": str(url or "") or None,
+        "evidence": dict(evidence),
+    }
+
+
+# sqlmap's summary line, "back-end DBMS: SQLite" (optionally after log tags). A fingerprint
+# recorded from another line that mentions the DBMS, such as the --batch prompt "it looks like the
+# back-end DBMS is 'X'. Do you want to skip ...", names no DBMS.
+_SQLMAP_DBMS_LINE_RE = re.compile(r"(?:\[[^\]]*\]\s*)*back-end DBMS:\s*(\S.*)")
+
+
+def _sqlmap_dbms(row: Mapping[str, Any]) -> str:
+    if row.get("dbms"):
+        return str(row["dbms"]).strip()[:120]
+    match = _SQLMAP_DBMS_LINE_RE.fullmatch(str(row.get("message") or "").strip())
+    return match.group(1).strip()[:120] if match else ""
+
+
+def _observed_url_key(value: Any) -> str | None:
+    """Canonicalize one exact response URL for cross-capability comparison."""
+    try:
+        parsed = urllib.parse.urlsplit(str(value or ""))
+        # A port that is not a number (a masked or malformed URL in tool output) names no
+        # comparable response: it must not fail the Scan's whole finalization.
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower().rstrip(".")
+    authority = host if port is None else f"{host}:{port}"
+    path = (parsed.path or "/").rstrip("/") or "/"
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), authority, path, parsed.query, ""))
+
+
+def _header_template_title(item: Mapping[str, Any]) -> tuple[str, str | None]:
+    template_id = str(item.get("template_id") or "").strip().lower()
+    matcher = str(item.get("matcher_name") or "").strip().lower() or None
+    if template_id == "http-missing-security-headers" and matcher:
+        display = "-".join(part.capitalize() for part in matcher.split("-"))
+        return f"Missing HTTP response header: {display}", matcher
+    return str(item.get("name") or item.get("template_id") or "Template match")[:300], None
+
+
+def _baseline_header_responses(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    """The scan's own baseline response per origin: request line, status and response headers.
+
+    Nuclei runs its passive templates with ``-omit-raw`` (the full request/response of every
+    matcher result overflows the worker's output ceiling), so a missing-header match carries no
+    exchange of its own. The baseline request to the same origin is the scan's recorded
+    observation of that origin's response headers, and is what such a finding is evidence of.
+    """
+    responses: dict[str, dict[str, Any]] = {}
+    for row in observations.get("baseline.http", ()) or ():
+        if not isinstance(row, Mapping) or row.get("kind") != "http_observation":
+            continue
+        request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
+        response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+        status = response.get("status")
+        origin = _http_origin(request.get("origin"))
+        if (
+            type(status) is not int or not origin or origin in responses
+            or not isinstance(response.get("security_headers"), Mapping)
+        ):
+            continue
+        headers: dict[str, str] = {}
+        for source in (response.get("selected_headers"), response.get("security_headers")):
+            if isinstance(source, Mapping):
+                headers.update({
+                    str(name).lower()[:120]: str(value)[:2_000] for name, value in source.items()
+                })
+        method = str(request.get("method") or "GET").upper()[:16]
+        path = str(request.get("path") or "/")[:2_000]
+        responses[origin] = {
+            "request_line": f"{method} {origin}{path if path.startswith('/') else '/' + path}",
+            "response_status": status,
+            "observed_headers": dict(sorted(headers.items())),
+            "source_action_id": "baseline.http",
+            "principal": _observed_principal(request),
+        }
+    # An origin whose root answers with a redirect (a login page behind ``/``) shows its
+    # application headers on the page it redirects to. ``baseline.http_redirect`` starts at
+    # ``http://host/`` and follows redirects within the bound origins (MAX_REDIRECT_HOPS), so an
+    # HTTP origin lands on ``/login`` in one hop and an HTTPS one through the scheme upgrade in
+    # two. When that lands on a 2xx of the SAME origin whose root answered 3xx, the landing
+    # response is the origin's recorded application response. A landing on another origin proves
+    # nothing about this one. The landing request is anonymous, so it is credited only when the
+    # root response it stands in for was anonymous too: an authenticated root redirects to a page
+    # the anonymous login page does not describe. An HTTPS target whose plain-HTTP origin is not
+    # bound has no landing observation, and its root-redirect proof stays a candidate.
+    for row in observations.get("baseline.http_redirect", ()) or ():
+        if not isinstance(row, Mapping) or row.get("kind") != "http_observation":
+            continue
+        response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+        status = response.get("status")
+        final_url = str(response.get("final_url") or "")
+        origin = _http_origin(final_url)
+        current = responses.get(origin) if origin else None
+        landing_principal = _observed_principal(
+            row.get("request") if isinstance(row.get("request"), Mapping) else {},
+        )
+        if (
+            current is None or not 300 <= int(current["response_status"]) < 400
+            or current.get("principal") != landing_principal
+            or type(status) is not int or not 200 <= status < 300
+            or not isinstance(response.get("security_headers"), Mapping)
+        ):
+            continue
+        headers = {}
+        for source in (response.get("selected_headers"), response.get("security_headers")):
+            if isinstance(source, Mapping):
+                headers.update({
+                    str(name).lower()[:120]: str(value)[:2_000] for name, value in source.items()
+                })
+        method = str((row.get("request") or {}).get("method") or "GET").upper()[:16]
+        parsed = urllib.parse.urlsplit(final_url)
+        responses[origin] = {
+            "request_line": f"{method} {origin}{(parsed.path or '/')[:2_000]}",
+            "response_status": status,
+            "observed_headers": dict(sorted(headers.items())),
+            "source_action_id": "baseline.http_redirect",
+            "principal": landing_principal,
+        }
+    return responses
+
+
+def _observed_principal(request: Mapping[str, Any]) -> str:
+    """The principal slot an HTTP observation was sent as (``anonymous`` unless recorded)."""
+    return str(request.get("as_principal") or "anonymous")[:80]
+
+
+# Cookies that carry a login session by their conventional names. A flag missing on one of these
+# is the finding; a preference or analytics cookie without HttpOnly is ordinary.
+_SESSION_COOKIE_NAME_RE = re.compile(
+    r"(?i)^(?:__(?:host|secure)-)?(?:[a-z0-9_.\-]*(?:sess(?:ion)?|sid|auth|token|jwt|login|remember)"
+    r"[a-z0-9_.\-]*|connect\.sid|phpsessid|jsessionid|asp\.net_sessionid|laravel_session)$"
+)
+
+
+def _baseline_cookie_findings(
+    request: Mapping[str, Any], response: Mapping[str, Any], *, receipt: Any,
+    capability_name: str, kind: str,
+) -> list[dict[str, Any]]:
+    """Session cookies the pinned baseline response set without HttpOnly or (on HTTPS) Secure.
+
+    The ``Set-Cookie`` attributes of a recorded response are the proof; only the cookie's name
+    is kept, never its value.
+    """
+    status = response.get("status")
+    if not isinstance(status, int) or not 200 <= status < 400:
+        return []
+    origin = request.get("origin") or response.get("final_url")
+    is_https = urllib.parse.urlsplit(str(origin or "")).scheme.lower() == "https"
+    found: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for cookie in list(response.get("set_cookie_metadata") or ())[:50]:
+        if not isinstance(cookie, Mapping):
+            continue
+        name = cookie.get("name")
+        if not isinstance(name, str) or not _SESSION_COOKIE_NAME_RE.match(name):
+            continue
+        missing = []
+        if cookie.get("httponly") is False:
+            missing.append(("HttpOnly", "CWE-1004"))
+        if is_https and cookie.get("secure") is False:
+            missing.append(("Secure", "CWE-614"))
+        for flag, cwe in missing:
+            if (name, flag) in seen:
+                continue
+            seen.add((name, flag))
+            finding = _base_finding(
+                tool="http_baseline",
+                title=f"Session cookie without {flag} flag",
+                severity="low",
+                cwe=cwe,
+                url=origin,
+                evidence={
+                    "check": f"session_cookie_missing_{flag.lower()}",
+                    "url": origin,
+                    "status": status,
+                    "cookie_name": name,
+                    "cookie_flags": {
+                        "secure": cookie.get("secure"), "httponly": cookie.get("httponly"),
+                        "samesite": cookie.get("samesite"),
+                    },
+                    "pinned_address": request.get("pinned_address"),
+                    "canonical_capability": "http.request",
+                    "capability_receipt": receipt,
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=capability_name, kind=kind, receipt=receipt,
+                ),
+                "verification_reason": (
+                    f"Pinned baseline response set the session cookie without {flag}"
+                ),
+            })
+            found.append(finding)
+    return found
+
+
+def baseline_observed_response(
+    request: Mapping[str, Any], response: Mapping[str, Any], headers: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The recorded baseline exchange a header or cookie finding is about (bounded, value-free).
+
+    Only the request line, status and the fixed posture/selected header set are kept; cookie
+    values, bodies and credentials are never part of it.
+    """
+    origin = _http_origin(request.get("origin") or response.get("final_url")) or ""
+    method = str(request.get("method") or "GET").upper()[:16]
+    path = str(request.get("path") or "/")[:2_000]
+    return {
+        "request_line": f"{method} {origin}{path if path.startswith('/') else '/' + path}",
+        "response_status": response.get("status"),
+        "observed_headers": dict(sorted(
+            (str(name).lower()[:120], redact_url_queries(str(value))[:2_000]) for name, value in headers.items()
+            if str(name).lower() not in {"set-cookie", "authorization", "cookie"}
+        )),
+        "source_action_id": "baseline.http",
+        # Which principal slot the proof was observed as, as on the redirect-landing proofs.
+        "principal": _observed_principal(request),
+    }
+
+
+def _attach_observed_header_responses(
+    findings: Sequence[dict[str, Any]],
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+    baseline_receipts: Mapping[str, Mapping[str, Any]] | None = None,
+) -> None:
+    """Give each missing-header finding the recorded response that lacks the header.
+
+    Attached only where the baseline response proves the finding: the header is one the
+    baseline always records, and it is absent. A header present on the baseline but missing on
+    another page keeps the matched URLs as its evidence rather than a response that contradicts
+    it, and a header the baseline does not record is never claimed absent from it.
+    """
+    responses = _baseline_header_responses(observations)
+    if not responses:
+        return
+    for finding in findings:
+        evidence = finding.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        header = str(evidence.get("header_name") or "").lower()
+        if evidence.get("template_id") != "http-missing-security-headers" or not header:
+            continue
+        observed = responses.get(_http_origin(finding.get("url")) or "")
+        # An error page is not the response a header finding is about: the template matched
+        # other pages (the root's own match is dropped), so a 4xx/5xx root is not their evidence.
+        if (
+            observed is None
+            or header not in _BASELINE_RECORDED_HEADERS
+            or header in observed["observed_headers"]
+            or not 200 <= int(observed["response_status"]) < 400
+        ):
+            continue
+        evidence["observed_response"] = {**observed, "header_absent": header}
+        # The pinned baseline response of this origin is an application response (2xx) that
+        # lacks a header the capability always records: that response is the deterministic
+        # proof. A redirect or an error page lacking it proves nothing about the application.
+        baseline_receipt = dict(baseline_receipts or {}).get(observed["source_action_id"])
+        if baseline_receipt is None or not 200 <= int(observed["response_status"]) < 300:
+            continue
+        finding.update({
+            "verified": True,
+            "suspected": False,
+            "needs_verification": False,
+            "proof_state": "verified",
+            "proof_contract_v2": _canonical_proof_contract_v2(
+                capability_name="http.request", kind="http_observation",
+                receipt=dict(baseline_receipt),
+            ),
+            "verification_reason": "Pinned baseline response of the origin omitted the header",
+        })
+
+
+def _authz_object_facts(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Which object the authorization proof is about: field names and id location, no values."""
+    facts: dict[str, Any] = {
+        name: str(item[key])[:120]
+        for key, name in (("object_id_key", "id_key"), ("object_id_location", "id_location"))
+        if item.get(key)
+    }
+    if isinstance(item.get("sensitive_field_names"), (list, tuple)):
+        facts["sensitive_field_names"] = [str(name)[:80] for name in item["sensitive_field_names"]][:20]
+    return facts
+
+
+def canonical_authz_findings(
+    observations: Sequence[Mapping[str, Any]], *, receipt: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Shared pure projection of canonical authorization proof for Scan and Hunt.
+
+    This is the existing Scan predicate and finding shape, not another verifier.
+    Callers must supply worker-owned, receipt-bound observations; planner claims
+    and selected-object access evidence are not deterministic authorization proof.
+    """
+    findings: list[dict[str, Any]] = []
+    for item in observations:
+        if not isinstance(item, Mapping):
+            continue
+        kind = item.get("kind")
+        if (
+            kind == "authz_differential"
+            and item.get("proof_state") == "verified"
+            and item.get("proof_type") == "cross_principal_replay"
+            and item.get("principal_contexts_distinct") is True
+            and item.get("object_absent_from_secondary_listing") is True
+            and item.get("responses_equivalent") is True
+        ):
+            finding = _base_finding(
+                tool="smart_authz",
+                title="Verified broken object authorization",
+                severity="high",
+                cwe="CWE-639",
+                url=item.get("consumer_url"),
+                evidence={
+                    "url": item.get("consumer_url"),
+                    "producer_url": item.get("producer_url"),
+                    "resource_id_sha256": item.get("resource_id_sha256"),
+                    "owner_status": item.get("owner_status"),
+                    "attacker_status": item.get("attacker_status"),
+                    "accepted_principal_responses": dict(
+                        item.get("accepted_principal_responses") or {}
+                    ),
+                    # Names and locations only: which fields made the object sensitive, where its id
+                    # is. Nested, never top-level: a top-level ``object_id_key`` is a parameter of
+                    # the templated finding identity and would re-key every BOLA row on upgrade.
+                    **({"object": _authz_object_facts(item)} if _authz_object_facts(item) else {}),
+                    "distinct_principal_control": True,
+                    "object_id_absent_from_attacker_listing": True,
+                    "responses_equivalent": True,
+                    "proof_type": "cross_principal_replay",
+                    "canonical_capability": "authz.verify",
+                    "capability_receipt": receipt,
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name="authz.verify", kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": "Cross-principal owner-object replay proof satisfied",
+            })
+            findings.append(finding)
+    return findings
+
+
+def _takeover_finding(
+    item: Mapping[str, Any], *, capability_name: str, receipt: Any,
+) -> dict[str, Any] | None:
+    """A subdomain-takeover finding from one passive ``takeover_check`` observation.
+
+    Verified only on a deterministic signature of a service can-i-take-over-xyz rates
+    vulnerable: an NXDOMAIN-signature terminal confirmed by an independent resolver, or, for the
+    bound host alone, the service's unclaimed-resource page in the bounded same-origin body.
+    Edge-case services and other non-existent terminals are suspected. DNS-only inconclusive
+    outcomes stay in the discovery section, never as findings.
+    """
+    outcome = item.get("outcome")
+    if outcome not in {"verified", "suspected"}:
+        return None
+    host = str(item.get("host") or "")
+    service = item.get("service")
+    chain = [str(name) for name in item.get("cname_chain") or ()][:10]
+    verified = outcome == "verified"
+    if verified:
+        title = f"Subdomain takeover: {host} points to an unclaimed {service} resource"
+    else:
+        title = f"Dangling CNAME: {host} points to a name that does not exist"
+    finding = _base_finding(
+        tool="subdomain_takeover",
+        title=title[:300],
+        severity="high" if verified else "medium",
+        cwe="CWE-284",
+        url=f"https://{host}" if host else None,
+        evidence={
+            "check": "subdomain_takeover" if verified else "dangling_cname",
+            "host": host,
+            "cname_chain": chain,
+            "terminal": item.get("terminal"),
+            "terminal_status": item.get("terminal_status"),
+            "terminal_nxdomain_confirmed": item.get("terminal_nxdomain_confirmed"),
+            "service": service,
+            "service_signature": item.get("service_signature"),
+            "evidence_basis": item.get("evidence_basis"),
+            "authorized_destination": item.get("authorized_destination") is True,
+            **({"http": dict(item["http"])} if isinstance(item.get("http"), Mapping) else {}),
+            "passive": True,
+            "canonical_capability": capability_name,
+            "capability_receipt": receipt,
+        },
+    )
+    if verified:
+        finding.update({
+            "verified": True,
+            "suspected": False,
+            "needs_verification": False,
+            "proof_state": "verified",
+            "proof_contract_v2": _canonical_proof_contract_v2(
+                capability_name=capability_name, kind="takeover_check", receipt=receipt,
+            ),
+            "verification_reason": (
+                "CNAME to an unclaimed service resource: "
+                + (
+                    "the service's HTTP signature on the bound origin"
+                    if item.get("evidence_basis") == "dns_cname_and_http_fingerprint"
+                    else "the service's NXDOMAIN signature, confirmed by an independent resolver"
+                )
+            ),
+        })
+    else:
+        finding.update({
+            "verified": False,
+            "suspected": True,
+            "needs_verification": True,
+            "proof_state": "candidate",
+            "verification_reason": (
+                "The CNAME target does not exist; whether it can be claimed depends on who can "
+                "register it"
+            ),
+        })
+    return finding
+
+
+def _verified_posture_factory(result: CapabilityResultReference, receipt: Any, kind: str):
+    """A finding builder for the posture rules: verified by this capability's own receipt."""
+
+    def make(
+        *, tool: str, title: str, severity: str, cwe: str, url: Any,
+        evidence: Mapping[str, Any], verification_reason: str,
+    ) -> dict[str, Any]:
+        finding = _base_finding(
+            tool=tool, title=title, severity=severity, cwe=cwe, url=url,
+            evidence={
+                **evidence,
+                "canonical_capability": result.capability_name,
+                "capability_receipt": receipt,
+            },
+        )
+        finding.update({
+            "verified": True,
+            "suspected": False,
+            "needs_verification": False,
+            "proof_state": "verified",
+            "proof_contract_v2": _canonical_proof_contract_v2(
+                capability_name=result.capability_name, kind=kind, receipt=receipt,
+            ),
+            "verification_reason": verification_reason,
+        })
+        return finding
+
+    return make
+
+
+# The data requests (fetch, XHR, EventSource) a browser XSS proof's page made on its own origin, and
+# how they were answered, kept with the finding: its retest judges the page's data requests against
+# them (``worker_handlers.proof_replay``). A request the proof saw answered that fails now means
+# the page did not run as proved; one that also failed or never answered then (a guest page's
+# ``/api/me`` answering 401, a long poll) does not. Kept only when the proof recorded each
+# response's resource type and its record was not cut short (``capabilities.browser``
+# ``MAX_BROWSER_RESPONSE_OBSERVATIONS``); without it the retest applies its own stricter rules.
+_PROOF_PAGE_DATA_RESOURCES = frozenset({"fetch", "xhr", "eventsource"})
+_PROOF_PAGE_RESPONSES_RECORDED = 200
+_PROOF_PAGE_REQUESTS_KEPT = 50
+
+
+def _proof_page_requests(
+    observations: Sequence[Mapping[str, Any]], attempt_id: Any,
+) -> list[dict[str, Any]] | None:
+    """``[{method, path, query, resource_type, status}]`` (the lowest status each answered with) for
+    one proof attempt's page, or None when the proof's record cannot tell."""
+    responses = [
+        item for item in observations
+        if isinstance(item, Mapping) and item.get("kind") == "browser_http_response"
+        and item.get("attempt_id") == attempt_id
+    ]
+    if (not responses or len(responses) >= _PROOF_PAGE_RESPONSES_RECORDED
+            or any("resource_type" not in item for item in responses)):
+        return None
+    kept: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in responses:
+        resource = str(item.get("resource_type") or "")
+        if resource not in _PROOF_PAGE_DATA_RESOURCES:
+            continue
+        try:
+            # The recorded URL is already redacted (``capabilities.browser``): its query keeps
+            # the parameter names only, which tell ``?public=1`` from ``?private=1``.
+            parts = urllib.parse.urlsplit(str(item.get("url") or ""))
+            path, query = parts.path or "/", parts.query
+            status = int(item.get("status_code") or 0)
+        except (TypeError, ValueError):
+            return None
+        key = (str(item.get("method") or "GET").upper()[:10], path[:500], query[:500])
+        if key in kept:
+            kept[key]["status"] = min(kept[key]["status"], status)
+        elif len(kept) < _PROOF_PAGE_REQUESTS_KEPT:
+            kept[key] = {"method": key[0], "path": key[1], "query": key[2], "resource_type": resource,
+                         "status": status}
+        else:
+            return None
+    return list(kept.values())
+
+
+def _findings_for_action(
+    result: CapabilityResultReference,
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    unobserved_response_urls: frozenset[str] = frozenset(),
+    target_url: str = "",
+    scan_password_hashes: frozenset[str] = frozenset(),
+    scan_self_password_hashes: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    header_origin_findings: dict[tuple[str, str], dict[str, Any]] = {}
+    receipt = _receipt(result)
+    allowed_kinds = {
+        "http.request": {"http_observation"},
+        "xss.verify": {"xss_alert"},
+        "xss.verify_batch": {"candidate_attempt", "xss_alert"},
+        "sqli.verify": {"sqli_finding"},
+        "sqli.verify_batch": {
+            "candidate_attempt", "sqli_finding", "sqli_dbms_fingerprint",
+        },
+        "xss.request_verify": {"request_body_verification"},
+        "sqli.request_verify": {"request_body_verification"},
+        "xss.request_verify_batch": {"candidate_attempt", "request_body_verification"},
+        "sqli.request_verify_batch": {"candidate_attempt", "request_body_verification"},
+        "sqli.prove_batch": {"candidate_attempt", "sqli_proof"},
+        "xss.browser_prove_batch": {"candidate_attempt", "xss_browser_proof"},
+        "exposure.verify_batch": {"candidate_attempt", "sensitive_exposure_proof"},
+        "nosqli.verify_batch": {"candidate_attempt", "nosqli_proof"},
+        "injection.verify_batch": {"candidate_attempt", "injection_proof"},
+        "authz_surface.verify_batch": {"candidate_attempt", "authz_surface_proof"},
+        "graphql.verify_batch": {"candidate_attempt", "graphql_proof"},
+        "authz.verify": {"authz_differential"},
+        "templates.scan": {"template_match"},
+        "templates.passive_scan": {"template_match"},
+        "templates.active_batch": {"candidate_attempt", "template_match"},
+        "templates.passive_batch": {"candidate_attempt", "template_match"},
+        "tls.inspect": {"tls_protocol"},
+        "dns.inspect": {"dns_posture"},
+        "subdomains.takeover_check": {"takeover_check"},
+        "redirect.verify_batch": {"candidate_attempt", "open_redirect_proof"},
+    }.get(result.capability_name, set())
+    for raw in observations:
+        item = dict(raw)
+        kind = str(item.get("kind") or "")
+        if kind not in allowed_kinds:
+            continue
+        if kind == "candidate_attempt":
+            continue
+        if kind == "http_observation" and result.action_id == "baseline.http":
+            request = (
+                dict(item.get("request") or {})
+                if isinstance(item.get("request"), Mapping) else {}
+            )
+            response = (
+                dict(item.get("response") or {})
+                if isinstance(item.get("response"), Mapping) else {}
+            )
+            headers = (
+                dict(response.get("selected_headers") or {})
+                if isinstance(response.get("selected_headers"), Mapping) else {}
+            )
+            # The posture headers are recorded on every response (present ones only); the
+            # dispatcher's baseline selects no other headers, so they are the record of absence.
+            posture_recorded = isinstance(response.get("security_headers"), Mapping)
+            if posture_recorded:
+                headers.update({
+                    str(name).lower(): value
+                    for name, value in response["security_headers"].items()
+                })
+            observed_response = baseline_observed_response(request, response, headers)
+            status = response.get("status")
+            if (
+                (headers or posture_recorded)
+                and isinstance(status, int)
+                and 200 <= status < 400
+            ):
+                origin = request.get("origin") or response.get("final_url")
+                scheme = urllib.parse.urlsplit(str(origin or "")).scheme.lower()
+                expected_headers = [
+                    ("content-security-policy", "Content Security Policy"),
+                    ("referrer-policy", "Referrer Policy"),
+                    ("permissions-policy", "Permissions Policy"),
+                ]
+                if scheme == "https":
+                    expected_headers.append((
+                        "strict-transport-security", "HTTP Strict Transport Security",
+                    ))
+                for header_name, display_name in expected_headers:
+                    if str(headers.get(header_name) or "").strip():
+                        continue
+                    finding = _base_finding(
+                        tool="http_baseline",
+                        title=f"Missing {display_name} header",
+                        severity="low",
+                        cwe="CWE-693",
+                        url=origin,
+                        evidence={
+                            # Every missing header is CWE-693 on the same origin.
+                            "check": f"missing_header_{header_name}",
+                            "url": origin,
+                            "status": status,
+                            "header": header_name,
+                            "observed_response": {**observed_response, "header_absent": header_name},
+                            "pinned_address": request.get("pinned_address"),
+                            "canonical_capability": "http.request",
+                            "capability_receipt": receipt,
+                        },
+                    )
+                    finding.update({
+                        "verified": True,
+                        "suspected": False,
+                        "needs_verification": False,
+                        "proof_state": "verified",
+                        "proof_contract_v2": _canonical_proof_contract_v2(
+                            capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                        ),
+                        "verification_reason": (
+                            "Pinned deterministic HTTP response omitted the header"
+                        ),
+                    })
+                    findings.append(finding)
+            for cookie_finding in _baseline_cookie_findings(
+                request, response, receipt=receipt, capability_name=result.capability_name,
+                kind=str(kind),
+            ):
+                cookie_finding["evidence"]["observed_response"] = observed_response
+                findings.append(cookie_finding)
+            if posture_recorded and isinstance(status, int) and 200 <= status < 400:
+                # Present headers whose VALUE leaves the protection open (CSP *, short HSTS...).
+                findings.extend(weak_header_findings(
+                    headers, origin=str(request.get("origin") or response.get("final_url") or ""),
+                    status=status, observed_response=observed_response,
+                    make=_verified_posture_factory(result, receipt, str(kind)),
+                ))
+        elif kind == "http_observation" and result.action_id in CORS_PROBE_ACTIONS:
+            request = item.get("request") if isinstance(item.get("request"), Mapping) else {}
+            response = item.get("response") if isinstance(item.get("response"), Mapping) else {}
+            findings.extend(cors_findings(
+                result.action_id, request, response,
+                make=_verified_posture_factory(result, receipt, str(kind)),
+            ))
+        elif kind == "dns_posture":
+            findings.extend(dns_posture_findings(
+                item, make=_verified_posture_factory(result, receipt, str(kind)), target_url=target_url,
+            ))
+        elif kind == "open_redirect_proof":
+            redirect = open_redirect_finding(
+                item, make=_verified_posture_factory(result, receipt, str(kind)),
+            )
+            if redirect is not None:
+                findings.append(redirect)
+        elif kind == "xss_alert" and item.get("proof_state") == "verified":
+            proof_contract = {
+                "schema_version": "proof-contract/v2",
+                "contract_id": "dast.xss_alert_execution",
+                "contract_version": "1.0.0",
+                "family": "xss",
+                "subject": {
+                    "url": item.get("url"),
+                    "method": "GET",
+                    "parameter": item.get("param"),
+                },
+                "reexecution": {
+                    "required": False,
+                    "performed": True,
+                    "verifier_build": result.capability_name,
+                },
+                "predicate": {
+                    "satisfied": True,
+                    "requirements": ["structured_xss_execution_alert"],
+                    "met": ["structured_xss_execution_alert"],
+                    "missing": [],
+                    "refuted_by": [],
+                },
+                "verdict": "verified",
+                "promotable": True,
+            }
+            finding = _base_finding(
+                tool="dalfox",
+                title="Verified cross-site scripting",
+                severity="high",
+                cwe="CWE-79",
+                url=item.get("url"),
+                evidence={
+                    "url": item.get("url"),
+                    "param": item.get("param"),
+                    "payload_sha256": item.get("payload_sha256"),
+                    "message": item.get("message"),
+                    # Nested: a top-level ``client_route`` joins a CWE-79 finding's identity and
+                    # would re-key every verified XSS row on upgrade.
+                    **({"browser_alert": {key: item[key] for key in ("alert_type", "client_route") if item.get(key)}}
+                       if item.get("alert_type") or item.get("client_route") else {}),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "detail": {"verified": True, "type": "verified"},
+                    "proof_contract_v2": proof_contract,
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "verification_reason": "Deterministic alert execution proof satisfied",
+                "proof_contract_v2": proof_contract,
+            })
+            _apply_xss_execution_evidence(
+                finding,
+                location="request_parameter",
+                parameter=item.get("param"),
+                signal="headless_verified_alert",
+                verifier="dalfox",
+            )
+            findings.append(finding)
+        elif (
+            kind == "xss_browser_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and item.get("proof_producer") == "shakerscan"
+            and item.get("evidence_type") in {"dom_execution", "browser_execution"}
+            and str(item.get("technique") or "").startswith("headless_xss_")
+        ):
+            page_requests = _proof_page_requests(observations, item.get("attempt_id"))
+            finding = _base_finding(
+                tool="shakerscan_browser_proof",
+                title="Verified cross-site scripting",
+                severity="high",
+                cwe="CWE-79",
+                url=item.get("request_url"),
+                evidence={
+                    "candidate_id": item.get("candidate_id"),
+                    "parameter_name": item.get("parameter_name"),
+                    "injection_location": item.get("injection_location"),
+                    "request_url": item.get("request_url"),
+                    "related_request_urls": list(
+                        item.get("related_request_urls") or ()
+                    ),
+                    "payload_sha256": item.get("payload_sha256"),
+                    "marker_sha256": item.get("marker_sha256"),
+                    "proof_producer": "shakerscan",
+                    "evidence_type": item.get("evidence_type"),
+                    "technique": item.get("technique"),
+                    "event_transcript": list(item.get("event_transcript") or ()),
+                    "dom_marker_executed": item.get("dom_marker_executed"),
+                    "sanitized_screenshot_sha256": item.get(
+                        "sanitized_screenshot_sha256"
+                    ),
+                    "browser_build": item.get("browser_build"),
+                    "browser_proof": {
+                        "proven": True,
+                        "proof_producer": "shakerscan",
+                        "evidence_type": item.get("evidence_type"),
+                        "technique": item.get("technique"),
+                        "dom_marker_executed": item.get("dom_marker_executed"),
+                        "verifier_build": item.get("browser_build"),
+                        **({"page_requests": page_requests} if page_requests is not None else {}),
+                    },
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                },
+            )
+            finding.update({
+                "verified": True, "suspected": False,
+                "needs_verification": False, "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": "Canonical headless browser execution proof satisfied",
+            })
+            technique = str(item.get("technique") or "")
+            _apply_xss_execution_evidence(
+                finding,
+                location=item.get("injection_location"),
+                parameter=item.get("parameter_name"),
+                signal={
+                    "headless_xss_dialog": "dialog",
+                    "headless_xss_console": "console",
+                    "headless_xss_dom": "dom_marker",
+                }.get(technique, technique or "browser_execution"),
+                verifier=item.get("browser_build"),
+                dom_marker_executed=item.get("dom_marker_executed"),
+            )
+            findings.append(finding)
+        elif kind == "request_body_verification":
+            family = str(item.get("family") or "").strip().lower()
+            proof_status = str(item.get("proof_status") or "").strip().lower()
+            expected_family = (
+                "xss" if result.capability_name in {
+                    "xss.request_verify", "xss.request_verify_batch",
+                }
+                else "sqli"
+            )
+            expected_proof = (
+                "reflected_candidate_only"
+                if expected_family == "xss" else "db_error_candidate_only"
+            )
+            if (
+                family != expected_family
+                or proof_status != expected_proof
+                or item.get("finding_verdict") != "suspected"
+            ):
+                continue
+            finding = _base_finding(
+                tool=f"request_{expected_family}_differential",
+                title=(
+                    "Potential reflected cross-site scripting"
+                    if expected_family == "xss"
+                    else "Potential SQL injection"
+                ),
+                severity="high",
+                cwe="CWE-79" if expected_family == "xss" else "CWE-89",
+                # No URL: these rows have always been keyed without one (the origin is in the
+                # evidence, under a key that is not an endpoint), so upgrading keeps their identity.
+                url=None,
+                evidence={
+                    "candidate_id": item.get("candidate_id"),
+                    "request_ref_id": item.get("request_ref_id"),
+                    "origin": item.get("origin"),
+                    "request_class": item.get("request_class"),
+                    "method": item.get("method"),
+                    "body_encoding": item.get("body_encoding"),
+                    "field_path": item.get("field_path"),
+                    "control_status": item.get("control_status"),
+                    "candidate_status": item.get("candidate_status"),
+                    "control_response_sha256": item.get(
+                        "control_response_sha256"
+                    ),
+                    "candidate_response_sha256": item.get(
+                        "candidate_response_sha256"
+                    ),
+                    "proof_contract": item.get("proof_contract"),
+                    "proof_status": proof_status,
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                },
+            )
+            finding.update({
+                "verified": False,
+                "suspected": True,
+                "needs_verification": True,
+                "proof_state": "likely_vulnerable",
+                "verification_reason": (
+                    "Request mutation differential requires execution proof"
+                    if expected_family == "xss"
+                    else "Request mutation produced a candidate-only database error"
+                ),
+            })
+            findings.append(finding)
+        elif kind == "sqli_finding":
+            # SQLMap labels remain candidates until a payload/control
+            # differential produces the deterministic proof contract.
+            dbms = next((
+                name for row in observations
+                if isinstance(row, Mapping) and row.get("kind") == "sqli_dbms_fingerprint"
+                for name in (_sqlmap_dbms(row),) if name
+            ), None)
+            finding = _base_finding(
+                tool="sqlmap",
+                title="Potential SQL injection",
+                severity="high",
+                cwe="CWE-89",
+                url=item.get("url"),
+                evidence={
+                    "url": item.get("url"),
+                    "method": item.get("method") or "GET",
+                    "param": item.get("param"),
+                    "sqlmap_message": item.get("message"),
+                    **({"dbms": dbms} if dbms else {}),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                },
+            )
+            finding.update({
+                "verified": False,
+                "suspected": True,
+                "needs_verification": True,
+                "proof_state": "likely_vulnerable",
+                "verification_reason": "Payload/control differential is missing",
+            })
+            findings.append(finding)
+        elif (
+            kind == "sqli_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("proof_contract") or "").startswith("sqli_")
+            and int(item.get("repetitions") or 0) >= 2
+        ):
+            auth_bypass = item.get("proof_contract") == "sqli_authentication_bypass/v1"
+            finding = _base_finding(
+                tool="shakerscan_sqli_proof",
+                title=(
+                    "Verified SQL injection authentication bypass"
+                    if auth_bypass else "Verified SQL injection"
+                ),
+                # A proven SQL injection is critical whether or not it also
+                # bypasses authentication: the proof is a repeated differential
+                # carrying a database error signature, which means the parameter
+                # reaches the query engine. Rating that "high" understated the
+                # most severe class this scanner can prove deterministically.
+                severity="critical",
+                cwe="CWE-89",
+                # The value-free route the proof actually exercised. A verified
+                # injection with no location is not actionable for an operator,
+                # and cannot be attributed to the endpoint it was proved on.
+                url=item.get("canonical_path"),
+                evidence={
+                    "candidate_id": item.get("candidate_id"),
+                    "request_ref_id": item.get("request_ref_id"),
+                    # Where the route was proved, so a retest sends it to the same site.
+                    **({"origin": item["origin"]} if item.get("origin") else {}),
+                    "method": item.get("method"),
+                    "field_path": item.get("field_path"),
+                    "request_class": item.get("request_class"),
+                    "proof_contract": item.get("proof_contract"),
+                    "technique": item.get("technique"),
+                    "repetitions": item.get("repetitions"),
+                    "response_pairs": list(item.get("response_pairs") or ()),
+                    "database_error_signatures": list(
+                        item.get("database_error_signatures") or ()
+                    ),
+                    "redacted_excerpt": item.get("redacted_excerpt"),
+                    **{key: item[key] for key in ("payload_shape", "timing_ms") if item.get(key)},
+                    "session_state_discarded": item.get(
+                        "session_state_discarded"
+                    ),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_differential",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": (
+                    "Repeated deterministic SQL injection differential satisfied"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "sensitive_exposure_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and is_sensitive_exposure_class(str(item.get("exposure_class") or ""))
+            and (exposure_contract := exposure_observation_contract(item))
+            # A body that may hold secrets carries an installation-keyed digest instead.
+            and str(item.get("response_body_sha256") or item.get("response_body_hmac") or "")
+        ):
+            severity = str(item.get("severity") or "medium")
+            if severity not in {"critical", "high", "medium", "low"}:
+                severity = "medium"
+            exposure_class = str(item.get("exposure_class"))
+            secret_material = exposure_class in SECRET_MATERIAL_CLASSES
+            # Only the shape the probe persists: field name, category, fingerprint, length.
+            exposure_fingerprints = [
+                {
+                    **{
+                        name: entry.get(name)
+                        for name in ("field", "category", "value_fingerprint", "value_length")
+                    },
+                    # The discovered secret the value is kept as, when the worker kept it.
+                    # (``stored_as``: a key name with ``secret`` in it is masked by every redactor.)
+                    **({"stored_as": entry["stored_as"]}
+                       if _SECRET_REF_RE.fullmatch(str(entry.get("stored_as") or "")) else {}),
+                }
+                for entry in list(item.get("exposure_fingerprints") or ())[:50]
+                if isinstance(entry, Mapping)
+            ]
+            secret_refs = sorted({
+                entry["stored_as"] for entry in exposure_fingerprints if entry.get("stored_as")
+            })
+            graphql_title = _GRAPHQL_EXPOSURE_TITLES.get(exposure_class)
+            finding = _base_finding(
+                tool="shakerscan_exposure_probe",
+                title=graphql_title or f"Sensitive exposure: {exposure_class.replace('_', ' ')}",
+                severity=severity,
+                cwe="CWE-538" if secret_material else "CWE-200",
+                # A GraphQL read is reported on its endpoint; the fixed document it sent stays
+                # in the evidence's request_url.
+                url=(
+                    _url_without_query(item.get("request_url")) if graphql_title
+                    else item.get("request_url")
+                ),
+                evidence={
+                    "exposure_class": exposure_class,
+                    "request_url": item.get("request_url"),
+                    "response_status": item.get("response_status"),
+                    "content_type": item.get("content_type"),
+                    "response_body_sha256": item.get("response_body_sha256"),
+                    "response_body_hmac": item.get("response_body_hmac"),
+                    "matched_signature": item.get("matched_signature"),
+                    "redacted_excerpt": item.get("redacted_excerpt"),
+                    # The class names the contract; a stored observation cannot pick its own.
+                    "proof_contract": exposure_contract,
+                    "exposure_fingerprints": exposure_fingerprints,
+                    **({"discovered_refs": secret_refs} if secret_refs else {}),
+                    "discovered_via": item.get("discovered_via"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_response_signature",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": (
+                    "Deterministic sensitive-exposure response signature satisfied"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "injection_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("proof_contract") or "").startswith("injection_")
+            and int(item.get("repetitions") or 0) >= 2
+            and item.get("injection_class") in _INJECTION_FINDINGS
+        ):
+            title, severity, cwe, reason = _INJECTION_FINDINGS[item["injection_class"]]
+            finding = _base_finding(
+                tool="shakerscan_injection_verify",
+                title=title, severity=severity, cwe=cwe,
+                # Same as the SQL proof: report the route it was proved on.
+                url=item.get("canonical_path"),
+                evidence={
+                    "candidate_id": item.get("candidate_id"),
+                    "request_ref_id": item.get("request_ref_id"),
+                    **({"origin": item["origin"]} if item.get("origin") else {}),
+                    "method": item.get("method"),
+                    "field_path": item.get("field_path"),
+                    "request_class": item.get("request_class"),
+                    "injection_class": item.get("injection_class"),
+                    "proof_contract": item.get("proof_contract"),
+                    "technique": item.get("technique"),
+                    "payload_shape": item.get("payload_shape"),
+                    **({"file_signature": item["file_signature"]}
+                       if item.get("file_signature") else {}),
+                    **({"timing_ms": dict(item["timing_ms"])}
+                       if isinstance(item.get("timing_ms"), Mapping) else {}),
+                    "repetitions": item.get("repetitions"),
+                    "response_pairs": list(item.get("response_pairs") or ()),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_injection_differential",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": reason,
+            })
+            findings.append(finding)
+        elif (
+            kind == "nosqli_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("proof_contract") or "").startswith("nosqli_")
+            and int(item.get("repetitions") or 0) >= 2
+        ):
+            auth_bypass = item.get("technique") == "operator_auth_bypass_repeated"
+            finding = _base_finding(
+                tool="shakerscan_nosqli_verify",
+                title=(
+                    "Verified NoSQL injection authentication bypass"
+                    if auth_bypass else "Verified NoSQL injection"
+                ),
+                severity="critical" if auth_bypass else "high",
+                cwe="CWE-943",
+                # Same as the SQL proof: report the route it was proved on.
+                url=item.get("canonical_path"),
+                evidence={
+                    "candidate_id": item.get("candidate_id"),
+                    "request_ref_id": item.get("request_ref_id"),
+                    **({"origin": item["origin"]} if item.get("origin") else {}),
+                    "method": item.get("method"),
+                    "field_path": item.get("field_path"),
+                    "request_class": item.get("request_class"),
+                    "proof_contract": item.get("proof_contract"),
+                    "technique": item.get("technique"),
+                    "operator": item.get("operator"),
+                    "repetitions": item.get("repetitions"),
+                    "response_pairs": list(item.get("response_pairs") or ()),
+                    "session_state_discarded": item.get("session_state_discarded"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_operator_differential",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": (
+                    "Repeated deterministic NoSQL operator differential satisfied"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "authz_surface_proof"
+            and result.capability_name == "authz_surface.verify_batch"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and item.get("proof_contract") == "authz_surface_jwt_forgery/v1"
+            and str(item.get("request_url") or "")
+            and int(item.get("repetitions") or 0) >= 2
+            and item.get("technique") in _JWT_FINDINGS
+        ):
+            title, cwe, reason = _JWT_FINDINGS[item["technique"]]
+            finding = _base_finding(
+                tool="shakerscan_authz_surface", title=title,
+                # Whoever can make a token the application accepts can be any user it has.
+                severity="critical", cwe=cwe, url=item.get("request_url"),
+                evidence={
+                    "route_id": item.get("route_id"),
+                    "request_url": item.get("request_url"),
+                    "technique": item.get("technique"),
+                    "proof_contract": item.get("proof_contract"),
+                    "algorithm": str(item.get("algorithm") or "")[:20],
+                    "anonymous_status": item.get("anonymous_status"),
+                    "authenticated_status": item.get("authenticated_status"),
+                    "forged_status": item.get("forged_status"),
+                    **({"none_spelling": str(item["none_spelling"])[:8]}
+                       if item.get("none_spelling") else {}),
+                    **({"secret_in_common_list": True,
+                        "secret_length": item.get("secret_length"),
+                        "forged_token_accepted": item.get("forged_token_accepted")}
+                       if item.get("secret_in_common_list") is True else {}),
+                    "repetitions": item.get("repetitions"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_token_acceptance",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": reason,
+            })
+            findings.append(finding)
+        elif (
+            kind == "authz_surface_proof"
+            and result.capability_name == "authz_surface.verify_batch"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
+            and str(item.get("request_url") or "")
+            and int(item.get("repetitions") or 0) >= 2
+            and int(item.get("hash_count") or 0) >= 1
+        ):
+            # The signed-in principal read stored password hashes, the same on every read.
+            # Whose they are: a route that names the signed-in user (/me, /profile ...) holds the
+            # principal's own hash. A hash that is not it, or a response with several hashes, is
+            # another account's: cracked offline at the attacker's pace, high. The principal's own
+            # hash in its own record is excessive data exposure: medium. Without a self route,
+            # two distinct hashes read in one Scan prove another account's is among them, but not
+            # which route holds it: high, without the "other accounts" claim.
+            digests = {str(value) for value in item.get("hash_digests") or ()}
+            own_hashes = scan_self_password_hashes
+            if own_hashes:
+                other_accounts = bool(digests - own_hashes) or int(item.get("hash_count") or 0) >= 2
+                some_other = other_accounts
+            else:
+                other_accounts = int(item.get("hash_count") or 0) >= 2
+                some_other = other_accounts or len(scan_password_hashes) >= 2
+            anonymous = item.get("anonymous_reads_hashes") is True
+            finding = _base_finding(
+                tool="shakerscan_authz_surface",
+                title=(
+                    "API returns other accounts' password hashes" if other_accounts
+                    else "API returns password hashes"
+                ),
+                severity="high" if some_other or anonymous else "medium",
+                cwe="CWE-639" if other_accounts else "CWE-200",
+                url=item.get("request_url"),
+                evidence={
+                    "route_id": item.get("route_id"),
+                    "request_url": item.get("request_url"),
+                    "technique": item.get("technique"),
+                    "proof_contract": item.get("proof_contract"),
+                    "anonymous_status": item.get("anonymous_status"),
+                    "authenticated_status": item.get("authenticated_status"),
+                    "response_body_sha256": item.get("response_body_sha256"),
+                    "hash_count": item.get("hash_count"),
+                    "distinct_hashes_read_in_scan": len(scan_password_hashes),
+                    "signed_in_users_own_record": bool(own_hashes) and not other_accounts,
+                    "hash_fields": [
+                        {"field": str(entry.get("field") or "")[:120]}
+                        for entry in list(item.get("hash_fields") or ())[:10]
+                        if isinstance(entry, Mapping)
+                    ],
+                    "other_accounts_hashes": other_accounts,
+                    "anonymous_reads_hashes": anonymous,
+                    "repetitions": item.get("repetitions"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_response_signature",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": (
+                    "The signed-in response carried the same stored password hash fields on "
+                    "repeated reads"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "authz_surface_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("proof_contract") or "").startswith("authz_surface_")
+            and item.get("boundary_established") is True
+            and str(item.get("request_url") or "")
+            and int(item.get("repetitions") or 0) >= 2
+        ):
+            # What was actually observed is that the endpoint returns the same
+            # data with and without credentials. On a privileged function that
+            # is broken access control; on a public one -- a product search, a
+            # list of security questions -- it is the intended behaviour, and
+            # nothing in the differential distinguishes the two. Claiming a
+            # verified authorization break here marked ordinary public
+            # endpoints as high-severity findings.
+            finding = _base_finding(
+                tool="shakerscan_authz_surface",
+                title="Endpoint serves identical data to anonymous and authenticated principals",
+                # Informational: on a public file or a health route this is intended, and nothing
+                # here tells the two apart; it rated medium beside the real findings.
+                severity="info",
+                cwe="CWE-862",
+                url=item.get("request_url"),
+                evidence={
+                    "route_id": item.get("route_id"),
+                    "request_url": item.get("request_url"),
+                    "technique": item.get("technique"),
+                    "proof_contract": item.get("proof_contract"),
+                    "anonymous_status": item.get("anonymous_status"),
+                    "authenticated_status": item.get("authenticated_status"),
+                    "response_body_sha256": item.get("response_body_sha256"),
+                    "boundary_established": item.get("boundary_established"),
+                    "repetitions": item.get("repetitions"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "principal_access_differential",
+                },
+            )
+            finding.update({
+                "verified": False,
+                "suspected": True,
+                "needs_verification": True,
+                "proof_state": "likely_vulnerable",
+                "verification_reason": (
+                    "Anonymous access matched authenticated access, but nothing "
+                    "establishes that this particular function is privileged"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "graphql_proof"
+            and result.capability_name == "graphql.verify_batch"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("check") or "") in _GRAPHQL_CHECKS
+            and str(item.get("response_body_sha256") or "")
+        ):
+            check = str(item["check"])
+            title, cwe = _GRAPHQL_CHECKS[check]
+            finding = _base_finding(
+                tool="shakerscan_graphql_probe",
+                title=title,
+                severity="low",
+                cwe=cwe,
+                url=_url_without_query(item.get("endpoint")),
+                evidence={
+                    "check": check,
+                    "endpoint": _url_without_query(item.get("endpoint")),
+                    "root_type": item.get("root_type"),
+                    "response_status": item.get("response_status"),
+                    "response_body_sha256": item.get("response_body_sha256"),
+                    "misspelling": item.get("misspelling"),
+                    "suggested_fields": list(item.get("suggested_fields") or ())[:10],
+                    "alias_count": item.get("alias_count"),
+                    "duplicate_count": item.get("duplicate_count"),
+                    # The check names the contract; a stored observation cannot pick its own.
+                    "proof_contract": GRAPHQL_PROOF_CONTRACTS.get(check),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "graphql_response_signature",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": "Deterministic GraphQL response signature satisfied",
+            })
+            findings.append(finding)
+        elif kind == "authz_differential":
+            findings.extend(canonical_authz_findings([item], receipt=receipt))
+        elif kind == "takeover_check":
+            finding = _takeover_finding(item, capability_name=result.capability_name, receipt=receipt)
+            if finding is not None:
+                findings.append(finding)
+        elif kind == "tls_protocol":
+            # Each issue names its check: several share a CWE, and the finding identity
+            # keeps them apart only by the check.
+            tls_issues = (
+                (item.get("certificate_expired") is True,
+                 "TLS certificate is expired", "high", "CWE-295", "tls_certificate_expired"),
+                (item.get("certificate_not_yet_valid") is True,
+                 "TLS certificate is not yet valid", "medium", "CWE-295", "tls_certificate_not_yet_valid"),
+                (item.get("certificate_hostname_matches") is False,
+                 "TLS certificate hostname mismatch", "high", "CWE-295", "tls_certificate_hostname_mismatch"),
+                # Not when the verifier refused only the leaf's own weak key or signature,
+                # which the weak-key / weak-signature finding below already reports.
+                (item.get("certificate_trust") == "untrusted" and not tls_untrusted_by_leaf_weakness(item),
+                 "TLS certificate chain is not trusted", "medium", "CWE-295", "tls_certificate_untrusted"),
+                (item.get("legacy_protocol_negotiated") is True,
+                 "Legacy TLS protocol negotiated", "high", "CWE-326", "tls_legacy_protocol"),
+                (item.get("weak_cipher") is True,
+                 "Weak TLS cipher negotiated", "high", "CWE-327", "tls_weak_cipher"),
+                (item.get("certificate_weak_signature") is True,
+                 "TLS certificate uses a weak signature", "high", "CWE-327", "tls_certificate_weak_signature"),
+                (item.get("certificate_weak_public_key") is True,
+                 "TLS certificate uses a weak public key", "high", "CWE-326", "tls_certificate_weak_public_key"),
+                (item.get("certificate_expiring_within_30_days") is True,
+                 "TLS certificate expires within 30 days", "low", "CWE-295", "tls_certificate_expiring"),
+            )
+            for present, title, severity, cwe, check in tls_issues:
+                if not present:
+                    continue
+                finding = _base_finding(
+                    tool="tls.inspect",
+                    title=title,
+                    severity=severity,
+                    cwe=cwe,
+                    url=item.get("origin"),
+                    evidence={
+                        "check": check,
+                        "origin": item.get("origin"),
+                        "pinned_address": item.get("pinned_address"),
+                        "port": item.get("port"),
+                        "protocol": item.get("protocol"),
+                        "cipher": item.get("cipher"),
+                        "certificate_sha256": item.get("certificate_sha256"),
+                        **tls_finding_evidence(item, observations, check=check),
+                        "canonical_capability": "tls.inspect",
+                        "capability_receipt": receipt,
+                    },
+                )
+                finding.update({
+                    "verified": True,
+                    "suspected": False,
+                    "needs_verification": False,
+                    "proof_state": "verified",
+                    "proof_contract_v2": _canonical_proof_contract_v2(
+                        capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                    ),
+                    "verification_reason": (
+                        "Pinned deterministic TLS posture proof satisfied"
+                    ),
+                })
+                findings.append(finding)
+        elif kind == "template_match":
+            template_id = str(item.get("template_id") or "").strip().lower()
+            matched_url = item.get("matched_at") or item.get("url")
+            # A missing-header template matching the same 401/403/error response that
+            # the posture projector rejected is not application evidence.  Keeping it
+            # would reintroduce the exact phantom weakness removed from the score path.
+            if (
+                template_id == "http-missing-security-headers"
+                and _observed_url_key(matched_url) in unobserved_response_urls
+            ):
+                continue
+            severity = str(item.get("severity") or "info").strip().lower()
+            if severity not in scoring.SEVERITY_WEIGHT:
+                severity = "info"
+            title, header_name = _header_template_title(item)
+            # HSTS is honoured only over HTTPS (RFC 6797 §8.1): a browser ignores the header on a
+            # plain-HTTP response, so its absence there is not a weakness of that origin.
+            if (
+                header_name == "strict-transport-security"
+                and urllib.parse.urlsplit(str(matched_url or "")).scheme.lower() != "https"
+            ):
+                continue
+            classification = template_classification(item)
+            # A response header policy is a property of the origin, not of the path that
+            # happened to be requested. Emitting the match per URL turned one missing header
+            # into one finding per crawled page -- a thorough scan reported 1,032 "missing
+            # header" findings for 8 headers across 129 URLs -- and buried the single proven
+            # finding under them. Collapse to one finding per (header, origin) and keep the
+            # matched URLs as evidence, so the count is still visible and nothing is lost.
+            header_origin = _http_origin(matched_url) if header_name else None
+            if header_name and header_origin:
+                existing = header_origin_findings.get((header_name, header_origin))
+                if existing is not None:
+                    evidence = existing["evidence"]
+                    evidence["matched_url_count"] = int(evidence.get("matched_url_count") or 0) + 1
+                    samples = evidence.setdefault("matched_urls", [])
+                    if len(samples) < 5 and matched_url not in samples:
+                        samples.append(matched_url)
+                    continue
+            finding = _base_finding(
+                tool="nuclei",
+                title=title,
+                severity=severity,
+                cwe=str(item.get("cwe") or "") or next(iter(classification.get("cwe_ids") or ()), None),
+                url=header_origin or matched_url,
+                evidence={
+                    "template_id": item.get("template_id"),
+                    "matcher_name": item.get("matcher_name"),
+                    **classification,
+                    **({"header_name": header_name} if header_name else {}),
+                    "matched_at": header_origin or matched_url,
+                    **(
+                        {"matched_urls": [matched_url], "matched_url_count": 1}
+                        if header_origin else {}
+                    ),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                },
+            )
+            if isinstance(classification.get("cvss_score"), float):
+                finding["cvss_score"] = classification["cvss_score"]
+            if header_name and header_origin:
+                header_origin_findings[(header_name, header_origin)] = finding
+            finding.update({
+                "verified": False,
+                "suspected": True,
+                # A template match is candidate evidence at every severity.
+                # Severity controls prioritization, not whether the proof
+                # contract still needs to be satisfied.
+                "needs_verification": True,
+                "proof_state": "candidate",
+                "verification_reason": "Template match requires its deterministic proof contract",
+            })
+            findings.append(finding)
+    # One calibrated severity per class, with its reason kept in the evidence.
+    return calibrate_findings(findings)
+
+
+def _exposure_location(url: Any) -> str | None:
+    origin = _http_origin(url)
+    if not origin:
+        return None
+    path = urllib.parse.urlsplit(str(url)).path or "/"
+    return f"{origin}{path.rstrip('/') or '/'}"
+
+
+# A passive-pack template folds into a proven exposure only when it detects the same exposure
+# class (``exposure_probe._CLASS_SEVERITY``) that the probe proved at the same URL. Any other
+# template matching that URL -- a CVE at /console, GraphQL batching at /graphql -- reports
+# something else and stays a finding of its own.
+#: Coverage reason for optional work a frozen continuation allocation did not grant.
+OMITTED_CAPABILITY_REASON = "capability_not_in_allocation"
+
+_TEMPLATE_EXPOSURE_CLASSES: Mapping[str, frozenset[str]] = MappingProxyType({
+    "git-config": frozenset({"version_control_exposure"}),
+    "git-credentials-disclosure": frozenset({"configuration_secret_file"}),
+    "web-config": frozenset({"configuration_secret_file"}),
+    "openapi": frozenset({"api_specification_secret"}),
+})
+_CORROBORATING_TEMPLATE_SAMPLES = 10
+_SEVERITY_RANK = MappingProxyType({
+    "info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4,
+})
+
+
+def _merge_template_candidates_into_exposure_proofs(
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One finding per exposed file: a template candidate for a proven exposure joins it.
+
+    The passive pack's git-config / git-credentials templates match the same file the exposure
+    probe proves (``/.git/config``, ``/.git-credentials``), so a Scan reported the issue twice,
+    once proven and once as a candidate still to verify. A candidate template match is kept as
+    corroborating evidence on a verified exposure proof only when all of these hold: its URL
+    (origin and path) is the proof's URL, its template detects the proof's exposure class
+    (``_TEMPLATE_EXPOSURE_CLASSES``), and its severity does not exceed the proof's. Every
+    other match stays a finding of its own. The first samples are listed and every folded
+    match is counted, so nothing disappears past the sample cap.
+    """
+    proven: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        if (
+            finding.get("tool") == "shakerscan_exposure_probe"
+            and finding.get("proof_state") == "verified"
+        ):
+            location = _exposure_location(finding.get("url"))
+            if location:
+                proven.setdefault(location, []).append(finding)
+    if not proven:
+        return findings
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        target = (
+            _corroborated_exposure_proof(finding, proven)
+            if finding.get("tool") == "nuclei" and finding.get("proof_state") == "candidate"
+            else None
+        )
+        if target is None:
+            kept.append(finding)
+            continue
+        evidence = finding["evidence"]
+        target_evidence = target["evidence"]
+        target_evidence["corroborating_template_count"] = (
+            int(target_evidence.get("corroborating_template_count") or 0) + 1
+        )
+        corroborating = target_evidence.setdefault("corroborating_templates", [])
+        if len(corroborating) < _CORROBORATING_TEMPLATE_SAMPLES:
+            corroborating.append({
+                "template_id": evidence.get("template_id"),
+                "matcher_name": evidence.get("matcher_name"),
+                "title": finding.get("title"),
+                "severity": finding.get("severity"),
+            })
+    return kept
+
+
+def _corroborated_exposure_proof(
+    candidate: Mapping[str, Any], proven: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), Mapping) else {}
+    if evidence.get("header_name"):
+        return None
+    classes = _TEMPLATE_EXPOSURE_CLASSES.get(str(evidence.get("template_id") or ""))
+    candidate_rank = _SEVERITY_RANK.get(str(candidate.get("severity") or "").lower())
+    if not classes or candidate_rank is None:
+        return None
+    for proof in proven.get(_exposure_location(candidate.get("url")) or "", ()):
+        proof_evidence = proof.get("evidence") if isinstance(proof.get("evidence"), Mapping) else {}
+        proof_rank = _SEVERITY_RANK.get(str(proof.get("severity") or "").lower(), -1)
+        if str(proof_evidence.get("exposure_class") or "") in classes and candidate_rank <= proof_rank:
+            return proof
+    return None
+
+
+def _fold_duplicate_header_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One finding per missing header and origin.
+
+    The baseline request proves a missing CSP/HSTS/Referrer/Permissions header itself; the passive
+    template reports the same header again ("Missing HTTP response header: Referrer-Policy").
+    The baseline finding is kept and takes the template's matched-page evidence. (A template
+    HSTS match on a plain-HTTP URL never gets here: the template projection drops it.)
+    """
+    baseline: dict[tuple[str, str], dict[str, Any]] = {}
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        check = str(evidence.get("check") or "")
+        if finding.get("tool") == "http_baseline" and check.startswith("missing_header_"):
+            origin = _http_origin(finding.get("url"))
+            if origin:
+                baseline[(check.removeprefix("missing_header_"), origin)] = finding
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        header = str(evidence.get("header_name") or "").lower()
+        # Opt-in headers whose absence is the browser default (posture_findings.OPT_IN_HEADERS):
+        # kept in the report's posture section, not reported as findings.
+        if (
+            finding.get("tool") == "nuclei" and header in OPT_IN_HEADERS
+            and evidence.get("template_id") == "http-missing-security-headers"
+        ):
+            continue
+        twin = (
+            baseline.get((header, _http_origin(finding.get("url")) or ""))
+            if finding.get("tool") == "nuclei" and evidence.get("template_id") == "http-missing-security-headers"
+            else None
+        )
+        if twin is None:
+            kept.append(finding)
+            continue
+        twin_evidence = twin["evidence"]
+        twin_evidence["matched_url_count"] = int(evidence.get("matched_url_count") or 0)
+        twin_evidence["matched_urls"] = list(evidence.get("matched_urls") or ())[:5]
+        twin_evidence["also_reported_by"] = "nuclei:http-missing-security-headers"
+    return kept
+
+
+# A route that answers for the signed-in user rather than an object id: /me, /api/v1/profile.
+_SELF_ROUTE_RE = re.compile(
+    r"/(?:me|self|whoami|profile|account|current[-_]?user|userinfo)/?$", re.IGNORECASE,
+)
+
+
+def _route_key(origin: Any, url: Any) -> tuple[str, str]:
+    """(origin, path without a trailing slash) of a finding's route; the origin may be ''."""
+    text = str(url or "")
+    origin_text = _http_origin(origin) or _http_origin(text) or ""
+    try:
+        path = urllib.parse.urlsplit(text).path or "/"
+    except ValueError:
+        return origin_text, ""
+    return origin_text, path.rstrip("/") or "/"
+
+
+def _fold_sqli_candidates_into_proofs(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One finding per proven SQL injection: a candidate for the same input joins its proof.
+
+    sqlmap's "Potential SQL injection" on a parameter, or the request verifier's candidate, and
+    the deterministic proof on the same route, method and input are one issue: the Scan reported
+    it twice, once verified and once still to verify (Juice Shop's product search). The
+    candidate is kept on the proof as corroborating evidence (tool, input, database named); a
+    candidate on another input, method or route stays a finding of its own.
+    """
+    proofs: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    by_candidate: dict[str, dict[str, Any]] = {}
+    for finding in findings:
+        if finding.get("tool") != "shakerscan_sqli_proof" or finding.get("proof_state") != "verified":
+            continue
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        origin, path = _route_key(evidence.get("origin"), finding.get("url"))
+        field = str(evidence.get("field_path") or "")
+        method = str(evidence.get("method") or "GET").upper()
+        if path and field:
+            proofs.setdefault((origin, path, method, field), finding)
+            proofs.setdefault(("", path, method, field), finding)
+        if evidence.get("candidate_id"):
+            by_candidate.setdefault(str(evidence["candidate_id"]), finding)
+    if not proofs and not by_candidate:
+        return findings
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        target = None
+        if finding.get("proof_state") != "verified" and finding.get("cwe") == "CWE-89":
+            if finding.get("tool") == "sqlmap":
+                origin, path = _route_key(None, finding.get("url"))
+                key = (path, str(evidence.get("method") or "GET").upper(), str(evidence.get("param") or ""))
+                target = proofs.get((origin, *key)) or proofs.get(("", *key))
+            elif finding.get("tool") == "request_sqli_differential" and evidence.get("candidate_id"):
+                target = by_candidate.get(str(evidence["candidate_id"]))
+        if target is None:
+            kept.append(finding)
+            continue
+        target["evidence"].setdefault("corroborating_candidates", []).append({
+            "tool": finding.get("tool"),
+            "title": finding.get("title"),
+            "input": evidence.get("param") or evidence.get("field_path"),
+            **({"dbms": evidence["dbms"]} if evidence.get("dbms") else {}),
+        })
+    return kept
+
+
+def _fold_directory_listing_slash_twins(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One directory-listing finding per directory: ``/ftp`` and ``/ftp/`` are one directory.
+
+    A listing seeded without the slash links its own slash form, and the probe followed it, so the
+    Scan reported the same directory twice (Juice Shop ``/ftp`` and ``/ftp/``, ``/.well-known``
+    and ``/.well-known/``). The first is kept and names the other URL; listings
+    of different directories (``/ftp/quarantine``) stay findings of their own.
+    """
+    first: dict[str, dict[str, Any]] = {}
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        location = (
+            _exposure_location(finding.get("url"))
+            if finding.get("tool") == "shakerscan_exposure_probe"
+            and evidence.get("exposure_class") == "directory_listing"
+            and not urllib.parse.urlsplit(str(finding.get("url") or "")).query
+            else None
+        )
+        if location is None:
+            kept.append(finding)
+            continue
+        twin = first.get(location)
+        if twin is None:
+            first[location] = finding
+            kept.append(finding)
+            continue
+        twin["evidence"].setdefault("also_listed_at", []).append(finding.get("url"))
+    return kept
+
+
+def _finding_identity(finding: Mapping[str, Any]) -> str:
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+    material = {
+        "tool": finding.get("tool"),
+        "title": finding.get("title"),
+        "url": finding.get("url"),
+        "param": evidence.get("param"),
+        "template_id": evidence.get("template_id"),
+        "resource_id_sha256": evidence.get("resource_id_sha256"),
+    }
+    return hashlib.sha256(json.dumps(
+        material, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")).hexdigest()
+
+
+def _http_origin(value: Any) -> str | None:
+    """Return a content-free HTTP origin suitable for scope revalidation."""
+    try:
+        parsed = urllib.parse.urlsplit(str(value or "").strip())
+        scheme = parsed.scheme.lower()
+        host = str(parsed.hostname or "").rstrip(".").lower()
+        port = parsed.port
+    except ValueError:
+        return None
+    if scheme not in {"http", "https"} or not host:
+        return None
+    display_host = f"[{host}]" if ":" in host else host
+    default_port = 443 if scheme == "https" else 80
+    authority = display_host if port in (None, default_port) else f"{display_host}:{port}"
+    return urllib.parse.urlunsplit((scheme, authority, "", "", ""))
+
+
+def _runtime_destinations(
+    *,
+    action_id: str,
+    capability_name: str,
+    observations: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project content-free destination evidence from manifest-bound observations.
+
+    A destination is where a request went. A redirect's Location the client did not follow
+    (``response.location``; a hop recorded ``followed: false``, stopped cross-origin, at the hop
+    limit or before a credential destination) names a place no request reached: counting it
+    failed whole Scans of live hosts that answer 302 to an identity provider or CDN. A followed
+    hop's Location is where the next request went, so it stays.
+    """
+    destinations: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for observation_index, raw in enumerate(observations):
+        item = dict(raw)
+        request = item.get("request") if isinstance(item.get("request"), Mapping) else {}
+        response = item.get("response") if isinstance(item.get("response"), Mapping) else {}
+        url_values: list[Any] = [
+            request.get("origin"), request.get("url"), item.get("origin"),
+            item.get("url"), item.get("request_url"), item.get("final_url"),
+            item.get("matched_at"), item.get("consumer_url"),
+            item.get("producer_url"), response.get("final_url"),
+        ]
+        for hop in item.get("redirect_chain") or ():
+            if isinstance(hop, Mapping):
+                url_values.extend((hop.get("url"), hop.get("final_url")))
+                if hop.get("followed") is not False:
+                    url_values.append(hop.get("location"))
+            else:
+                url_values.append(hop)
+        origins = list(dict.fromkeys(
+            origin for value in url_values if (origin := _http_origin(value))
+        ))
+        if not origins:
+            continue
+        raw_ips: list[Any] = [
+            request.get("pinned_address"), request.get("connected_address"),
+            response.get("remote_ip"), item.get("pinned_address"),
+            item.get("connected_address"), item.get("remote_ip"),
+            item.get("host_ip"),
+        ]
+        if isinstance(item.get("resolved_ips"), (list, tuple)):
+            raw_ips.extend(item["resolved_ips"])
+        resolved_ips = tuple(dict.fromkeys(
+            str(value).strip() for value in raw_ips if str(value or "").strip()
+        ))
+        for origin_index, origin in enumerate(origins):
+            key = (origin, resolved_ips)
+            if key in seen:
+                continue
+            seen.add(key)
+            destination = {
+                "label": f"{action_id}:{observation_index}:{origin_index}",
+                "url": origin,
+                "final_url": origin,
+                "source": capability_name,
+                "resolved_host": urllib.parse.urlsplit(origin).hostname,
+                "resolved_ips": list(resolved_ips),
+            }
+            destinations.append(destination)
+    return destinations
+
+
+# The report contract the UI and AGENTS.md both name, mapped from the header the
+# capability actually captured.
+_UI_SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
+    ("hsts", "strict-transport-security"),
+    ("x_frame_options", "x-frame-options"),
+    ("x_content_type_options", "x-content-type-options"),
+    ("referrer_policy", "referrer-policy"),
+    ("permissions_policy", "permissions-policy"),
+    ("coop", "cross-origin-opener-policy"),
+    ("corp", "cross-origin-resource-policy"),
+    ("coep", "cross-origin-embedder-policy"),
+    ("csp", "content-security-policy"),
+)
+
+
+def _common_name(distinguished_name: Any) -> str | None:
+    """Return the CN from an RFC 4514 DN, or None when there is none to read."""
+    for part in str(distinguished_name or "").split(","):
+        name, sep, value = part.partition("=")
+        if sep and name.strip().upper() == "CN" and value.strip():
+            return value.strip()
+    return None
+
+
+def _certificate_section(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Gather the flat `certificate_*` observation fields into the documented shape.
+
+    The observation names its fields for the X.509 structure it read; the report names
+    them for the reader (`key_size`, `key_algo`, `sig_algo`). Both are kept: the
+    documented names so the report renders, and the source names so nothing is lost.
+    """
+    flat = {
+        key[len("certificate_"):]: value
+        for key, value in row.items()
+        if key.startswith("certificate_") and value is not None
+    }
+    if not flat:
+        return {}
+    dns_names = [str(name) for name in flat.get("dns_names") or ()]
+    certificate = dict(flat)
+    certificate["subject_dn"] = flat.get("subject")
+    certificate["subject"] = _common_name(flat.get("subject")) or flat.get("subject")
+    if flat.get("public_key_bits") is not None:
+        certificate["key_size"] = flat["public_key_bits"]
+    if flat.get("public_key_type") is not None:
+        certificate["key_algo"] = flat["public_key_type"]
+    if flat.get("signature_algorithm") is not None:
+        certificate["sig_algo"] = flat.get("signature_hash") or flat["signature_algorithm"]
+    if flat.get("serial_hex") is not None:
+        certificate["serial"] = flat["serial_hex"]
+    if flat.get("sha256"):
+        certificate["fingerprints"] = {"sha256": flat["sha256"]}
+    if dns_names:
+        # Published under both names: `dns_names` is what the observation calls it and
+        # `sans` is what the report contract and the UI read. Emitting only the former
+        # meant the SAN list was collected and never displayed.
+        certificate["sans"] = list(dns_names)
+        certificate["wildcard"] = any(name.startswith("*.") for name in dns_names)
+    return certificate
+
+
+def _dns_section(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a DNS posture observation into the documented per-record-type shape.
+
+    A query that timed out is reported as a timeout, never as "not configured": the
+    two look identical in an empty record list and only one of them is a finding.
+    """
+    records = row.get("records") if isinstance(row.get("records"), Mapping) else {}
+    addresses = row.get("bound_addresses") if isinstance(row.get("bound_addresses"), Mapping) else {}
+    failed = {
+        str(item).split(":", 1)[0]
+        for item in row.get("errors") or ()
+        if ":" in str(item)
+    }
+
+    def answered(name: str) -> list[Any]:
+        return [item for item in records.get(name) or () if item not in (None, "")]
+
+    section: dict[str, Any] = {
+        "records": dict(records),
+        "record_metadata": dict(row.get("record_metadata") or {}),
+        "bound_addresses": dict(addresses),
+        "query_count": row.get("query_count"),
+        "errors": list(row.get("errors") or ()),
+    }
+    if addresses.get("A"):
+        section["a"] = list(addresses["A"])
+    if addresses.get("AAAA"):
+        section["aaaa"] = list(addresses["AAAA"])
+    if answered("host_cname"):
+        section["cname"] = answered("host_cname")
+    if answered("root_ns"):
+        section["ns"] = answered("root_ns")
+    if answered("root_soa"):
+        section["soa"] = answered("root_soa")[0]
+    if answered("root_ds"):
+        section["ds"] = answered("root_ds")
+    if answered("host_mx"):
+        section["mx"] = answered("host_mx")
+    if answered("host_caa"):
+        section["caa"] = answered("host_caa")
+    spf = next(
+        (str(item) for item in answered("host_txt") if str(item).lower().startswith("v=spf1")),
+        None,
+    )
+    if spf:
+        section["spf"] = spf
+    if answered("dmarc"):
+        section["dmarc"] = {"record": str(answered("dmarc")[0])}
+    if "host_dnskey" in failed:
+        section["dnssec"] = {"status": "timeout"}
+    elif "host_dnskey" in records:
+        section["dnssec"] = {"status": "secure" if answered("host_dnskey") else "unsigned"}
+    for key, query in (("mta_sts", "mta_sts"), ("tls_rpt", "tls_rpt")):
+        if query in failed:
+            continue
+        if query in records:
+            section[key] = {"enabled": bool(answered(query))}
+    return section
+
+
+def _web_components_section(rows: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The products the recipes named, as sanitized claims (catalogue labels, plain versions)."""
+    try:
+        from scanner_tools.web_identity import sanitized_claim as sanitized
+    except ModuleNotFoundError:  # package import
+        from scanner.scanner_tools.web_identity import sanitized_claim as sanitized
+    items = []
+    for row in rows[:60]:
+        claim = sanitized(row)
+        if claim is None:
+            continue
+        items.append({key: claim[key] for key in (
+            "role", "base_path", "product", "product_status", "version", "version_status",
+            "package_version", "distribution", "basis", "recipe_version",
+        )})
+    if not items:
+        return None
+    return {"items": items, "count": len(items),
+            "note": ("Products named by fixed read-only recipes against a negative control. A probable "
+                     "product or an inferred version is not exact; advisory matches stay candidates.")}
+
+
+def _posture_sections(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    """Project the recon observations into the documented report posture sections.
+
+    The V2 report carried only score and grade, so `result.tls.certificate`,
+    `result.http.security_headers`, `result.dns` and `result.discovery.tech` -- all documented in
+    AGENTS.md and all present in 0.8.18 -- silently disappeared. The data was never lost: the
+    baseline HTTP, TLS, DNS and probe actions all record it. It was simply never projected. This
+    reads what those actions already produced; it performs no network, filesystem or clock access,
+    exactly like the rest of finalization.
+    """
+    http_section: dict[str, Any] = {}
+    tls_section: dict[str, Any] = {}
+    unexamined_tls: list[dict[str, Any]] = []
+    dns_section: dict[str, Any] = {}
+    technologies: list[dict[str, Any]] = []
+    server_versions: dict[str, Any] = {}
+    seen_tech: set[str] = set()
+    infrastructure_observation: dict[str, Any] = {}
+    subdomain_hosts: dict[str, str] = {}
+    subdomain_seen: set[str] = set()
+    subdomain_sources: dict[str, set[str]] = {}
+    takeover_summary: dict[str, Any] = {}
+    takeover_outcomes: dict[str, list[str]] = {}
+    fingerprint_rows: list[Mapping[str, Any]] = []
+    component_rows: list[Mapping[str, Any]] = []
+    content_rows: list[Mapping[str, Any]] = []
+    recon_active_rows: dict[str, list[Mapping[str, Any]]] = {}
+
+    for action_id, rows in observations.items():
+        for row in rows or ():
+            if not isinstance(row, Mapping):
+                continue
+            kind = str(row.get("kind") or "")
+            if kind == "http_observation" and str(action_id) == "baseline.http":
+                request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
+                response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+                headers = {
+                    # Report endpoints' query tokens never reach the stored report.
+                    name: redact_url_queries(value) if isinstance(value, str) else value
+                    for name, value in (
+                        response.get("security_headers")
+                        if isinstance(response.get("security_headers"), Mapping) else {}
+                    ).items()
+                }
+                # A request that never completed observed nothing. Reporting its empty
+                # header set as `missing_security_headers` published five confirmed
+                # findings from a failure -- the UI renders each one red -- so posture is
+                # published only behind an observed status. Absent is not failing; that
+                # rule already governed the TLS and CSP sections and this one skipped it.
+                status = response.get("status")
+                if status in (None, ""):
+                    continue
+                posture_observed = isinstance(status, int) and 200 <= status < 400
+                origin = request.get("origin") or response.get("final_url")
+                canonical_origin = _off_origin_redirect(response, origin=origin)
+                is_https = urllib.parse.urlsplit(str(origin or "")).scheme.lower() == "https"
+                expected_headers = tuple(
+                    name for name in _EXPECTED_SECURITY_HEADERS
+                    if name != "strict-transport-security" or is_https
+                )
+                location = response.get("location")
+                http_section = {
+                    "status": status,
+                    # Origin only: enough for the conclusion to say which host to
+                    # scan instead, never a path or query the redirect carried.
+                    "redirect_origin": (
+                        http_origin(redirect_destination(str(origin or ""), str(location or "")))
+                        if isinstance(status, int) and status in REDIRECT_STATUSES and location
+                        else None
+                    ),
+                    "posture_observed": posture_observed,
+                    # Where the application actually lives when the bound origin
+                    # only forwards to it. Reported so a scan of an apex that
+                    # redirects to its www origin names the origin that serves
+                    # the application instead of silently examining nothing.
+                    **({"application_origin_redirect": canonical_origin}
+                       if canonical_origin else {}),
+                    "security_headers": {
+                        key: headers[header]
+                        for key, header in _UI_SECURITY_HEADERS
+                        if header in headers
+                    },
+                    "observed_headers": dict(headers),
+                    "missing_security_headers": sorted(
+                        name for name in expected_headers if name not in headers
+                    ) if posture_observed else [],
+                    # Only a policy that exists gets graded: an absent CSP rendered as a
+                    # scoring card reading "/100", which states nothing. Its absence is
+                    # carried by the missing-header list instead.
+                    **(
+                        {"csp_evaluation": _evaluate_csp(headers["content-security-policy"])}
+                        if headers.get("content-security-policy") else {}
+                    ),
+                    # The capability puts cookie posture in the response summary, so that
+                    # is where it is read from; the observation root never carried it.
+                    "set_cookie_metadata": list(response.get("set_cookie_metadata") or ()),
+                }
+            elif kind == "tls_protocol":
+                if row.get("status") == "not_examined":
+                    # A frozen address this worker could not route carries no TLS
+                    # evidence; it is named as a coverage gap, never shown as the
+                    # target's TLS posture.
+                    gap = row.get("examination_gap")
+                    unexamined_tls.append({
+                        "origin": row.get("origin"),
+                        "address": row.get("pinned_address"),
+                        "reason": (
+                            gap.get("reason") if isinstance(gap, Mapping) else None
+                        ) or "not_examined",
+                    })
+                    continue
+                candidate = {
+                    key: row.get(key) for key in (
+                        "protocol", "cipher", "cipher_bits", "weak_cipher",
+                        "alpn_protocol", "origin", "port", "status",
+                        # Which versions the server actually accepts, and the
+                        # cipher it negotiated for each. The capability probes
+                        # every protocol and records the result; keeping only the
+                        # one handshake it happened to report first threw that
+                        # away, so a report could not say whether a deprecated
+                        # version was still enabled.
+                        "supported_protocols", "protocol_attempts",
+                        "legacy_protocol_negotiated",
+                    ) if row.get(key) is not None
+                }
+                certificate = _certificate_section(row)
+                if certificate:
+                    candidate["certificate"] = certificate
+                # A scan inspects several origins; keep the first successful handshake and let a
+                # later one replace only an unsuccessful record.
+                if candidate and (
+                    not tls_section or (
+                        str(tls_section.get("status")) != "success"
+                        and str(candidate.get("status")) == "success"
+                    )
+                ):
+                    tls_section = candidate
+            elif kind == "dns_posture":
+                dns_section = _dns_section(row)
+            elif kind == "takeover_summary":
+                takeover_summary = {
+                    key: row.get(key) for key in (
+                        "hosts_considered", "hosts_checked", "hosts_beyond_limit",
+                        "hosts_deadline_skipped", "hosts_with_cname", "authorization",
+                    )
+                }
+            elif kind == "takeover_check" and row.get("host"):
+                takeover_outcomes.setdefault(str(row.get("outcome") or "unknown"), []).append(
+                    str(row["host"])[:253]
+                )
+            elif kind == "subdomain":
+                host = str(row.get("host") or "").lower().rstrip(".")
+                if host:
+                    subdomain_seen.add(host)
+                if host and len(subdomain_hosts) < _REPORTED_SUBDOMAIN_LIMIT:
+                    subdomain_hosts.setdefault(host, str(row.get("root_domain") or ""))
+                if host in subdomain_hosts and isinstance(row.get("source"), str):
+                    subdomain_sources.setdefault(host, set()).add(row["source"][:64])
+            elif kind == "infrastructure_intelligence":
+                infrastructure_observation = dict(row)
+            elif kind == "content_discovery":
+                content_rows.append(row)
+            elif kind in _RECON_ACTIVE_KINDS:
+                recon_active_rows.setdefault(kind, []).append(row)
+            elif kind == "http_component":
+                component_rows.append(row)
+            elif kind == "http_fingerprint":
+                fingerprint_rows.append(row)
+                for item in row.get("technologies") or ():
+                    name = str((item or {}).get("name") if isinstance(item, Mapping) else item)
+                    if name and name not in seen_tech:
+                        seen_tech.add(name)
+                        technologies.append(
+                            dict(item) if isinstance(item, Mapping)
+                            # The probe observed this in the response; it assigns no
+                            # numeric confidence, and inventing one would be a claim the
+                            # scanner never made.
+                            else {"name": name, "confidence_label": "observed"}
+                        )
+                if row.get("webserver"):
+                    banner = str(row["webserver"])
+                    server_versions[str(row.get("url") or "server")] = banner
+                    if banner not in seen_tech:
+                        seen_tech.add(banner)
+                        technologies.append({
+                            "name": banner, "source": "webserver",
+                            "confidence_label": "observed",
+                        })
+
+    sections: dict[str, Any] = {}
+    if http_section:
+        sections["http"] = http_section
+    if unexamined_tls:
+        tls_section["unexamined_addresses"] = unexamined_tls[:64]
+    if tls_section:
+        sections["tls"] = tls_section
+    if dns_section:
+        sections["dns"] = dns_section
+    if infrastructure_observation or dns_section or tls_section.get("certificate"):
+        registration_domain = str(
+            infrastructure_observation.get("registration_domain") or ""
+        ).lower().rstrip(".")
+        related: list[dict[str, Any]] = [
+            dict(item) for item in infrastructure_observation.get("related_names") or ()
+            if isinstance(item, Mapping) and str(item.get("name") or "").strip()
+        ]
+        certificate = (
+            dict(tls_section.get("certificate") or {})
+            if isinstance(tls_section.get("certificate"), Mapping) else {}
+        )
+        for raw_name in certificate.get("sans") or ():
+            name = str(raw_name or "").lower().rstrip(".")
+            comparison = name.removeprefix("*.")
+            if not name:
+                continue
+            related.append({
+                "name": name,
+                "source": "tls_certificate_san",
+                "scope": (
+                    "likely_related"
+                    if registration_domain and (
+                        comparison == registration_domain
+                        or comparison.endswith("." + registration_domain)
+                    )
+                    else "external_unverified"
+                ),
+            })
+        deduped_related: list[dict[str, Any]] = []
+        seen_related: set[tuple[str, str]] = set()
+        for item in related:
+            key = (str(item.get("name") or ""), str(item.get("source") or ""))
+            if key in seen_related:
+                continue
+            seen_related.add(key)
+            deduped_related.append(item)
+        sections["infrastructure"] = {
+            "informational_only": True,
+            "scoring_effect": "none",
+            "canonical_host": infrastructure_observation.get("canonical_host"),
+            "registration_domain": infrastructure_observation.get("registration_domain"),
+            "observed_at": infrastructure_observation.get("observed_at"),
+            "registration": infrastructure_observation.get("registration"),
+            "addresses": list(infrastructure_observation.get("addresses") or ()),
+            "dns": {
+                "addresses": {
+                    "A": list(dns_section.get("a") or ()),
+                    "AAAA": list(dns_section.get("aaaa") or ()),
+                },
+                "cname": list(dns_section.get("cname") or ()),
+                "nameservers": list(dns_section.get("ns") or ()),
+                "soa": dns_section.get("soa"),
+                "record_metadata": dict(dns_section.get("record_metadata") or {}),
+            },
+            "certificate": certificate or None,
+            "related_names": deduped_related[:200],
+            "limitations": list(infrastructure_observation.get("limitations") or ()),
+            "errors": list(infrastructure_observation.get("errors") or ()),
+        }
+    corporate = _corporate_surface(fingerprint_rows, content_rows)
+    active_recon = _recon_active_sections(recon_active_rows)
+    components = _web_components_section(component_rows)
+    if technologies or server_versions or subdomain_hosts or corporate or active_recon or components:
+        discovery: dict[str, Any] = dict(active_recon)
+        if components:
+            discovery["web_components"] = components
+        if corporate:
+            discovery["corporate_surface"] = corporate
+        if technologies:
+            discovery["tech"] = {"items": technologies}
+        if server_versions:
+            discovery["server_versions"] = server_versions
+        if subdomain_hosts:
+            # The scan's own subdomain discovery used to stop at the endpoint manifest: the
+            # action said success while no report section or target named a single host.
+            # Listing them here is what the worker records as targets afterwards.
+            roots = sorted({root for root in subdomain_hosts.values() if root})
+            discovery["subdomains"] = {
+                "root_domain": roots[0] if len(roots) == 1 else None,
+                "hosts": sorted(subdomain_hosts),
+                # `count` is how many are listed; `total` how many distinct names discovery
+                # returned. A list cut at the limit says so instead of reading as complete.
+                "count": len(subdomain_hosts),
+                "total": len(subdomain_seen),
+                "truncated": len(subdomain_seen) > len(subdomain_hosts),
+                "listed_limit": _REPORTED_SUBDOMAIN_LIMIT,
+                "source": "subfinder",
+                "scope": "discovered_names_not_scanned_by_this_scan",
+            }
+            if takeover_summary:
+                # Inconclusive names had a CNAME to a service whose takeover signature is an
+                # HTTP page; this Scan may not send that request to a discovered name.
+                discovery["subdomains"]["takeover"] = {
+                    **takeover_summary,
+                    "outcomes": {
+                        outcome: sorted(hosts)[:200]
+                        for outcome, hosts in sorted(takeover_outcomes.items())
+                    },
+                }
+            if subdomain_sources:
+                # The upstream sources that named each host: a certificate source keeps a name
+                # that a wildcard DNS answer would otherwise explain away when it is recorded.
+                discovery["subdomains"]["sources"] = {
+                    host: sorted(sources) for host, sources in sorted(subdomain_sources.items())
+                }
+        sections["discovery"] = discovery
+    return sections
+
+
+
+_RECON_ACTIVE_KINDS = frozenset({
+    "dns_enumeration", "virtual_host", "virtual_host_discovery",
+    "discovered_parameter", "parameter_discovery",
+})
+
+
+def _recon_active_sections(rows: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, Any]:
+    """The opt-in recon_active family's report sections: leads with their controls.
+
+    Enumerated DNS names are listed with the other discovered subdomains (and recorded as
+    separate targets); this adds each run's own account. Virtual hosts and parameters are leads
+    only: no finding, score or route is derived from them here.
+    """
+    def plain(row: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in row.items() if key != "kind"}
+
+    sections: dict[str, Any] = {}
+    if rows.get("dns_enumeration"):
+        sections["dns_enumeration"] = {
+            "runs": [plain(row) for row in rows["dns_enumeration"]][:4],
+            "scope": "names_under_bound_root_domains_only",
+        }
+    if rows.get("virtual_host_discovery") or rows.get("virtual_host"):
+        summary = plain((rows.get("virtual_host_discovery") or [{}])[0])
+        sections["virtual_hosts"] = {
+            **summary,
+            "items": [plain(row) for row in rows.get("virtual_host") or ()][:50],
+            "scope": "leads_on_the_bound_address_not_routes_or_targets",
+        }
+    if rows.get("parameter_discovery") or rows.get("discovered_parameter"):
+        summary = plain((rows.get("parameter_discovery") or [{}])[0])
+        sections["parameters"] = {
+            **summary,
+            "items": [plain(row) for row in rows.get("discovered_parameter") or ()][:200],
+            "scope": "leads_on_observed_routes_fed_to_candidate_pipeline",
+        }
+    return sections
+
+
+def _off_origin_redirect(
+    response: Mapping[str, Any], *, origin: Any,
+) -> str | None:
+    """Return a different HTTP origin, including scheme and effective-port changes."""
+    status = response.get("status")
+    location = response.get("location")
+    if type(status) is not int or status not in REDIRECT_STATUSES:
+        return None
+    moved = http_origin(redirect_destination(origin, location))
+    return moved if moved and moved != http_origin(origin) else None
+
+
+def browser_session_header_reasons(observations: Mapping[str, Any]) -> set[str]:
+    """What an action's browser could not do with its trusted headers (a page reached by a
+    redirect within the origin loaded without them, a private-network resource refused), from
+    its ``browser_session_header_coverage`` observations. Stated in coverage; no status changes."""
+    reasons: set[str] = set()
+    for rows in (observations or {}).values():
+        for row in rows or ():
+            if isinstance(row, Mapping) and row.get("kind") == "browser_session_header_coverage":
+                reasons.update(str(item)[:100] for item in row.get("reasons") or () if str(item))
+    return reasons
+
+
+def _observed_success_response(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+    *, origins: frozenset[str],
+) -> bool:
+    """Whether any capability retrieved a 2xx application response."""
+    for rows in observations.values():
+        for row in rows or ():
+            if not isinstance(row, Mapping):
+                continue
+            kind = str(row.get("kind") or "")
+            if kind == "http_observation":
+                inner = row.get("response")
+                status = inner.get("status") if isinstance(inner, Mapping) else None
+                request = row.get("request")
+                url = request.get("origin") if isinstance(request, Mapping) else None
+                url = url or (inner.get("final_url") if isinstance(inner, Mapping) else None)
+            elif kind in {"http_fingerprint", "content_discovery"}:
+                status = row.get("status")
+                url = row.get("url")
+            else:
+                continue
+            if type(status) is int and 200 <= status < 300 and http_origin(url) in origins:
+                return True
+    return False
+
+
+def _evaluate_csp(policy: Any) -> dict[str, Any]:
+    """Grade a Content-Security-Policy without network or clock access.
+
+    Absent is reported as absent rather than as a failing grade: the two are different findings and
+    conflating them makes a site with no policy look like one with a broken policy.
+    """
+    text = str(policy or "").strip()
+    if not text:
+        return {"present": False, "grade": None, "score": None, "issues": []}
+    lowered = text.lower()
+    directives = {
+        part.split()[0]: part.split()[1:]
+        for part in (item.strip() for item in lowered.split(";")) if part
+    }
+    issues: list[str] = []
+    if "'unsafe-inline'" in lowered:
+        issues.append("script-src allows 'unsafe-inline'")
+    if "'unsafe-eval'" in lowered:
+        issues.append("script-src allows 'unsafe-eval'")
+    if "default-src" not in directives and "script-src" not in directives:
+        issues.append("no default-src or script-src directive")
+    if any("*" == value for values in directives.values() for value in values):
+        issues.append("a directive allows any origin")
+    if "object-src" not in directives and "default-src" not in directives:
+        issues.append("no object-src or default-src directive")
+    score = max(0, 100 - 20 * len(issues))
+    grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
+    return {
+        "present": True,
+        "grade": grade,
+        "score": score,
+        "issues": issues,
+        "directives": {name: list(values) for name, values in directives.items()},
+    }
+
+
+# Why a verifier left a candidate inconclusive because the target refused its baseline.
+_REFUSAL_REASONS = frozenset({
+    CapabilityResultReason.AUTHENTICATION_REQUIRED.value,
+    CapabilityResultReason.TARGET_REFUSED.value,
+})
+# Family gaps named by their one cause instead of the generic ``action_incomplete``.
+_NAMED_FAMILY_GAP_REASONS = frozenset({
+    CapabilityResultReason.AUTHENTICATION_REQUIRED.value,
+    CapabilityResultReason.TARGET_REFUSED.value,
+    "insufficient_budget_for_stage",
+})
+
+
+def _windows_beyond_allowlist_only(action: Any, rows: Sequence[Any]) -> bool:
+    """An active-template slice whose every planned position was past the allowlist's windows.
+
+    It ran nothing by design (a GET-only allowlist has fewer windows than were planned), so it
+    is not an active verifier that attempted nothing.
+    """
+    raw_slice = action.capability_args.get("slice")
+    planned = int(raw_slice.get("count") or 0) if isinstance(raw_slice, Mapping) else 0
+    beyond = sum(
+        1 for item in rows or ()
+        if isinstance(item, Mapping) and item.get("kind") == "candidate_inapplicable"
+        and item.get("reason") in {TEMPLATE_WINDOW_BEYOND_ALLOWLIST, TEMPLATE_WINDOW_PAST_BASES}
+    )
+    return action.capability_name == "templates.active_batch" and 0 < planned <= beyond
+
+
+def _authz_nothing_to_examine(item: Mapping[str, Any]) -> str | None:
+    """Why one ownership differential had nothing to compare, or None when it had something.
+
+    No in-scope route at all; or routes that were all filtered out as low-value producers
+    (sign-in, health, public catalogue pages), counted by ``producer_candidate_count``. An
+    observation from before that count was recorded cannot show the second.
+    """
+    if str(item.get("reason") or "") in _AUTHZ_NOTHING_TO_EXAMINE:
+        return str(item["reason"])
+    count = item.get("producer_candidate_count")
+    if (
+        item.get("mode") != "selected_object"
+        and isinstance(count, int) and not isinstance(count, bool) and count == 0
+        and not int(item.get("producers_tested") or 0)
+    ):
+        return "no_producer_candidates"
+    return None
+
+
+def _authz_compared(item: Mapping[str, Any]) -> bool:
+    """Whether one ownership differential compared anything.
+
+    The replay path compared once a producer was tested or the differential was proven. The
+    selected-object path (two sibling object URLs) compared once the selected object's request
+    as the other principal was answered: it never reports producers, and its verdict stays
+    inconclusive even when it ran to completion. Requests that stopped before that (a secondary
+    baseline that failed, an owner response without the object) compared nothing.
+    """
+    if item.get("proof_state") == "verified":
+        return True
+    if item.get("mode") == "selected_object":
+        return item.get("selected_request_examined") is True
+    return int(item.get("producers_tested") or 0) > 0
+
+
+def _authz_comparison_work(
+    result: Any, rows: Sequence[Any],
+) -> tuple[int, set[str], int, list[str]]:
+    """(planned, attempts, inapplicable, why nothing to examine) for one authz.verify action.
+
+    The action plans one comparison unless it settled skipped. Two credentials that resolved to
+    one identity, or routes of which no producer was tested, compared nothing.
+    """
+    differentials = [
+        item for item in rows or ()
+        if isinstance(item, Mapping) and item.get("kind") == "authz_differential"
+    ]
+    planned = 0 if result.status is CapabilityResultStatus.SKIPPED else 1
+    compared = any(_authz_compared(item) for item in differentials)
+    empty = sorted({
+        reason for item in differentials
+        for reason in (_authz_nothing_to_examine(item),) if reason
+    })
+    inapplicable = int(bool(empty) and not compared)
+    return (
+        planned, ({f"authz:{result.action_id}"} if compared else set()), inapplicable,
+        empty if inapplicable else [],
+    )
+
+
+def _discovery_contributed(capability_name: str, rows: Sequence[Any]) -> bool:
+    """Whether a surface producer recorded a route the endpoint manifest takes in.
+
+    Mirrors surface_manifest: crawlers and spec ingestion contribute ``discovered_route``
+    records; content discovery contributes ``content_discovery`` records other than its negative
+    control and paths indistinguishable from one that cannot exist.
+    """
+    items = [item for item in rows or () if isinstance(item, Mapping)]
+    if capability_name == "web.content_discover":
+        absent = indistinguishable_from_absent(items)
+        return any(
+            item.get("kind") == "content_discovery"
+            and not is_negative_control_url(item.get("url"))
+            and str(item.get("url") or "") not in absent
+            for item in items
+        )
+    return any(item.get("kind") == "discovered_route" for item in items)
+
+
+def _proven_empty_manifest(action: Any, known: Mapping[str, Mapping[str, Any]]) -> bool:
+    """Whether the manifest a slice indexes is known to have been produced complete and empty.
+
+    The planner declares ``manifest_entries: 0`` both for a manifest that held nothing and as an
+    admission placeholder for one not yet produced, and a producer that failed leaves 0 too.
+    Only the Scan's own reference to that manifest -- complete, with no entry -- tells them
+    apart, as an adapter does before skipping an empty slice (``_empty_slice_reason``). A
+    rebuild whose manifest list lacks it reads the reference frozen into the slice's arguments.
+    """
+    for name in _SLICE_MANIFEST_ARGS:
+        reference = action.capability_args.get(name)
+        if isinstance(reference, Mapping) and reference.get("manifest_digest"):
+            item = known.get(str(reference["manifest_digest"])) or reference
+            return (
+                str(item.get("status") or "") == "complete"
+                and int(item.get("entry_count") or 0) == 0
+            )
+    return False
+
+
+def _auxiliary_check_coverage(entries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Coverage of one auxiliary check from its actions' outcomes and counts."""
+    planned = sum(int(item["planned"]) for item in entries)
+    attempted = sum(int(item["attempted"]) for item in entries)
+    statuses = [str(item["status"]) for item in entries]
+    reasons = sorted({str(item["reason"]) for item in entries if item["reason"]})
+    if all(item["settled_empty"] for item in entries) and not attempted:
+        status, reason = "not_applicable", "no_candidates"
+    elif all(value == "success" for value in statuses) and attempted and attempted >= planned:
+        status, reason = "complete", None
+    else:
+        status = "partial"
+        reason = (
+            reasons[0] if reasons
+            else "zero_attempts" if not attempted else "candidates_unattempted"
+        )
+    return {
+        "actions": len(entries), "planned_candidates": planned,
+        "attempted_candidates": attempted, "status": status, "reason": reason,
+    }
+
+
+def _sign_in_limited_variant(item: Mapping[str, Any]) -> tuple[str, str]:
+    """(which variant, its sign-in endpoint) of a record the sign-in endpoint's limit left
+    without a verdict.
+
+    A variant is its candidate id and manifest position: the variants of one form share a
+    candidate id, and the verifier and the proof of one variant name different attempt ids (each
+    its family's), so neither id alone counts a variant once. A record without a position (an
+    earlier build's) is its attempt id.
+    """
+    position = item.get("manifest_index")
+    candidate = str(item.get("candidate_id") or "")
+    if candidate and isinstance(position, int) and not isinstance(position, bool):
+        variant = f"{candidate}:{position}"
+    else:
+        variant = str(item.get("attempt_id") or candidate)
+    return variant, str(item.get("sign_in_endpoint") or "")
+
+
+# A family whose proof attempts did not all reach a verdict (each failed, was refused or timed
+# out): the candidates its verifier flagged for proof were neither proven nor ruled out.
+PROOF_ATTEMPTS_UNRESOLVED = "proof_attempts_unresolved"
+_PROOF_ATTEMPT_RESOLVED_STATUSES = frozenset({"success", "succeeded", "completed"})
+
+
+def _proof_attempts_resolved(records: Any) -> dict[str, bool]:
+    """Each proof attempt one action recorded, and whether it reached a verdict.
+
+    An attempt reached one when it proved its candidate, or when every record of it settled as a
+    success without timing out. A candidate the sign-in endpoint's bounded probe set left inconclusive is named by its own
+    reason (``AUTH_ENDPOINT_PROBE_LIMITED``), not counted here. A signalled candidate the batch
+    stopped before (cancelled, or its share unfunded: ``verification_extension.PROOF_LEFT_REASONS``) reached
+    none.
+    """
+    resolved: dict[str, bool] = {}
+    for item in records or ():
+        if not isinstance(item, Mapping):
+            continue
+        attempt_id = str(item.get("attempt_id") or "")
+        if (
+            item.get("kind") == "candidate_deferred" and attempt_id
+            and item.get("reason") in PROOF_LEFT_REASONS
+        ):
+            resolved[attempt_id] = False
+            continue
+        if item.get("kind") != "candidate_attempt" or not attempt_id:
+            continue
+        settled = (
+            str(item.get("proof_state") or "") == "verified"
+            or item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+            or (str(item.get("status") or "").strip().lower() in _PROOF_ATTEMPT_RESOLVED_STATUSES
+                and not item.get("timed_out"))
+        )
+        resolved[attempt_id] = resolved.get(attempt_id, True) and settled
+    return resolved
+
+
+def _merge_proof_resolution(row: dict[str, Any], records: Any) -> None:
+    """Fold one proof action's attempts into its family's: an attempt any action settled is
+    resolved, whichever action recorded it first."""
+    for attempt_id, resolved in _proof_attempts_resolved(records).items():
+        row["_proofs_resolved"][attempt_id] = row["_proofs_resolved"].get(attempt_id, False) or resolved
+
+
+def _family_action_reason(action: Any, result: Any) -> str:
+    """The reason one verifier action contributes to its family's coverage.
+
+    A SQLi continuation link that its request holds stopped before it sent a single request
+    could not fund one technique stage. It is stated as such: the planner does not extend it
+    again at the same holds (``verification_extension``), so the family's gap is that, not a
+    request budget the link never touched (lab Scan 13bd3497).
+    """
+    reason = result.reason_code.value if result.reason_code is not None else ""
+    if (
+        action.capability_name == "sqli.verify_batch"
+        and action.capability_args.get("extends")
+        and result.status.value == "partial"
+        and reason in {item.value for item in BUDGET_EXHAUSTION_REASONS.values()}
+        and int(dict(result.budget_consumed or {}).get("http_requests") or 0) <= 0
+    ):
+        return "insufficient_budget_for_stage"
+    return reason
+
+
+# Answers that say the service, not the application, decided what a check saw.
+_COVERAGE_UNAVAILABLE = frozenset({408, 429, 502, 503, 504})
+
+
+def scan_check_coverage(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+    capability_by_action: Mapping[str, str],
+) -> dict[str, Any]:
+    """What this Scan's passive checks examined, URL by URL, and what they saw (value-free).
+
+    A later Scan that examined the same URL with the same check and did not see a finding again
+    is evidence the finding was fixed (``rescan_verification``). Only answers the check could
+    judge are kept: a read with no answer, or an answer a service gave (408, 429, 502-504), is
+    no evidence of anything. ``exposure``: each URL the exposure probe read, its status and the
+    class it matched (None for no match). ``baseline_headers``: each origin's recorded baseline
+    response, the request line, status, principal and the posture headers it carried.
+    """
+    exposure: dict[str, dict[str, Any]] = {}
+    for action_id, rows in observations.items():
+        if capability_by_action.get(action_id) != "exposure.verify_batch":
+            continue
+        for item in rows or ():
+            examined = item.get("examined") if isinstance(item, Mapping) else None
+            if (
+                not isinstance(examined, Mapping) or item.get("kind") != "candidate_attempt"
+                or item.get("family") != "sensitive_exposure"
+            ):
+                continue
+            url, status = str(examined.get("request_url") or ""), examined.get("response_status")
+            if (
+                not url or type(status) is not int or not 100 <= status <= 599
+                or status in _COVERAGE_UNAVAILABLE or examined.get("indistinguishable_from_absent")
+            ):
+                continue
+            exposure[url] = {
+                "url": url[:2_000], "response_status": status,
+                "exposure_class": (
+                    str(examined["exposure_class"])[:80] if examined.get("exposure_class") else None
+                ),
+            }
+    headers = [
+        {
+            "request_line": response["request_line"], "response_status": response["response_status"],
+            "principal": response.get("principal") or "anonymous",
+            "present_headers": sorted(
+                name for name, value in dict(response.get("observed_headers") or {}).items()
+                if str(value or "").strip()
+            ),
+        }
+        for response in _baseline_header_responses(observations).values()
+        if response["response_status"] not in _COVERAGE_UNAVAILABLE
+    ]
+    return {
+        "schema_version": "scan-check-coverage/v1",
+        "exposure": [exposure[url] for url in sorted(exposure)][:5_000],
+        "baseline_headers": sorted(headers, key=lambda row: row["request_line"]),
+    }
+
+
+def finalize_scan_report(
+    *,
+    plan: ScanActionPlan,
+    target_url: str,
+    action_results: Mapping[str, CapabilityResultReference],
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+    work_manifest_references: Sequence[Mapping[str, Any]] = (),
+    plan_revision: ScanPlanRevision | Mapping[str, Any] | None = None,
+    origin_evidence: Sequence[Mapping[str, Any]] = (),
+    resolved_families: Sequence[str] | None = None,
+    omitted_capabilities: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Build the final report without network, process, filesystem, or clock access.
+
+    ``omitted_capabilities`` are the capabilities a continuation round compiled but left out
+    because the Scan's frozen allocation does not grant them (an in-flight Scan across an upgrade
+    that added a capability to a family). Each is stated in ``coverage.reasons`` as
+    ``capability_not_in_allocation:<capability>``; it is optional work, so the status is unchanged.
+
+    ``resolved_families`` is the execution plan's resolved family set when the caller has it
+    (the worker does). An empty set means the Scan selected no check family at all.
+
+    ``origin_evidence`` carries the probe attempts of a failed ``origin.select``:
+    a failed action has no observation manifest, yet its refused connections are exactly
+    what the report must show when the application could not be examined.
+    """
+    try:
+        revision = (
+            plan_revision
+            if isinstance(plan_revision, ScanPlanRevision)
+            else ScanPlanRevision.from_dict(plan_revision)
+            if isinstance(plan_revision, Mapping)
+            else root_scan_plan_revision(plan)
+        )
+    except (ScanContinuationError, TypeError, ValueError) as exc:
+        raise ScanFinalizationError("plan revision is invalid") from exc
+    if revision.scan_id != plan.scan_id or revision.plan_digest != plan.plan_digest:
+        raise ScanFinalizationError("plan revision differs from finalization plan")
+    finalization_actions = tuple(
+        action for action in plan.actions
+        if action.action_id == "finalize.report"
+    )
+    if len(finalization_actions) != 1:
+        raise ScanFinalizationError("plan must contain exactly one finalization action")
+    finalization_action = finalization_actions[0]
+    expected_actions = tuple(
+        action for action in plan.actions
+        if action.action_id != finalization_action.action_id
+    )
+    expected_ids = tuple(action.action_id for action in expected_actions)
+    if set(action_results) != set(expected_ids):
+        raise ScanFinalizationError(
+            "finalization requires every pre-finalization action result"
+        )
+    # A verifier slice carried into a later round (see verification_extension) is
+    # covered by its extension: the extension's outcome decides the slice's coverage,
+    # while both actions' spend and evidence stay on the record.
+    superseded = superseding_results(expected_actions, action_results)
+    findings_by_id: dict[str, dict[str, Any]] = {}
+    action_rows: list[dict[str, Any]] = []
+    runtime_destinations: list[dict[str, Any]] = []
+    unobserved_response_urls: set[str] = set()
+    for row in observations.get("baseline.http", ()):
+        if not isinstance(row, Mapping) or row.get("kind") != "http_observation":
+            continue
+        request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
+        response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+        status = response.get("status")
+        if isinstance(status, int) and not 200 <= status < 400:
+            key = _observed_url_key(request.get("origin") or response.get("final_url"))
+            if key:
+                unobserved_response_urls.add(key)
+    # Every stored password hash (keyed digest) the signed-in principal read in this Scan.
+    disclosures = [
+        item
+        for action in expected_actions
+        if action_results[action.action_id].capability_name == "authz_surface.verify_batch"
+        for item in observations.get(action.action_id, ())
+        if isinstance(item, Mapping)
+        and item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
+    ]
+    scan_password_hashes = frozenset(
+        str(digest) for item in disclosures for digest in list(item.get("hash_digests") or ())[:50]
+    )
+    # The signed-in user's own hash: the one a route naming the signed-in user returned.
+    scan_self_password_hashes = frozenset(
+        str(digest) for item in disclosures
+        if _SELF_ROUTE_RE.search(urllib.parse.urlsplit(str(item.get("request_url") or "")).path)
+        and int(item.get("hash_count") or 0) == 1
+        for digest in list(item.get("hash_digests") or ())[:1]
+    )
+    for action in expected_actions:
+        result = action_results[action.action_id]
+        if result.action_digest != action.action_digest:
+            raise ScanFinalizationError("action result is detached from finalization plan")
+        rows = tuple(dict(item) for item in observations.get(action.action_id, ()))
+        if result.observation_manifest_ref is None and rows:
+            raise ScanFinalizationError("observations lack a manifest-bound action result")
+        if (
+            result.observation_manifest_ref is not None
+            and len(rows) != result.observation_manifest_ref.count
+        ):
+            raise ScanFinalizationError("observation count differs from its action manifest")
+        for finding in _findings_for_action(
+            result,
+            rows,
+            unobserved_response_urls=frozenset(unobserved_response_urls),
+            target_url=target_url,
+            scan_password_hashes=scan_password_hashes,
+            scan_self_password_hashes=scan_self_password_hashes,
+        ):
+            identity = _finding_identity(finding)
+            existing = findings_by_id.get(identity)
+            if existing is None:
+                findings_by_id[identity] = finding
+                continue
+            # The same origin-level header finding from a later batch of the same sweep:
+            # keep the first, fold the later batch's URL evidence into it.
+            merged = existing.get("evidence") if isinstance(existing.get("evidence"), dict) else None
+            later = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+            if merged is not None and "matched_url_count" in merged and "matched_url_count" in later:
+                merged["matched_url_count"] = int(merged["matched_url_count"]) + int(later["matched_url_count"])
+                samples = merged.setdefault("matched_urls", [])
+                for url in later.get("matched_urls") or ():
+                    if len(samples) >= 5:
+                        break
+                    if url not in samples:
+                        samples.append(url)
+        runtime_destinations.extend(_runtime_destinations(
+            action_id=action.action_id,
+            capability_name=action.capability_name,
+            observations=rows,
+        ))
+        action_rows.append({
+            "action_id": action.action_id,
+            "stage": action.stage,
+            "capability_name": action.capability_name,
+            "required": action.required,
+            "supporting": action.supporting,
+            "status": result.status.value,
+            "reason_code": (
+                result.reason_code.value if result.reason_code is not None else None
+            ),
+            "receipt": result.receipt_ref.canonical_dict(),
+            "observation_manifest": (
+                result.observation_manifest_ref.canonical_dict()
+                if result.observation_manifest_ref is not None else None
+            ),
+            "budget_reserved": dict(result.budget_reserved),
+            "budget_consumed": dict(result.budget_consumed),
+        })
+    findings = _fold_directory_listing_slash_twins(_fold_sqli_candidates_into_proofs(
+        _fold_duplicate_header_findings(
+            _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values())),
+        ),
+    ))
+    _attach_observed_header_responses(
+        findings, observations,
+        {
+            action_id: _receipt(action_results[action_id])
+            for action_id in ("baseline.http", "baseline.http_redirect")
+            if action_results.get(action_id) is not None
+        },
+    )
+
+    # Family-aware coverage: every selected family (one that produced a batch or
+    # verifier action) is reported with attempts, findings, budget, and a status.
+    # A selected family that attempted nothing while candidates existed, or whose
+    # required action did not complete, makes the grade unreliable — a scan can no
+    # longer report a reliable grade while a chosen family did no work.
+    family_coverage: dict[str, dict[str, Any]] = {}
+    # The active-template windows the Scan's sweeps finished, per allowlist size: a slice
+    # without a mutation hold runs the smaller GET-only allowlist, whose windows are others.
+    template_windows_run: dict[int, set[int]] = {}
+    # A parallel shard's part of the (base, window) pairs, and windows resumed from attempts an
+    # earlier mapping ran (a 2.11.0 worker at an endpoint's path), credited to no base.
+    template_windows_shard: dict[str, Any] | None = None
+    template_windows_legacy: set[int] = set()
+    # Per allowlist size, the windows each sweep base finished, in the order the sweep maps
+    # positions to them; and whether a thorough or deep direct sweep holds every base to every
+    # window (a fast or balanced one runs one window per endpoint by design).
+    template_base_windows: dict[int, dict[str, set[int]]] = {}
+    template_windows_strict = False
+    auxiliary_entries: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    known_manifests = [
+        dict(item) for item in (*work_manifest_references, *revision.work_manifest_references)
+        if isinstance(item, Mapping)
+    ]
+    manifests_by_digest = {
+        str(item["manifest_digest"]): item for item in known_manifests
+        if item.get("manifest_digest")
+    }
+    for action in expected_actions:
+        family = _FAMILY_BY_CAPABILITY.get(action.capability_name)
+        auxiliary = _AUXILIARY_CHECKS.get(action.capability_name)
+        if family is None and auxiliary is None:
+            continue
+        result = action_results[action.action_id]
+        if action.capability_name == "templates.active_batch":
+            for item in observations.get(action.action_id, ()):
+                if not isinstance(item, Mapping) or item.get("kind") != ACTIVE_TEMPLATE_WINDOWS_RECORD_KIND:
+                    continue
+                count = item.get("window_count")
+                part = item.get("shard_part")
+                if isinstance(part, Mapping) and isinstance(part.get("count"), int):
+                    template_windows_shard = {"index": part.get("index"), "count": part.get("count")}
+                template_windows_legacy.update(
+                    int(index) for index in item.get("legacy_windows_run") or ()
+                    if isinstance(index, int) and not isinstance(index, bool)
+                )
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    template_windows_run.setdefault(count, set()).update(
+                        int(index) for index in item.get("windows_run") or ()
+                        if isinstance(index, int) and not isinstance(index, bool)
+                        and 0 <= index < count
+                    )
+                    bases = item.get("bases")
+                    if isinstance(bases, list) and bases:
+                        per_base = template_base_windows.setdefault(count, {})
+                        for entry in bases:
+                            if isinstance(entry, Mapping) and isinstance(entry.get("base"), str):
+                                per_base.setdefault(entry["base"], set()).update(
+                                    int(index) for index in entry.get("windows_run") or ()
+                                    if isinstance(index, int) and not isinstance(index, bool)
+                                    and 0 <= index < count
+                                )
+                        profile = str(action.capability_args.get("profile") or "")
+                        template_windows_strict |= budget_sufficiency(
+                            profile.removesuffix("_batch_v1"),
+                        ) and not isinstance(item.get("shard_part"), Mapping)
+        raw_slice = action.capability_args.get("slice")
+        planned = (
+            int(raw_slice.get("count") or 0)
+            if isinstance(raw_slice, Mapping) else 0
+        )
+        # A slice is sized from the profile's floor before the manifest is cut,
+        # so a shard whose manifest turned out empty still carries a slice of
+        # one. The manifest is what exists to attempt: planned work cannot
+        # exceed it, or an empty family reads as one candidate never tried.
+        declared_entries = action.capability_args.get("manifest_entries")
+        if isinstance(declared_entries, int) and not isinstance(declared_entries, bool) and declared_entries >= 0:
+            planned = min(planned, declared_entries)
+        attempts = {
+            str(item.get("attempt_id") or "")
+            for item in observations.get(action.action_id, ())
+            if isinstance(item, Mapping)
+            and item.get("kind") == "candidate_attempt"
+            and str(item.get("attempt_id") or "")
+        }
+        # A slice entry the verifier recorded as inapplicable to its family (a path-segment
+        # candidate handed to Dalfox) was never attemptable, so it is not planned work that
+        # went unattempted. It stays in the scheduled count: the slice did cover it.
+        # Distinct entries: two records about one entry account for one.
+        inapplicable = len({
+            str(item.get("candidate_id") or index)
+            for index, item in enumerate(observations.get(action.action_id, ()))
+            if isinstance(item, Mapping) and item.get("kind") == "candidate_inapplicable"
+        })
+        empty_reasons: list[str] = []
+        if action.capability_name == "authz.verify":
+            planned, attempts, inapplicable, empty_reasons = _authz_comparison_work(
+                result, observations.get(action.action_id, ()),
+            )
+        # The action settled having nothing to examine: skipped as not applicable, or it
+        # succeeded over a slice whose every entry it recorded as inapplicable, or whose
+        # manifest the Scan's references show was produced complete with no entry. Anything
+        # else that attempted nothing did no work.
+        settled_empty = (
+            result.status is CapabilityResultStatus.SKIPPED
+            and result.reason_code is CapabilityResultReason.NOT_APPLICABLE
+        ) or (
+            result.status is CapabilityResultStatus.SUCCESS
+            and max(0, planned - inapplicable) == 0
+            and (inapplicable > 0 or (
+                declared_entries == 0 and _proven_empty_manifest(action, manifests_by_digest)
+            ))
+        )
+        if auxiliary is not None:
+            if action.action_id not in superseded:
+                auxiliary_entries.setdefault(auxiliary, []).append({
+                    "status": result.status.value,
+                    "reason": result.reason_code.value if result.reason_code is not None else None,
+                    "planned": max(0, planned - inapplicable),
+                    "attempted": len(attempts),
+                    "settled_empty": settled_empty,
+                })
+            continue
+        row = family_coverage.setdefault(family, {
+            "family": family, "selected": True, "required": False,
+            "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
+            "verified_findings": 0, "suspected_findings": 0,
+            "budget_reserved": {}, "budget_consumed": {}, "_statuses": [], "_reasons": [],
+            "_settled_empty": [], "_empty_reasons": [],
+            # Per-capability manifest size vs what the plan actually scheduled. A capability whose
+            # manifest holds more entries than its slices cover has work that was never attempted,
+            # and comparing attempts with slices alone reports that as complete coverage.
+            "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
+            "_refused_candidates": [], "_sign_in_limited": [], "_continued": [],
+            "_proofs_attempted": set(), "_proofs_pace_unfunded": {}, "_proofs_resolved": {},
+            "proof_escalation": {
+                "actions": 0, "attempted_candidates": 0,
+                "_statuses": [], "_reasons": [],
+            },
+        })
+        row["required"] = row["required"] or bool(action.required)
+        if action.action_id in superseded:
+            # Its extension re-plans the same slice and is counted instead. A proof's attempts
+            # that reached no verdict still need one: they stay unresolved unless the extension
+            # (or a retry) settles the same attempt, which it does only for those it re-runs.
+            if result.status is not CapabilityResultStatus.SUCCESS:
+                row["_continued"].append((
+                    result.reason_code.value if result.reason_code is not None else None,
+                    superseded[action.action_id].status is CapabilityResultStatus.SUCCESS,
+                ))
+            if action.capability_name in _PROOF_CAPABILITIES:
+                _merge_proof_resolution(row, observations.get(action.action_id, ()))
+        elif action.capability_name in _PROOF_CAPABILITIES:
+            # Escalation over candidates the verifier already counted: record it
+            # separately so it never double-counts them. Only an escalation that
+            # broke (failed or timed out, below) leaves its family partial.
+            proof = row["proof_escalation"]
+            proof["actions"] += 1
+            proof["attempted_candidates"] += len(attempts)
+            proof["_statuses"].append(result.status.value)
+            if result.reason_code is not None:
+                proof["_reasons"].append(result.reason_code.value)
+            # A proof the sign-in endpoint's probe set left without a verdict is named too.
+            row["_sign_in_limited"].extend(
+                _sign_in_limited_variant(item)
+                for item in observations.get(action.action_id, ())
+                if isinstance(item, Mapping)
+                and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
+                and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+            )
+            # So is a proof the slice's wall could not pace at the sign-in endpoint's paced
+            # rate, unless another proof action attempted it: nothing proved or refuted it.
+            row["_proofs_attempted"].update(attempts)
+            # Whether each attempt reached a verdict: one that failed, was refused or timed out
+            # left its candidate unproven, not disproven, and so did one the batch stopped
+            # before. A later action (an extension or a retry) that settles the same attempt
+            # resolves it.
+            _merge_proof_resolution(row, observations.get(action.action_id, ()))
+            for item in observations.get(action.action_id, ()):
+                if (
+                    isinstance(item, Mapping) and item.get("kind") == "candidate_deferred"
+                    and item.get("reason") == AUTH_ENDPOINT_PACE_UNFUNDED
+                    and str(item.get("attempt_id") or "")
+                ):
+                    row["_proofs_pace_unfunded"].setdefault(
+                        str(item["attempt_id"]), _sign_in_limited_variant(item),
+                    )
+        else:
+            row["batch_actions"] += 1
+            # Endpoints a template batch could not finish inside its wall even on a retry
+            # sized for a slow endpoint (soak N32), exposure probes no retry got an answer
+            # for (soak N37), and SQLi candidates whose next technique no continuation round
+            # can fund at their measured rate (soak N55), named so coverage says which ones.
+            row["_slow_endpoints"].extend(
+                str(item.get("url") or item.get("candidate_id") or "")
+                for item in observations.get(action.action_id, ())
+                if isinstance(item, Mapping)
+                and item.get("kind") in _SLOW_ENDPOINT_RECORD_KINDS
+            )
+            # Candidates the target refused (asked for credentials, or a plain 403):
+            # inconclusive, named so coverage says which ones and why.
+            for item in observations.get(action.action_id, ()):
+                if isinstance(item, Mapping) and item.get("inconclusive_reason") in _REFUSAL_REASONS:
+                    row["_refused_candidates"].append((
+                        str(item["inconclusive_reason"]),
+                        str(item.get("url") or item.get("candidate_id") or ""),
+                    ))
+                # The credential profile's own sign-in endpoint got its bounded probe set
+                # (auth_endpoint_probe): named, so the limit is visible, not a silent gap. Counted
+                # by variant (_sign_in_limited_variant).
+                if (
+                    isinstance(item, Mapping)
+                    and item.get("kind") in {"candidate_attempt", "candidate_deferred"}
+                    and item.get("inconclusive_reason") == AUTH_ENDPOINT_PROBE_LIMITED
+                ):
+                    row["_sign_in_limited"].append(_sign_in_limited_variant(item))
+            row["planned_candidates"] += max(0, planned - inapplicable)
+            row["attempted_candidates"] += len(attempts)
+            row["_statuses"].append(result.status.value)
+            row["_reasons"].append(_family_action_reason(action, result))
+            row["_settled_empty"].append(settled_empty)
+            row["_empty_reasons"].extend(empty_reasons)
+            declared = action.capability_args.get("manifest_entries")
+            # Every slice of one worklist declares the same manifest size. A passive Scan
+            # runs the pack over two worklists -- the admitted surface and the discovered
+            # one -- and counting the admission slice against the discovered manifest let
+            # it cancel out an unscheduled discovered route.
+            lane = _manifest_lane(action)
+            if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
+                row["_manifest_entries"][lane] = max(
+                    int(row["_manifest_entries"].get(lane, 0)), declared,
+                )
+            row["_scheduled_entries"][lane] = (
+                int(row["_scheduled_entries"].get(lane, 0)) + planned
+            )
+        # Budget is real spend either way and stays aggregated for the family.
+        for name, amount in result.budget_reserved.items():
+            row["budget_reserved"][name] = row["budget_reserved"].get(name, 0) + int(amount)
+        for name, amount in result.budget_consumed.items():
+            row["budget_consumed"][name] = row["budget_consumed"].get(name, 0) + int(amount)
+    for finding in findings:
+        capability = str(
+            (finding.get("evidence") or {}).get("canonical_capability") or ""
+        )
+        family = _FAMILY_BY_CAPABILITY.get(capability)
+        row = family_coverage.get(family) if family else None
+        if row is None:
+            continue
+        if finding.get("verified") is True:
+            row["verified_findings"] += 1
+        elif finding.get("suspected") is True:
+            row["suspected_findings"] += 1
+    if template_windows_run and "nuclei_active" in family_coverage:
+        # Informational: how much of the largest permitted active allowlist ran. A sweep runs
+        # one window per attempt, so a host with fewer endpoints than windows ran a fraction.
+        total = max(template_windows_run)
+        per_base = template_base_windows.get(total) or {}
+        if per_base:
+            # Run and total count (base, window) pairs: a second origin that finished 11 of 39
+            # windows makes 50 of 78, not the 39 of 39 a union of window indices read.
+            family_coverage["nuclei_active"]["template_windows"] = {
+                "run": sum(len(windows) for windows in per_base.values()),
+                "total": total * len(per_base),
+                "bases": [
+                    {
+                        "base": base, "run": len(windows), "total": total,
+                        # A shard's own windows, so the parallel merge can count the distinct
+                        # pairs its children ran and the ones they repeated.
+                        **({"windows_run": sorted(windows)} if template_windows_shard else {}),
+                    }
+                    for base, windows in per_base.items()
+                ],
+            }
+            short = [base for base, windows in per_base.items() if len(windows) < total]
+            if template_windows_strict and short:
+                family_coverage["nuclei_active"]["_windows_short_bases"] = len(short)
+            if not short and template_windows_shard is None:
+                # Every (base, window) pair ran: the active templates run at the sweep's bases,
+                # not at each endpoint, so endpoints the plan left without a position are not
+                # work it skipped (a position past bases x windows runs nothing).
+                family_coverage["nuclei_active"]["_windows_cover_unscheduled"] = True
+        else:
+            # A record from before sweep bases (2.11.0) or a hand-made one: window indices only.
+            family_coverage["nuclei_active"]["template_windows"] = {
+                "run": len(template_windows_run[total]), "total": total,
+            }
+        if template_windows_shard is not None:
+            # This shard ran its part of the pairs; its siblings ran the others.
+            family_coverage["nuclei_active"]["template_windows"]["shard_part"] = template_windows_shard
+        if template_windows_legacy:
+            family_coverage["nuclei_active"]["template_windows"]["legacy_windows_run"] = len(
+                template_windows_legacy,
+            )
+    selected_family_gaps: list[str] = []
+    for family, row in family_coverage.items():
+        statuses = row.pop("_statuses")
+        batch_reasons = row.pop("_reasons")
+        windows_short_bases = int(row.pop("_windows_short_bases", 0) or 0)
+        windows_cover_unscheduled = bool(row.pop("_windows_cover_unscheduled", False))
+        if family == "sqli":
+            # Every SQLi candidate the Scan left inconclusive for budget, including one still
+            # waiting for a continuation no round could fund when the Scan ended (soak N55).
+            outcomes = sqli_budget_outcomes(
+                item
+                for action in expected_actions
+                if action.capability_name == "sqli.verify_batch"
+                for item in observations.get(action.action_id, ())
+            )
+            if outcomes:
+                row["budget_inconclusive_candidates"] = outcomes
+                row["_slow_endpoints"].extend(item["url"] for item in outcomes)
+        sign_in_limited = row.pop("_sign_in_limited", [])
+        proofs_attempted = row.pop("_proofs_attempted", set())
+        proofs_paced_out = [
+            limited for attempt_id, limited in row.pop("_proofs_pace_unfunded", {}).items()
+            if attempt_id not in proofs_attempted
+        ]
+        sign_in_limited.extend(proofs_paced_out)
+        if sign_in_limited:
+            row["sign_in_probe_limited"] = {
+                "endpoints": sorted({endpoint for _candidate, endpoint in sign_in_limited if endpoint}),
+                "candidates": len({candidate for candidate, _endpoint in sign_in_limited}),
+            }
+        refused = row.pop("_refused_candidates")
+        for reason in sorted(_REFUSAL_REASONS):
+            named = sorted({candidate for kind, candidate in refused if kind == reason and candidate})
+            if named:
+                row[f"{reason}_candidates"] = named[:50]
+                row[f"{reason}_candidate_count"] = len(named)
+        slow_endpoints = sorted(set(filter(None, row.pop("_slow_endpoints"))))
+        if slow_endpoints:
+            row["slow_endpoints"] = slow_endpoints
+            row["slow_endpoint_count"] = len(slow_endpoints)
+        continued = row.pop("_continued")
+        if continued:
+            # Slices that did not finish (a spent request allowance, a timeout) and were carried
+            # into a later action. The continuation's outcome decides the family's status; this
+            # states that it happened, why, and how many the continuation finished, so a family
+            # that reads complete beside actions that ran out of budget explains itself.
+            row["continued_actions"] = {
+                "count": len(continued),
+                "finished": sum(1 for _reason, finished in continued if finished),
+                "reasons": sorted({reason for reason, _finished in continued if reason}),
+            }
+        proof = row["proof_escalation"]
+        proof_statuses = proof.pop("_statuses")
+        proof_reasons = proof.pop("_reasons")
+        # An escalation that crashed or ran out of time left the candidates its verifier
+        # flagged without a verdict. A reflection Dalfox only flagged reaches the report
+        # through the browser proof alone, so the family was not examined to completion. A
+        # skip (nothing eligible, or no browser budget on this shard) is not a break.
+        # A proof refused before it ran (blocked), cancelled, or skipped for a reason other
+        # than "nothing eligible" or "could not be funded or placed" broke the same way, and so
+        # did one that settled partial without escalating a single candidate.
+        proof_broke = any(status in {"failed", "timed_out"} for status in proof_statuses)
+        if not proof_statuses:
+            # The family planned no escalation at all.
+            proof["status"] = "not_planned"
+            proof["reason"] = None
+        elif all(status == "success" for status in proof_statuses):
+            proof["status"] = "complete"
+            proof["reason"] = None
+        elif any(status == "partial" for status in proof_statuses):
+            proof["status"] = "partial"
+            proof["reason"] = (sorted(set(proof_reasons)) or ["proof_incomplete"])[0]
+        elif all(
+            status == "skipped" and reason == "not_applicable"
+            for status, reason in zip(proof_statuses, proof_reasons or proof_statuses)
+        ):
+            # Nothing was eligible to escalate. That is a clean outcome for the
+            # escalation and says nothing about whether the family ran.
+            proof["status"] = "not_applicable"
+            proof["reason"] = "no_proof_eligible_candidate"
+        elif all(
+            status == "skipped" and reason in _PROOF_UNAVAILABLE_REASONS
+            for status, reason in zip(proof_statuses, proof_reasons or proof_statuses)
+        ):
+            # The escalation could not be placed or funded -- an endpoint shard
+            # carries no browser budget, for instance. That is a real limit on
+            # what was proved and must be stated, but it is not a failure of the
+            # verifier and not evidence that the family did not run.
+            proof["status"] = "unavailable"
+            proof["reason"] = (sorted(set(proof_reasons)) or ["proof_unavailable"])[0]
+        else:
+            proof["status"] = "failed"
+            proof["reason"] = (sorted(set(proof_reasons)) or ["proof_incomplete"])[0]
+        proof_broke = proof_broke or proof["status"] == "failed" or (
+            # A proof the sign-in endpoint's pace held back did not break: it is named below.
+            proof["status"] == "partial" and not proof["attempted_candidates"]
+            and not proofs_paced_out
+        )
+        # Proof attempts that never reached a verdict (failed, refused or timed out): their
+        # candidates were not proven or ruled out, however many the batch started.
+        unresolved_proofs = sum(1 for resolved in row.pop("_proofs_resolved").values() if not resolved)
+        proof["unresolved_candidates"] = unresolved_proofs
+        row["unattempted_candidates"] = max(
+            0, row["planned_candidates"] - row["attempted_candidates"],
+        )
+        # Manifest entries the plan never scheduled at all. These never became a slice, so they
+        # cannot appear in unattempted_candidates, and a family carrying them has not covered its
+        # surface however cleanly its scheduled slices ran.
+        manifest_entries = row.pop("_manifest_entries", {}) or {}
+        scheduled_entries = row.pop("_scheduled_entries", {}) or {}
+        row["manifest_candidates"] = sum(int(value) for value in manifest_entries.values())
+        row["unscheduled_candidates"] = sum(
+            max(0, int(total) - int(scheduled_entries.get(lane, 0)))
+            for lane, total in manifest_entries.items()
+        )
+        action_incomplete = any(status != "success" for status in statuses)
+        zero_attempts = (
+            row["planned_candidates"] > 0 and row["attempted_candidates"] == 0
+        )
+        # Every verifier settled over an empty candidate set (skipped as not applicable, or a
+        # slice whose manifest held nothing or whose every entry was inapplicable). The family
+        # ran against a surface that offered it nothing; that is a complete examination with
+        # no work, not one that failed to finish, and the row says so (``no_candidates``).
+        settled_empty = row.pop("_settled_empty")
+        empty_reasons = sorted(set(row.pop("_empty_reasons")))
+        no_candidates = (
+            row["batch_actions"] > 0
+            and row["planned_candidates"] == 0
+            and row["unscheduled_candidates"] == 0
+            and row["attempted_candidates"] == 0
+            and all(settled_empty)
+        )
+        if row["batch_actions"] == 0:
+            # Only escalation was planned for this family, so nothing established
+            # its execution coverage. Reporting it complete would overstate work
+            # that never ran.
+            row["coverage_status"] = "partial"
+            row["reason"] = "no_verifier_action"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif (action_incomplete or zero_attempts) and not no_candidates:
+            row["coverage_status"] = "partial"
+            row["reason"] = "zero_attempts" if zero_attempts else "action_incomplete"
+            if slow_endpoints and not zero_attempts and all(
+                reason == "slow_endpoints"
+                for status, reason in zip(statuses, batch_reasons) if status != "success"
+            ):
+                # Partial because of these named slow endpoints, not a generic timeout.
+                row["reason"] = "slow_endpoints"
+            incomplete_reasons = {
+                reason for status, reason in zip(statuses, batch_reasons) if status != "success"
+            }
+            if not zero_attempts and len(incomplete_reasons) == 1 and (
+                incomplete_reasons <= _NAMED_FAMILY_GAP_REASONS
+            ):
+                # Partial for one stated cause: the target refused the unauthenticated
+                # requests, or a continuation could not fund a single stage.
+                row["reason"] = next(iter(incomplete_reasons))
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif row["unscheduled_candidates"] > 0 and not windows_cover_unscheduled:
+            row["coverage_status"] = "partial"
+            row["reason"] = "manifest_entries_unscheduled"
+            # A REQUIRED family that left work unscheduled has not covered its surface, so the
+            # grade computed over it is not reliable. Marking the family partial while leaving the
+            # top-level rollup clean reported `coverage: complete` and `grade_reliable: true` over
+            # a plan that ran a fraction of its manifest.
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif windows_short_bases:
+            # A thorough or deep sweep left a base -- the target's or another origin's -- short of
+            # every active-template window: those templates never ran there.
+            row["coverage_status"] = "partial"
+            row["reason"] = TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN
+            row["template_windows_incomplete_bases"] = windows_short_bases
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif row["unattempted_candidates"] > 0:
+            row["coverage_status"] = "partial"
+            row["reason"] = "candidates_unattempted"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif (
+            row["attempted_candidates"] == 0 and not no_candidates
+            # A finding is evidence of work, attempted or not.
+            and not (row["verified_findings"] or row["suspected_findings"])
+        ):
+            # Nothing was attempted and nothing shows the family had nothing to examine (a
+            # manifest not known to be complete and empty, an ownership comparison that
+            # compared nothing): no work.
+            row["coverage_status"] = "partial"
+            row["reason"] = "zero_work"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif proof_broke:
+            row["coverage_status"] = "partial"
+            row["reason"] = "proof_escalation_failed"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif unresolved_proofs:
+            row["coverage_status"] = "partial"
+            row["reason"] = PROOF_ATTEMPTS_UNRESOLVED
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif row.get("sign_in_probe_limited"):
+            # A candidate on the credential profile's own sign-in endpoint that its paced, bounded
+            # probe set left inconclusive has no verdict, so the family did not examine its
+            # surface to completion, and a grade over it is not reliable.
+            row["coverage_status"] = "partial"
+            row["reason"] = AUTH_ENDPOINT_PROBE_LIMITED
+            if row["required"]:
+                selected_family_gaps.append(family)
+        else:
+            row["coverage_status"] = "complete"
+            row["reason"] = "no_candidates" if no_candidates else None
+            if no_candidates and empty_reasons:
+                # Why there was nothing to examine, when the check can say.
+                row["no_candidates_reasons"] = empty_reasons
+    # Every selected check family is reported, including one the plan gave no action: an
+    # absent family read as nothing to report, and the Scan as complete. `recon` is
+    # discovery, not a check family with a verifier: its row is built below from the
+    # discovery actions.
+    unplanned_families = sorted(
+        {str(item).strip() for item in resolved_families or ()}
+        & set(_FAMILY_BY_CAPABILITY.values())
+        - set(family_coverage)
+    )
+    # Whether the plan crawled and none of its crawls examined the surface (each failed, was
+    # refused, skipped or cancelled): an empty candidate manifest then shows what the crawls
+    # never reached, not that the surface offered nothing to test.
+    crawl_statuses = [
+        action_results[action.action_id].status for action in expected_actions
+        if action.capability_name in _CANDIDATE_CRAWL_CAPABILITIES
+    ]
+    no_crawl_examined = bool(crawl_statuses) and not any(
+        status in _CRAWL_EXAMINED_STATUSES for status in crawl_statuses
+    )
+    for family in unplanned_families:
+        row = family_coverage[family] = _unplanned_family_row(
+            family, known_manifests, no_crawl_examined=no_crawl_examined,
+        )
+        if row["coverage_status"] != "complete":
+            selected_family_gaps.append(family)
+    # After the unplanned rows, so a check that ran while its family planned no verifier (no
+    # candidates for it) is still reported.
+    for (family, name), entries in sorted(auxiliary_entries.items()):
+        if family in family_coverage:
+            family_coverage[family][name] = _auxiliary_check_coverage(entries)
+    families_without_candidates = sorted(
+        family for family, row in family_coverage.items()
+        if row.get("reason") == "no_candidates"
+    )
+    selected_family_gaps.sort()
+
+    coverage_actions = [
+        action for action in expected_actions
+        if action.capability_name not in _INFORMATIONAL_CAPABILITIES
+    ]
+    required_rows = [
+        (action, superseded.get(action.action_id, action_results[action.action_id]))
+        for action in coverage_actions if action.required
+    ]
+    # Skipped as not applicable is a settled "nothing to do", not degraded
+    # coverage and not a reason the run fell short.
+    settled_rows = [
+        (action, result) for action, result in required_rows
+        if not (
+            result.status is CapabilityResultStatus.SKIPPED
+            and result.reason_code is CapabilityResultReason.NOT_APPLICABLE
+        )
+    ]
+    statuses = {result.status for _action, result in settled_rows}
+    cancelled = CapabilityResultStatus.CANCELLED in statuses
+    failed = bool(statuses & {
+        CapabilityResultStatus.FAILED,
+        CapabilityResultStatus.BLOCKED,
+    })
+    degraded = bool(statuses - {CapabilityResultStatus.SUCCESS})
+    coverage_status = (
+        "cancelled" if cancelled else "failed" if failed and not findings
+        else "partial" if degraded else "complete"
+    )
+    reasons = sorted({
+        result.reason_code.value
+        for _action, result in settled_rows if result.reason_code is not None
+    })
+    work_manifests = [dict(item) for item in work_manifest_references]
+    candidate_count = sum(
+        max(0, int(item.get("entry_count") or 0))
+        for item in work_manifests
+        if item.get("kind") == "candidate" and item.get("status") != "cancelled"
+    )
+    zero_attempt_actions = [
+        action.action_id
+        for action in coverage_actions
+        if active_verifier_attempted_nothing(
+            action.capability_name,
+            action_results[action.action_id].status,
+            action_results[action.action_id].budget_consumed,
+            candidate_count,
+        )
+        and not _windows_beyond_allowlist_only(action, observations.get(action.action_id, ()))
+    ]
+    placement_gaps = [
+        action.action_id
+        for action in coverage_actions
+        if (
+            action_results[action.action_id].reason_code is not None
+            and action_results[action.action_id].reason_code.value
+            == "placement_unavailable"
+        )
+    ]
+    unproven_critical_high = sum(
+        1 for item in findings
+        if item.get("severity") in {"critical", "high"}
+        and item.get("verified") is not True
+    )
+    # A required verifier that settled skipped/not_applicable had nothing to do
+    # on this surface. That is not unfinished required work: counting it made
+    # every target without a parameterised route read grade-unreliable.
+    required_incomplete = [
+        (action, result)
+        for action, result in settled_rows
+        if result.status is not CapabilityResultStatus.SUCCESS
+    ]
+    posture_sections = _posture_sections(observations)
+    http_posture = (
+        posture_sections.get("http")
+        if isinstance(posture_sections.get("http"), Mapping) else {}
+    )
+    explicit_http_status = http_posture.get("status")
+    application_proof_observed = any(
+        item.get("verified") is True
+        and str(item.get("tool") or "") not in {"tls.inspect", "dns.inspect", "http_baseline"}
+        and not (
+            isinstance(item.get("evidence"), Mapping)
+            and item["evidence"].get("template_id") == "http-missing-security-headers"
+        )
+        for item in findings
+    )
+    # Header posture on a redirect is real, but is not proof of the application
+    # behind it. Neither a same-host port change nor a relative redirect proves
+    # a follow-up request occurred. An unrelated origin's 2xx cannot fill this gap.
+    application_origins = frozenset(origin for value in (
+        target_url, http_posture.get("application_origin_redirect"),
+    ) if (origin := http_origin(value)) is not None)
+    redirect_without_application = (
+        type(explicit_http_status) is int and explicit_http_status in REDIRECT_STATUSES
+        and not application_proof_observed
+        and not _observed_success_response(observations, origins=application_origins)
+    )
+    application_forwarded_off_origin = (
+        bool(http_posture.get("application_origin_redirect")) and redirect_without_application
+    )
+    inferred_origin_unreachable = (
+        not http_posture.get("posture_observed")
+        and not application_proof_observed
+        and any(
+            isinstance(row, Mapping)
+            and row.get("kind") == "origin_selection_observation"
+            and not row.get("selected_origin")
+            and bool(row.get("attempts"))
+            for action_id, rows in observations.items()
+            if action_id.startswith("origin.select")
+            for row in rows
+        )
+    )
+    risk_assessment_state = (
+        "not_examined"
+        if redirect_without_application or inferred_origin_unreachable
+        else "observed"
+        if http_posture.get("posture_observed") is True or application_proof_observed
+        else "not_examined"
+        if isinstance(explicit_http_status, int)
+        else "unknown"
+    )
+    # An optional discovery producer that failed, was refused, or was skipped for a missing
+    # prerequisite produced no surface. It is always stated. It leaves the Scan's coverage
+    # incomplete only when no other surface producer worked: a target without a browser runtime
+    # still completes on the static crawl alone.
+    failed_discovery = sorted(
+        action.action_id
+        for action in coverage_actions
+        if not action.required
+        and action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
+        and (
+            action_results[action.action_id].status in _DISCOVERY_FAILED_STATUSES
+            or action_results[action.action_id].reason_code
+            is CapabilityResultReason.PREREQUISITE_UNAVAILABLE
+        )
+    )
+    # A sibling covers for it only when it settled and contributed routes: spec ingestion that
+    # succeeded on a target publishing no spec, or a crawl that found nothing, produced none.
+    surface_produced = any(
+        action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
+        and action_results[action.action_id].status in {
+            CapabilityResultStatus.SUCCESS, CapabilityResultStatus.PARTIAL,
+        }
+        and _discovery_contributed(action.capability_name, observations.get(action.action_id, ()))
+        for action in coverage_actions
+    )
+    discovery_gap = bool(failed_discovery) and not surface_produced
+    truncated_discovery = sorted(
+        action.action_id
+        for action in coverage_actions
+        if not action.required
+        and action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
+        and action_results[action.action_id].status is not CapabilityResultStatus.SUCCESS
+        and action_results[action.action_id].reason_code is not None
+        and action_results[action.action_id].reason_code.value in _DISCOVERY_TRUNCATION_REASONS
+    )
+    # Discovery is a selected family too. Its row says whether the discovery actions this plan
+    # ran settled, by the rules above: a required one that fell short, optional ones that
+    # failed with nothing else producing the surface, or ones cut short. The reasons above
+    # already carry the effect on the Scan's coverage and grade, so the row is not a selected
+    # family gap as well. A plan with no discovery action (an endpoint shard) and a caller
+    # without the execution plan add no row.
+    for family in sorted(
+        scoring.DISCOVERY_FAMILIES & {str(item).strip() for item in resolved_families or ()}
+    ):
+        capabilities = set(scan_family_capabilities(family))
+        discovery_actions = [
+            action for action in coverage_actions if action.capability_name in capabilities
+        ]
+        if not discovery_actions:
+            continue
+        required_short = sorted(
+            result.reason_code.value if result.reason_code is not None
+            else "required_capability_incomplete"
+            for action, result in required_incomplete
+            if action.capability_name in capabilities
+        )
+        family_coverage[family] = _discovery_family_row(
+            family, discovery_actions, action_results,
+            reason=(
+                required_short[0] if required_short
+                else "discovery_failed" if discovery_gap
+                else "discovery_truncated" if truncated_discovery
+                else None
+            ),
+        )
+    # A Scan whose execution plan resolved no check family examined nothing a grade is about:
+    # only the baseline probes ran (soak 89770439, graded A 100 "complete"). Admission refuses
+    # such a policy; a plan stored before that refusal must still not read as clean and complete.
+    no_families_selected = resolved_families is not None and not any(
+        str(item).strip() for item in resolved_families
+    )
+    if no_families_selected and coverage_status == "complete":
+        coverage_status = "partial"
+    # A plan whose families cannot examine the application -- sensitive_exposure alone reads a
+    # fixed list of well-known locations and, with no discovery, nothing else -- is not an
+    # application assessment either (soak N46: 5d4387d7 ran 44 seed probes in 19 s and was
+    # graded A 100, coverage complete). Its coverage is partial and its grade unreliable; with
+    # no application finding to grade, the application was not examined and the grade is
+    # withheld, as for a target that never answered.
+    selected_families = {str(item).strip() for item in resolved_families or () if str(item).strip()}
+    surface_not_examined = bool(selected_families) and not (
+        selected_families & SCAN_APPLICATION_SURFACE_FAMILIES
+    )
+    if surface_not_examined:
+        if coverage_status == "complete":
+            coverage_status = "partial"
+        if not application_proof_observed:
+            risk_assessment_state = "not_examined"
+    reliability_reasons = sorted({
+        (
+            result.reason_code.value
+            if result.reason_code is not None
+            else "required_capability_incomplete"
+        )
+        for _action, result in required_incomplete
+    } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
+      | ({"discovery_truncated"} if truncated_discovery else set())
+      | ({"discovery_failed"} if discovery_gap else set())
+      | ({"placement_unavailable"} if placement_gaps else set())
+      | ({"no_families_selected"} if no_families_selected else set())
+      | ({"application_surface_not_examined"} if surface_not_examined else set())
+      | ({"selected_family_incomplete"} if selected_family_gaps else set())
+      | ({"unproven_critical_high"} if unproven_critical_high else set())
+      | ({"application_not_observed"} if risk_assessment_state == "not_examined" else set())
+      | ({"bound_origin_redirects_off_origin"} if application_forwarded_off_origin else set()))
+    grade_reliable = not reliability_reasons
+    coverage_reasons = sorted(
+        set(reasons)
+        | ({"no_families_selected"} if no_families_selected else set())
+        | ({"application_surface_not_examined"} if surface_not_examined else set())
+        # Stated, not a gap: a selected family whose surface offered nothing to test.
+        | ({"selected_family_no_candidates"} if families_without_candidates else set())
+        | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
+        | ({"discovery_truncated"} if truncated_discovery else set())
+        | ({"discovery_failed"} if failed_discovery else set())
+        | ({"placement_unavailable"} if placement_gaps else set())
+        | ({"bound_origin_redirects_off_origin"}
+           if application_forwarded_off_origin else set())
+        | browser_session_header_reasons(observations)
+        | {f"{OMITTED_CAPABILITY_REASON}:{str(name)[:80]}" for name in omitted_capabilities or () if str(name).strip()}
+    )
+    coverage_action_rows = [
+        row for row in action_rows
+        if row["capability_name"] not in _INFORMATIONAL_CAPABILITIES
+    ]
+    action_status_counts = Counter(row["status"] for row in coverage_action_rows)
+    optional_gaps = [
+        {
+            "action_id": action.action_id,
+            "capability_name": action.capability_name,
+            "status": action_results[action.action_id].status.value,
+            "reason_code": (
+                action_results[action.action_id].reason_code.value
+                if action_results[action.action_id].reason_code is not None
+                else None
+            ),
+        }
+        for action in coverage_actions
+        if not action.required
+        and action_results[action.action_id].status is not CapabilityResultStatus.SUCCESS
+        # A slice its continuation finished left no gap; its own outcome stays on its action
+        # row below, with the action that continued it.
+        and not (
+            action.action_id in superseded
+            and superseded[action.action_id].status is CapabilityResultStatus.SUCCESS
+        )
+    ]
+    capability_coverage = {
+        "total": len(coverage_actions),
+        "required": len(required_rows),
+        "completed": action_status_counts.get("success", 0),
+        "partial": (
+            action_status_counts.get("partial", 0)
+            + action_status_counts.get("timed_out", 0)
+        ),
+        "blocked": action_status_counts.get("blocked", 0),
+        "failed": action_status_counts.get("failed", 0),
+        "skipped": action_status_counts.get("skipped", 0),
+        "cancelled": action_status_counts.get("cancelled", 0),
+        "actions": [{
+            "action_id": row["action_id"],
+            "capability_name": row["capability_name"],
+            "required": row["required"],
+            "status": row["status"],
+            "reason_code": row["reason_code"],
+            # The newest action that continued this one, and how that one ended.
+            **({
+                "continued_by": superseded[row["action_id"]].action_id,
+                "continued_status": superseded[row["action_id"]].status.value,
+            } if row["action_id"] in superseded else {}),
+        } for row in coverage_action_rows],
+    }
+    principal_contexts = sorted({
+        str(item.get("lane"))
+        for rows in observations.values()
+        for item in rows
+        if isinstance(item, Mapping)
+        and item.get("kind") == "principal_context"
+        and item.get("authenticated") is True
+        and item.get("source") == "server_runtime"
+        and str(item.get("lane")) in {"primary", "secondary"}
+    })
+    auth_states_tested = [
+        {"primary": "user1", "secondary": "user2"}[lane]
+        for lane in principal_contexts
+    ]
+    batch_families = {
+        "xss.verify_batch": "xss",
+        "sqli.verify_batch": "sqli",
+        "templates.passive_batch": "nuclei_passive",
+        "templates.active_batch": "nuclei_active",
+        "xss.request_verify_batch": "xss_body",
+        "sqli.request_verify_batch": "sqli_body",
+        "sqli.prove_batch": "sqli_proof",
+        "xss.browser_prove_batch": "xss_browser_proof",
+        "exposure.verify_batch": "sensitive_exposure",
+        "nosqli.verify_batch": "nosqli",
+        "injection.verify_batch": "server_injection",
+        "authz_surface.verify_batch": "authz_surface",
+        "graphql.verify_batch": "graphql",
+    }
+    candidate_coverage: dict[str, dict[str, Any]] = {}
+    for action in expected_actions:
+        family = batch_families.get(action.capability_name)
+        if family is None or action.action_id in superseded:
+            continue
+        raw_slice = action.capability_args.get("slice")
+        planned = (
+            int(raw_slice.get("count") or 0)
+            if isinstance(raw_slice, Mapping) else 0
+        )
+        attempt_rows = {
+            str(item.get("attempt_id") or ""): str(item.get("status") or "").lower()
+            for item in observations.get(action.action_id, ())
+            if isinstance(item, Mapping)
+            and item.get("kind") == "candidate_attempt"
+            and str(item.get("attempt_id") or "")
+        }
+        result = action_results[action.action_id]
+        if (
+            not attempt_rows
+            and result.status is CapabilityResultStatus.SKIPPED
+            and result.reason_code is CapabilityResultReason.NOT_APPLICABLE
+        ):
+            # Nothing in the slice applied (a proof escalation with no eligible candidate):
+            # there was no work to attempt, so none of it went unattempted. Counting the slice
+            # here told the operator "planned candidates were not attempted" for an escalation
+            # that correctly had nothing to escalate.
+            planned = 0
+        completed = {
+            attempt_id for attempt_id, status in attempt_rows.items()
+            if status in {"success", "succeeded", "completed"}
+        }
+        failed_attempts = {
+            attempt_id for attempt_id, status in attempt_rows.items()
+            if status not in {"success", "succeeded", "completed"}
+        }
+        row = candidate_coverage.setdefault(family, {
+            "planned_candidates": 0,
+            "attempted_candidates": 0,
+            "completed_candidates": 0,
+            "incomplete_candidates": 0,
+            "unattempted_candidates": 0,
+            "batch_actions": 0,
+            "status": "complete",
+        })
+        row["planned_candidates"] += planned
+        row["attempted_candidates"] += len(attempt_rows)
+        row["completed_candidates"] += len(completed)
+        row["incomplete_candidates"] += len(failed_attempts)
+        row["batch_actions"] += 1
+    for row in candidate_coverage.values():
+        row["unattempted_candidates"] = max(
+            0, row["planned_candidates"] - row["attempted_candidates"],
+        )
+        if row["unattempted_candidates"] or row["incomplete_candidates"]:
+            row["status"] = "partial"
+    if (
+        zero_attempt_actions or truncated_discovery or discovery_gap or selected_family_gaps
+    ) and coverage_status == "complete":
+        # A selected family that did not cover its surface (entries never scheduled, candidates
+        # left unattempted) leaves the Scan's coverage incomplete even when every action it did
+        # schedule succeeded: 6d25cc89 reported `coverage: complete` over a passive family with
+        # 36 manifest entries unscheduled and its grade marked unreliable for exactly that.
+        coverage_status = "partial"
+        if selected_family_gaps:
+            coverage_reasons = sorted(set(coverage_reasons) | {"selected_family_incomplete"})
+    if any(row.get("sign_in_probe_limited") for row in family_coverage.values()):
+        coverage_reasons = sorted(set(coverage_reasons) | {AUTH_ENDPOINT_PROBE_LIMITED})
+    if any(
+        row.get("reason") == TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN for row in family_coverage.values()
+    ):
+        # Named at the top as well, so a reader of the coverage summary sees which gap it is.
+        coverage_reasons = sorted(set(coverage_reasons) | {TEMPLATE_WINDOWS_INCOMPLETE_ON_ORIGIN})
+    verified = sum(1 for item in findings if item.get("verified") is True)
+    suspected = sum(1 for item in findings if item.get("suspected") is True)
+    coverage_block = {
+        "status": coverage_status,
+        "reasons": coverage_reasons,
+        "planned_action_count": len(coverage_actions),
+        "terminal_action_count": len(coverage_action_rows),
+        "finalization_action_id": finalization_action.action_id,
+        "placement_executed": bool(coverage_action_rows) and not placement_gaps,
+        "capability_coverage": capability_coverage,
+        "grade_reliability": {
+            "reliable": grade_reliable,
+            "reasons": reliability_reasons,
+        },
+        "optional_gaps": optional_gaps,
+        "truncated_discovery_actions": truncated_discovery,
+        "failed_discovery_actions": failed_discovery,
+        "active_zero_attempt_actions": zero_attempt_actions,
+        "candidate_coverage": candidate_coverage,
+        "family_coverage": sorted(
+            family_coverage.values(), key=lambda row: row["family"],
+        ),
+        "selected_family_gaps": selected_family_gaps,
+        # Slices a later extension re-planned: their own outcome is replaced by the newest
+        # extension's, so a reader rolling up the action rows must not count them again.
+        "superseded_action_ids": sorted(superseded),
+    }
+    smart_coverage_block = {
+        "auth_states_tested": auth_states_tested,
+        "principal_contexts_exercised": principal_contexts,
+        "principal_context_semantics": (
+            "server_observed_authenticated_target_traffic"
+        ),
+    }
+    # Scored after coverage exists, because the assurance axis reads it. The severity-only
+    # scorer ran ~350 lines earlier and every one of these signals was computed and then
+    # used for nothing but appending a star to the letter.
+    scored_posture_sections = {
+        name: value for name, value in posture_sections.items()
+        if name != "infrastructure"
+    }
+    result_block = scoring.score_scan(
+        findings, coverage_block,
+        smart_coverage=smart_coverage_block,
+        posture=scored_posture_sections,
+        grade_reliable=grade_reliable,
+    )
+    result_block.update({
+        "risk_assessment_state": risk_assessment_state,
+        "application_observed": (
+            True if risk_assessment_state == "observed"
+            else False if risk_assessment_state == "not_examined"
+            else None
+        ),
+    })
+    report = {
+        "schema_version": SCAN_REPORT_SCHEMA,
+        "authentication_assurance": scan_authentication_summary({
+            "managed_credential_profiles": principal_contexts,
+        }, interrupted_action_count=sum(result.reason_code is CapabilityResultReason.AUTHENTICATION_UNCERTAIN or any(
+            item.get("kind") == "identity_authority_interruption" for item in observations.get(action_id, ()))
+            for action_id, result in action_results.items())),
+        "target": str(target_url),
+        "runtime_destinations": runtime_destinations,
+        "findings": findings,
+        "result": result_block,
+        # Posture belongs on the envelope, not inside the nested "result": the stored
+        # `result_json` IS what a client reads as `scan.result`, so a section nested one
+        # level deeper is documented as `result.tls` and served as `result.result.tls`.
+        **posture_sections,
+        "coverage": coverage_block,
+        # What the passive checks examined (rescan verification of findings not seen again).
+        "check_coverage": scan_check_coverage(
+            observations, {action.action_id: action.capability_name for action in plan.actions},
+        ),
+        "verification_summary": {
+            "verified": verified,
+            "suspected": suspected,
+            "unproven_critical_high": unproven_critical_high,
+        },
+        "smart_coverage": smart_coverage_block,
+        "canonical_action_execution": {
+            "schema_version": "canonical-scan-action-execution/v1",
+            "plan_digest": plan.plan_digest,
+            "execution_plan_digest": plan.execution_plan_digest,
+            "target_binding_digest": plan.target_binding_digest,
+            "plan_revision": revision.canonical_dict(),
+            "actions": action_rows,
+            "status_matrix": {
+                **{
+                    row["action_id"]: row["status"] for row in action_rows
+                },
+                finalization_action.action_id: "success",
+            },
+            "finalization_action": {
+                "action_id": finalization_action.action_id,
+                "action_digest": finalization_action.action_digest,
+                "status": "success",
+            },
+            "work_manifests": work_manifests,
+        },
+        "scan_metadata": {
+            "status": coverage_status,
+            "partial": coverage_status == "partial",
+            "cancelled": coverage_status == "cancelled",
+            "finding_promotion_authority": "deterministic_proof_contracts_only",
+            "finalizer": "pure_receipt_projection/v1",
+            "grade_reliable": grade_reliable,
+            "grade_reliability_reasons": reliability_reasons,
+        },
+    }
+    from .reachability import apply_reachability_outcome
+    apply_reachability_outcome(
+        report, action_results=action_results, observations=observations,
+        origin_evidence=origin_evidence,
+    )
+    withhold_unexamined_grade(report)
+    mark_unexamined_coverage(report)
+    report["report_digest"] = hashlib.sha256(json.dumps(
+        report,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    return report

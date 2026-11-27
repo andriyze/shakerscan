@@ -1,0 +1,556 @@
+"""Shared secret-redaction helpers.
+
+Single source of truth for sensitive-key matching and value masking so coverage
+cannot drift between the API, scanner reporting, and Model Intake. Before this
+module, ``api/api.py`` and ``scanner/scanner_tools/model_intake.py`` each carried
+their own ``SENSITIVE_*`` key-set and the two diverged (only Model Intake covered
+the AWS/Azure/GCP keys). They now both consume :data:`SENSITIVE_KEYS` here.
+
+This module imports only the standard library at import time, so it is cheap to import from
+both ``api`` and ``scanner`` without circular-import risk. One rule, the URL userinfo password,
+is the Hunt body masking's reader (``runtime.archive_body_masking``), imported when a text first
+holds an ``@``: it ships beside this module in every image and in the host installer's files.
+
+Note: ``api/ai_verifier.py`` keeps its own, more aggressive ``[REDACTED]``
+provider-bound redactor (different sentinel and purpose: what is safe to send to
+an external AI provider). It is not folded in here on purpose, but it sources the
+same key-set via :func:`is_sensitive_key` when checking structured payloads.
+"""
+
+from __future__ import annotations
+
+import bisect
+import re
+import urllib.parse
+from collections.abc import Callable
+from typing import Any
+
+MASK = "***"
+
+# Union of the historical api + model_intake key-sets. Keep sorted for diff-ability.
+SENSITIVE_KEYS: frozenset[str] = frozenset(
+    {
+        "access_key",
+        "access_key_id",
+        "access_token",
+        "ai_api_key",
+        "api_key",
+        "api_secret",
+        "api_token",
+        "auth_cookies",
+        "auth_header",
+        "auth_headers_json",
+        "auth_scenario_json",
+        "authorization",
+        "proxy_authorization",
+        "aws_access_key_id",
+        "aws_secret_access_key",
+        "aws_session_token",
+        "azure_sas_token",
+        "bearer_token",
+        "client_secret",
+        # A cookie header *is* a session credential. These were absent, so a redacted
+        # export masked Authorization and passed "sessionid=..." through untouched. Exact
+        # keys rather than a bare "cookie" fragment, so fields that merely describe cookie
+        # behaviour -- flag findings, name inventories -- keep their evidence.
+        "cookie",
+        "cookies",
+        "credential",
+        "credentials",
+        "set-cookie",
+        "set_cookie",
+        "csrf",
+        "csrf_token",
+        "gcp_credentials",
+        "hf_token",
+        "huggingface_token",
+        "login_password",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "secret_access_key",
+        "secret_value",
+        "session_token",
+        "sessionid",
+        "sessionidentifier",
+        "token",
+        "user2_cookies",
+        "user2_header",
+        "xsrf",
+        "xsrf_token",
+        "x_api_key",
+    }
+)
+
+SENSITIVE_KEY_FRAGMENTS: tuple[str, ...] = (
+    "_secret",
+    "secret_",
+    "_token",
+    "token_",
+    "_credential",
+    "credential_",
+    "private_key",
+    "password",
+)
+
+# Query-string parameter names that carry credentials in artifact/reference URLs.
+SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset(
+    {
+        "access_token",
+        "access-token",
+        "api_key",
+        "api-key",
+        "awsaccesskeyid",
+        "csrf",
+        "csrf-token",
+        "code",
+        "expires",
+        "x-amz-credential",
+        "x-amz-security-token",
+        "x-amz-signature",
+        "signature",
+        "sig",
+        "pass",
+        "passwd",
+        "password",
+        "session-id",
+        "sessionid",
+        "token",
+        "xsrf",
+        "xsrf-token",
+    }
+)
+
+# Free-text token scrubbing (used by scanner reporting + AI transcript bodies).
+# The first two patterns are reporting._redact_sensitive's historical ones
+# (header / query-string / env-var `key=value` shapes). The third catches
+# JSON / dict-literal `"api_key": "SECRET"` shapes, which transcript request and
+# response bodies embed as text and which the `=`-only pattern misses.
+# The sensitive words of a key name. A key is a ``[a-z0-9_-]`` name containing one of them.
+_SENSITIVE_WORDS = (
+    r"(?:api[_-]?key|secret|token(?!s(?:[_-]|$)|izer(?:[_-]|$))|password|passwd|pwd|authorization|"
+    r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
+    r"refresh[_-]?token|csrf|xsrf|signature|bearer)"
+)
+# Same word set for the bare `key: value` (YAML/config) shape, minus authorization/
+# bearer — those are owned by the dedicated Authorization header rule below, and
+# letting this rule also match them would clobber its "Bearer ***" output.
+_SENSITIVE_COLON_WORDS = (
+    r"(?:api[_-]?key|secret|token(?!s(?:[_-]|$)|izer(?:[_-]|$))|password|passwd|pwd|"
+    r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
+    r"refresh[_-]?token|csrf|xsrf|signature)"
+)
+_NAME_CHARS = "[a-z0-9_-]"
+_SENSITIVE_TEXT_KEY = rf"{_NAME_CHARS}*{_SENSITIVE_WORDS}{_NAME_CHARS}*"
+_SENSITIVE_COLON_KEY = rf"{_NAME_CHARS}*{_SENSITIVE_COLON_WORDS}{_NAME_CHARS}*"
+# The same key sets, written so a regex engine cannot backtrack through a long name: the name's
+# first sensitive word is found once (atomic), then the rest of the name is taken whole
+# (possessive). A sensitive word and the rest of a name are both drawn from ``[a-z0-9_-]``, so
+# the rest always reaches the end of the name, and any other split of the same name ends there
+# too: what follows decides the match, exactly as with the plain form above, but a name of
+# ``token-`` repeated is read once instead of once per split (external release audit,
+# 2026-10-09).
+_SENSITIVE_TEXT_KEY_ONCE = rf"(?>{_NAME_CHARS}*?{_SENSITIVE_WORDS}){_NAME_CHARS}*+"
+_SENSITIVE_COLON_KEY_ONCE = rf"(?>{_NAME_CHARS}*?{_SENSITIVE_COLON_WORDS}){_NAME_CHARS}*+"
+# The first word boundary of a ``[a-z0-9_-]`` name, the name before it kept in group 1. The
+# lookbehind admits only a name's first character, and the boundary is committed to (atomic), so
+# a failed key is not retried at the name's later boundaries: any match from a later boundary
+# ends where the one from the first boundary does, with the same text before it unchanged.
+_NAME_FIRST_BOUNDARY = r"(?<![a-z0-9_-])(?>([a-z0-9_-]*?)\b)"
+# A Hunt body masking marker (``[withheld:3]``, api/runtime/archive_body_masking.py) already stands
+# in for a withheld value and carries none; masking it again would lose the planner's reference.
+# Anchored: only a whole value that is a marker is spared (``password=[withheld:1]Hunter2pass``
+# is still a value to mask).
+_NOT_WITHHELD_MARKER = r"(?!\[withheld:[1-9][0-9]{0,3}\](?=$|[&\s,;]))"
+_NOT_WITHHELD_QUOTED = r"(?!\[withheld:[1-9][0-9]{0,3}\][\"'])"
+# ``<password ...>value</password>``: the element's value up to the first closing tag of the
+# same name, closing-tag names compared as ``(?i)<(name)>.*?</\1>`` compares them. As one regex,
+# every opening tag without its closing tag searched to the end of the text again, so a body of
+# unclosed ``<password>`` tags was quadratic; the closing tags are indexed once instead.
+_XML_OPEN_RE = re.compile(rf"(?i)<({_SENSITIVE_TEXT_KEY_ONCE})(?=[\s>])")
+_XML_CLOSE_RE = re.compile(r"(?i)</([a-z0-9_-]+)\s*>")
+# An element whose whole value is already a Hunt marker (``<password>[withheld:1]</password>``)
+# is left alone, as the single regex's ``(?!\[withheld:n\]</)`` left it.
+_XML_MARKER_VALUE_RE = re.compile(r"\[withheld:[1-9][0-9]{0,3}\]</")
+# A backreference under IGNORECASE compares simple lowercase forms. Within ``(?i)[a-z0-9_-]``
+# only these two characters lowercase differently from ``str.lower``'s full mapping or
+# otherwise fold to ASCII: U+0130 to ``i`` and the Kelvin sign to ``k``.
+_BACKREF_FOLD = str.maketrans({"\u0130": "i", "\u212a": "k"})
+
+
+def _xml_name(name: str) -> str:
+    return name.translate(_BACKREF_FOLD).lower()
+
+
+def _mask_xml_elements(text: str) -> str:
+    if "</" not in text:
+        return text
+    closes: dict[str, list[tuple[int, int]]] = {}
+    for match in _XML_CLOSE_RE.finditer(text):
+        closes.setdefault(_xml_name(match.group(1)), []).append((match.start(), match.end()))
+    pieces: list[str] = []
+    cursor = position = 0
+    tag_close = -1  # the first ``>`` at or after the current tag's name
+    while True:
+        opening = _XML_OPEN_RE.search(text, position)
+        if opening is None:
+            break
+        after = opening.end()
+        if text[after] == ">":
+            tag_end = after + 1
+        else:
+            if tag_close < after:
+                tag_close = text.find(">", after)
+            if tag_close < 0:
+                break  # no later opening tag can be closed either
+            tag_end = tag_close + 1
+        if _XML_MARKER_VALUE_RE.match(text, tag_end):
+            position = opening.start() + 1
+            continue
+        candidates = closes.get(_xml_name(opening.group(1)), [])
+        index = bisect.bisect_left(candidates, (tag_end, -1))
+        if index == len(candidates):
+            position = opening.start() + 1
+            continue
+        close_start, close_end = candidates[index]
+        pieces.extend((text[cursor:tag_end], MASK, text[close_start:close_end]))
+        cursor = position = close_end
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+# ``mysql ... -p<password>`` on one line: the first ``-p`` with a value after the client's name,
+# as ``(?i)(\b(?:mysql|mariadb)\b[^\r\n]*?\s-p)(?!\s)(\S+)`` finds it. As that regex, every
+# mention of the client on a line without such a flag read the line to its end again, so a line
+# of repeated ``mysql`` words was quadratic. Mentions are taken in order, so the next flag and
+# the next line break after a mention are found by searches that only move forward.
+_MYSQL_RE = re.compile(r"(?i)\b(?:mysql|mariadb)\b")
+_MYSQL_FLAG_RE = re.compile(r"(?i)\s-p(?=\S)")
+_LINE_BREAK_RE = re.compile(r"[\r\n]")
+_NON_SPACE_RE = re.compile(r"\S+")
+
+
+# The password of a URL's userinfo (``https://ID:SECRET@host``, ``redis://:SECRET@host``); the user
+# name stays visible: it identifies the account, the password is the credential. One reader for
+# every surface: the Hunt body masking's ``mask_url_userinfo`` (imported when first needed: that
+# module imports this one). A password ends at the authority's last ``@``, a quoted URL at its own
+# closing quote, so a match never spans two strings of compact JSON; a password already withheld
+# (``[withheld:3]``) is kept.
+def _mask_url_userinfo(text: str) -> str:
+    if "@" not in text and "%40" not in text:
+        return text
+    try:
+        from runtime.archive_body_masking import mask_url_userinfo_redacted
+    except ModuleNotFoundError:  # package import layout
+        from api.runtime.archive_body_masking import mask_url_userinfo_redacted
+    return mask_url_userinfo_redacted(text)
+
+
+def _mask_mysql_passwords(text: str) -> str:
+    pieces: list[str] = []
+    cursor = position = 0
+    flag: re.Match[str] | None = None
+    flag_from = -1  # where ``flag`` was searched from; None found there means none after it
+    line_break = -1
+    while True:
+        mention = _MYSQL_RE.search(text, position)
+        if mention is None:
+            break
+        after = mention.end()
+        if flag_from < 0 or (flag is not None and flag.start() < after):
+            flag, flag_from = _MYSQL_FLAG_RE.search(text, after), after
+        if flag is None:
+            break  # no flag after this mention, so none after any later one
+        if line_break < after:
+            found = _LINE_BREAK_RE.search(text, after)
+            line_break = found.start() if found else len(text)
+        # ``[^\r\n]*?`` stops at the line break, which ``\s`` may itself be.
+        if flag.start() > line_break:
+            position = mention.start() + 1
+            continue
+        value_end = _NON_SPACE_RE.match(text, flag.end()).end()
+        pieces.extend((text[cursor:flag.end()], MASK))
+        cursor = position = value_end
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+_PROVIDER_KEY_RE = re.compile(
+    # A key starts where no letter or digit runs into it: after ``_`` (``token_ghp_...``), after a
+    # percent-encoded byte (``%2Fsk_live_...``), or after anything else that is not alphanumeric.
+    r"(?:(?<=%[0-9A-Fa-f]{2})|(?<![A-Za-z0-9]))(?:"
+    r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9_-]{10,}"
+    r"|gh[pousr]_[A-Za-z0-9_-]{20,}"
+    r"|github_pat_[A-Za-z0-9_-]{20,}"
+    r"|glpat-[A-Za-z0-9_-]{20,}"
+    r"|sk-ant-[A-Za-z0-9_-]{20,}"
+    r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
+    r"|xox[abposr]-[A-Za-z0-9_-]{10,}"
+    r"|AIza[0-9A-Za-z_-]{35}"
+    r")(?![A-Za-z0-9_-])")
+
+
+_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str] | Callable[[str], str], ...] = (
+    # Authorization: Bearer/Basic/Digest <token>  (\S+ so base64 +/= is covered)
+    (re.compile(r"(?i)(authorization:\s*(?:bearer|basic|digest|negotiate))\s+\S+"), r"\1 ***"),
+    (re.compile(r"(?i)(proxy-authorization:\s*(?:bearer|basic|digest|negotiate))\s+\S+"), r"\1 ***"),
+    # Cookie / Set-Cookie / X-API-Key / X-Auth-Token header lines (mask value to EOL)
+    (re.compile(r"(?i)\b((?:set-)?cookie|x-api-key|x-auth-token)(\s*:\s*)[^\r\n]+"), r"\1\2***"),
+    # key=value (query / env / form) for any sensitive key name (password family included).
+    # A key starts at a word boundary, and a name such as ``token-token-...`` has one at every
+    # hyphen; every boundary of one name shares that name's end and what follows it, so only the
+    # name's first boundary is tried (``_NAME_FIRST_BOUNDARY``), and the name before it is kept.
+    (
+        re.compile(
+            rf"(?i){_NAME_FIRST_BOUNDARY}({_SENSITIVE_TEXT_KEY_ONCE})\s*=\s*{_NOT_WITHHELD_MARKER}([^&\s,;]+)"
+        ),
+        r"\1\2=***",
+    ),
+    # bare key: value (YAML/config), unquoted value of 4+ chars
+    (
+        re.compile(
+            rf"(?i){_NAME_FIRST_BOUNDARY}({_SENSITIVE_COLON_KEY_ONCE})(\s*:\s*){_NOT_WITHHELD_MARKER}"
+            r"([^\s,;\"']{4,})"
+        ),
+        r"\1\2\3***",
+    ),
+    # JSON / dict-literal "key": "value". An empty value carries nothing and stays empty, so a
+    # display never shows "***" where nothing was declared (N54: a seed's empty password read as
+    # if a value had been stored and sent), matching the key=value rule and redact_sensitive.
+    (
+        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY_ONCE}["\']\s*:\s*)(["\']){_NOT_WITHHELD_QUOTED}[^"\']+(["\'])'),
+        r"\1\2***\3",
+    ),
+    # JSON numeric/boolean/null secret values.
+    (
+        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY_ONCE}["\']\s*:\s*)(?:-?\d+(?:\.\d+)?|true|false|null)'),
+        r'\1"***"',
+    ),
+    # HTML multipart/form fields: a part named for a secret, its blank line, then its value up to
+    # the next boundary. Every field of one line shares that line's end, so the line is read once
+    # from its start (the first secret-named field on it decides) instead of once per field: a
+    # line of ``name="password"`` fields read to its end per field took minutes on 1 MB.
+    (
+        re.compile(
+            rf'(?is)(?<![^\r\n])((?>[^\r\n]*?name=["\']{_SENSITIVE_TEXT_KEY_ONCE}["\'])'
+            r"[^\r\n]*+\r?\n\r?\n).*?(?=\r?\n--|$)"
+        ),
+        r"\1***",
+    ),
+    # Simple XML credential elements.
+    _mask_xml_elements,
+    # The password of a URL's userinfo.
+    _mask_url_userinfo,
+    # Standalone JWTs and common command-line password forms in planner/free-text output.
+    (
+        re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}(?![A-Za-z0-9_-])"),
+        "***",
+    ),
+    # ``mysql ... -p<password>`` command lines.
+    _mask_mysql_passwords,
+    # Planner prose such as "token LEAKED_TOKEN_ABC123". Require an opaque-looking value
+    # to avoid masking ordinary phrases such as "token bucket".
+    (
+        re.compile(r"(?i)(\b(?:token|password|secret|api[_-]?key)\s+)(?=[A-Za-z0-9_./+=-]{8,}\b)(?=[A-Za-z0-9_./+=-]*[0-9_./+=-])[A-Za-z0-9_./+=-]+"),
+        r"\1***",
+    ),
+    # Provider credentials whose format names them, wherever they stand: Stripe secret and
+    # restricted keys, GitHub tokens, AWS access key IDs, Slack tokens, Google API keys. Last, so
+    # the rules before it keep their positions (tests/test_redaction_linear.py's reference).
+    (_PROVIDER_KEY_RE, "***"),
+)
+
+
+def _pattern_rule(pattern: re.Pattern[str], replacement: str) -> Callable[[str], str]:
+    return lambda text: pattern.sub(replacement, text)
+
+
+# Every free-text rule, in order.
+_TEXT_RULES: tuple[Callable[[str], str], ...] = tuple(
+    rule if callable(rule) else _pattern_rule(*rule) for rule in _TEXT_PATTERNS
+)
+
+_EMPTY = (None, "", [], {})
+
+
+def is_sensitive_key(key: Any) -> bool:
+    """True if a dict key names a secret (exact match or fragment match)."""
+    normalized = str(key or "").strip().lower().replace("-", "_")
+    if normalized in SENSITIVE_KEYS:
+        return True
+    return any(fragment in normalized for fragment in SENSITIVE_KEY_FRAGMENTS)
+
+
+def mask_secret(value: str) -> str:
+    """Partial mask for previews: short values fully starred, else first4...last4."""
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-4:]}"
+
+
+# One query or path parameter (``?a=b``, ``&a=b``, ``;a=b``) of text ``urllib`` cannot parse.
+_QUERY_PARAMETER_RE = re.compile(r"([?&;#])([^=&;#\s\"'<>?]{1,200})=([^&;#\s\"'<>]*)")
+
+
+def _sensitive_query_name(raw: str) -> bool:
+    """A parameter name as a server reads it: percent- and plus-decoded (``API%5FKEY``,
+    ``%74oken``, ``token+``), case and ``-``/``_`` folded, stray punctuation trimmed."""
+    name = urllib.parse.unquote_plus(raw).strip().strip("=").strip().lower().replace("_", "-")
+    return name in SENSITIVE_QUERY_KEYS or is_sensitive_key(name)
+
+
+def redact_url_credentials(value: str) -> str:
+    """Mask userinfo passwords and sensitive query params in a reference URL.
+
+    Non-URL strings are returned unchanged. Total: text that only looks like a URL
+    (``scheme://host[:port]``, ``http://[::1``, a port out of range) is never an error; it is
+    masked by the text rules instead (the userinfo reader and the sensitive query names).
+    """
+    try:
+        redacted = _redact_parsed_url_credentials(value)
+    except ValueError:
+        return _redact_unparsed_url_credentials(value)
+    # The text rules over the parsed result too: a ``;name=value`` path parameter, a password
+    # behind an unencoded ``#`` that ``urllib`` reads as a fragment.
+    return _redact_unparsed_url_credentials(redacted) if "://" in value else redacted
+
+
+def _redact_unparsed_url_credentials(value: str) -> str:
+    """The text rules for what ``urllib`` cannot parse: a userinfo password and the value of
+    every sensitive query parameter are withheld (erring to withholding)."""
+    value = _mask_url_userinfo(value)
+    return _QUERY_PARAMETER_RE.sub(
+        lambda match: (f"{match.group(1)}{match.group(2)}={MASK}"
+                       if match.group(3) and _sensitive_query_name(match.group(2)) else match.group(0)),
+        value,
+    )
+
+
+def _redact_parsed_url_credentials(value: str) -> str:
+    parsed = urllib.parse.urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value
+
+    netloc = parsed.netloc
+    if parsed.password:
+        hostname = parsed.hostname or ""
+        username = urllib.parse.quote(urllib.parse.unquote(parsed.username or ""), safe="")
+        host = f"{username}:***@{hostname}" if username else hostname
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        netloc = host
+
+    query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if query_pairs:
+        redacted_pairs = [
+            (key, MASK if item and _sensitive_query_name(key) else item)
+            for key, item in query_pairs
+        ]
+        query = urllib.parse.urlencode(redacted_pairs, doseq=True)
+    else:
+        query = parsed.query
+    return urllib.parse.urlunparse(
+        (parsed.scheme, netloc, parsed.path, parsed.params, query, parsed.fragment)
+    )
+
+
+# A discovered-secret reference names a stored secret, never its value: ``secret:`` is not a
+# ``key: value`` pair, so the reference stays readable in findings and records. Only a reference
+# that ends (whitespace, a quote, the end of the text, or closing punctuation before one of them)
+# is kept as it is; anything joined to it (``secret://<id>.hunter2``, ``secret://<id>:value``,
+# ``secret://<id>/sk_live_...``) is a value and is masked, the reference before it kept.
+_SECRET_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"(?:"
+    # Ends: closing punctuation at most, then ASCII whitespace or the end of the text.
+    r"(?=[)\]}>.,;:!?\"'`]*(?:[ \t\r\n]|$))"
+    # Ends a quoted string inside structured text: ``"secret://<id>","next"`` or ``...<id>"}``.
+    r"|(?=[\"'`][)\]}]*[,:}\]])"
+    # Anything else joined to it (``<value``, ``"value``, ``\u3000value``, ``.value``) is a value:
+    # everything up to the next ASCII whitespace is masked.
+    r"|([^ \t\r\n]+))")
+_REFERENCE_SLOT = "\x00shakerscan-secret-reference-{}\x00"
+_REFERENCE_SLOT_RE = re.compile("\x00shakerscan-secret-reference-([0-9]+)\x00")
+
+
+def redact_text(text: Any, *, known_values=()) -> Any:
+    """Scrub bearer/api-key/token/secret patterns out of free text."""
+    if not isinstance(text, str):
+        return text
+    for value in sorted({value for value in known_values if isinstance(value, str) and value}, key=len, reverse=True):
+        text = text.replace(value, MASK)
+    references: list[str] = []
+    if "secret://" in text and "\x00" not in text:
+        def hold(match: re.Match[str]) -> str:
+            references.append(match.group(1) + (MASK if match.group(2) else ""))
+            return _REFERENCE_SLOT.format(len(references) - 1)
+
+        text = _SECRET_REFERENCE_RE.sub(hold, text)
+    for rule in _TEXT_RULES:
+        text = rule(text)
+    if references:
+        text = _REFERENCE_SLOT_RE.sub(lambda match: references[int(match.group(1))], text)
+    return text
+
+
+def redact_sensitive(
+    value: Any,
+    *,
+    redact_strings: bool = False,
+    scrub_text: bool = False,
+    mask: str = MASK,
+    known_values=(),
+) -> Any:
+    """Recursively mask values stored under sensitive keys.
+
+    - dict: any key matching :func:`is_sensitive_key` with a non-empty value is
+      replaced with ``mask``; other values recurse.
+    - list/tuple: each item recurses.
+    - str: returned unchanged unless ``redact_strings`` is set, in which case
+      reference-URL credentials are masked; with ``scrub_text`` the free-text
+      bearer/api-key/token/secret patterns are scrubbed too (used for
+      transcript/evidence bodies).
+    """
+    def _recurse(item: Any) -> Any:
+        return redact_sensitive(item, redact_strings=redact_strings, scrub_text=scrub_text, mask=mask, known_values=known_values)
+
+    if isinstance(value, dict):
+        out: dict[Any, Any] = {}
+        for key, item in value.items():
+            if is_sensitive_key(key) and item not in _EMPTY:
+                out[key] = mask
+            else:
+                out[key] = _recurse(item)
+        return out
+    if isinstance(value, list):
+        return [_recurse(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_recurse(item) for item in value)
+    if isinstance(value, str) and redact_strings:
+        out_str = redact_url_credentials(value)
+        if scrub_text:
+            out_str = redact_text(out_str, known_values=known_values)
+        return out_str
+    return value
+
+
+def redact_scan_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Redact stored Scan options for every read projection.
+
+    Keyed secrets are masked by :func:`redact_sensitive`. Declared known endpoints are request
+    lines (``GET /a?access_token=...``, ``POST /login json:{"password":...}``) whose secrets sit in
+    a query or body rather than under a key, so they are scrubbed with the same text redactor as
+    the result, logs and HAR; GET /scans/{id} otherwise returned them verbatim.
+    """
+    redacted = redact_sensitive(options)
+    endpoints = redacted.get("custom_endpoints") if isinstance(redacted, dict) else None
+    if isinstance(endpoints, list):
+        redacted["custom_endpoints"] = [redact_text(item) for item in endpoints]
+    return redacted

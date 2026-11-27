@@ -17,6 +17,7 @@ const AUTHORITIES: Array<[key: string, label: string]> = [
   ['allow_state_changing_http', 'State-changing HTTP'],
   ['network_discovery', 'Network discovery'],
   ['allow_oob_interactions', 'Out-of-band callbacks'],
+  ['allow_account_creation', 'Engine-made accounts'],
   ['allow_identity_headers', 'Identity headers'],
   ['allow_direct_origin', 'Direct origin'],
   ['credential_access', 'Stored credentials'],

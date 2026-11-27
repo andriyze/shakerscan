@@ -1,0 +1,16 @@
+# Host packages for the opt-in Firecracker Model Intake runner.
+#
+# This is intentionally separate from requirements.lock: those are Python
+# packages installed inside /opt/shakerscan/model-intake-runner/venv, while
+# these packages provide KVM orchestration, filesystem tooling, network
+# telemetry, and Python's venv bootstrap on Ubuntu/Debian release hosts.
+ca-certificates
+coreutils
+curl
+e2fsprogs
+iproute2
+nftables
+openssl
+python3
+python3-venv
+tar

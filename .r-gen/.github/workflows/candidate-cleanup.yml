@@ -1,0 +1,46 @@
+name: Candidate tag cleanup
+
+# Every candidate run leaves four public `candidate-<sha>-<run>` manifests on Docker Hub.
+# This removes the ones whose promotion window (the receipt artifact's 30-day retention)
+# has passed. Version tags and `latest` are never selected. Scheduled runs are dry runs;
+# deletion happens only from an explicit dispatch with `delete: true`.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      delete:
+        description: "Actually delete expired candidate tags (default: dry run)"
+        type: boolean
+        default: false
+      older_than_days:
+        description: "Age in days after which a candidate tag is expired"
+        default: "30"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shakerscan-candidate-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: List or delete expired candidate tags
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DELETE: ${{ inputs.delete }}
+          OLDER_THAN_DAYS: ${{ inputs.older_than_days || '30' }}
+        run: |
+          args=(--older-than-days "$OLDER_THAN_DAYS")
+          if [[ "$DELETE" == "true" ]]; then
+            args+=(--delete)
+          fi
+          python3 scripts/cleanup_candidate_tags.py "${args[@]}"

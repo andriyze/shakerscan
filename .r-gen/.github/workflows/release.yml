@@ -1,0 +1,243 @@
+name: Promote release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, without v prefix"
+        required: true
+      candidate_sha:
+        description: "Exact candidate commit built by Release candidate"
+        required: true
+      candidate_run_id:
+        description: "Successful Release candidate workflow run ID"
+        required: true
+
+concurrency:
+  group: shakerscan-release-promotion
+  cancel-in-progress: false
+
+# Every job declares what it needs; the workflow default is read-only.
+permissions:
+  contents: read
+  attestations: read
+
+env:
+  SCANNER_IMAGE: shakerscan/shakerscan-scanner
+  API_IMAGE: shakerscan/shakerscan-api
+  UI_IMAGE: shakerscan/shakerscan-ui
+  SIGNER_IMAGE: shakerscan/shakerscan-model-intake-signer
+  MODEL_INTAKE_IMAGE: shakerscan/shakerscan-model-intake
+
+jobs:
+  promote:
+    name: Promote validated candidate by digest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Validate immutable candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        shell: bash
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(tr -d '[:space:]' < VERSION)" == "$VERSION" ]]
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
+          python3 - "$VERSION" <<'PY'
+          import re
+          import subprocess
+          import sys
+          candidate = tuple(map(int, sys.argv[1].split("."))) if re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[1]) else None
+          published = [
+              tuple(map(int, match.groups()))
+              for tag in subprocess.check_output(["git", "tag", "--list", "v*"], text=True).splitlines()
+              if (match := re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag))
+          ]
+          if candidate and published and max(published) > candidate:
+              raise SystemExit("refusing to publish a stable version older than an existing release")
+          PY
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$CANDIDATE_SHA" origin/main
+          [[ "$(gh run view "$CANDIDATE_RUN_ID" --json conclusion,headSha --jq '.conclusion + " " + .headSha')" == "success $CANDIDATE_SHA" ]]
+          gh run download "$CANDIDATE_RUN_ID" \
+            --pattern "release-candidate-${VERSION}-${CANDIDATE_SHA}" \
+            --dir candidate-receipt
+          receipt="$(find candidate-receipt -name release-candidate-receipt.json -type f -print -quit)"
+          [[ -n "$receipt" ]]
+          python3 scripts/validate_promotion_receipt.py --receipt "$receipt"
+          jq -e --arg version "$VERSION" --arg sha "$CANDIDATE_SHA" \
+            '.schema_version == "shakerscan-release-candidate/v2" and .version == $version and .candidate_sha == $sha and (.candidate_tag | test("^candidate-[0-9a-f]{40}-[0-9]+$")) and ([.images[] | test("^sha256:[0-9a-f]{64}$")] | all) and .provenance.verified == true and .provenance.issuer == "github-actions-sigstore" and .provenance.repository == env.GITHUB_REPOSITORY and .certification.status == "pass" and .certification.source_sha == $sha and .certification.images == .images and ([.certification.evidence_sha256[] | test("^[0-9a-f]{64}$")] | all) and (.runtime_manifest_sha256 | test("^[0-9a-f]{64}$"))' \
+            "$receipt"
+          # The host-side runtime the installer will download must be the tree that was certified.
+          python3 scripts/generate_install_manifest.py --check
+          [[ "$(sha256sum install/MANIFEST.sha256 | awk '{print $1}')" == "$(jq -r '.runtime_manifest_sha256' "$receipt")" ]]
+          cp "$receipt" release-candidate-receipt.json
+
+      - name: Reverify signed candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: |
+          verify_provenance() {
+            image="$1"
+            key="$2"
+            digest="$(jq -r ".images.${key}" release-candidate-receipt.json)"
+            gh attestation verify "oci://docker.io/${image}@${digest}" --repo "$GITHUB_REPOSITORY" --source-digest "$CANDIDATE_SHA"
+          }
+          verify_provenance "$SCANNER_IMAGE" scanner
+          verify_provenance "$API_IMAGE" api
+          verify_provenance "$UI_IMAGE" ui
+          verify_provenance "$SIGNER_IMAGE" signer
+          verify_provenance "$MODEL_INTAKE_IMAGE" model_intake
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Export by the certified digests before publishing any version tag. This consumes
+      # either build-on-main's reusable images or the candidate's fallback build unchanged.
+      - name: Export and validate release SBOMs
+        env:
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          python3 scripts/release_sbom.py engine \
+            --receipt release-candidate-receipt.json --inventory install/release-images.json \
+            --version "$VERSION" --source-sha "$CANDIDATE_SHA" \
+            --generator-source-sha "$(git rev-parse HEAD)" \
+            --repository "$GITHUB_REPOSITORY" --output release-sbom
+          python3 scripts/release_sbom.py verify --directory release-sbom
+
+      - uses: ./.github/actions/sbom-tools
+      - name: Validate expanded runtime and build-input SBOM coverage
+        run: |
+          python3 scripts/release_sbom_stage2.py --directory release-sbom \
+            --source-root . --tools "$SHAKERSCAN_SBOM_TOOLS" --output release-sbom-expanded
+          rm -rf release-sbom
+          mv release-sbom-expanded release-sbom
+          python3 scripts/release_sbom.py verify --directory release-sbom
+
+      - name: Attest release SBOM index
+        id: sbom_attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: release-sbom/sbom-index.json
+          create-storage-record: false
+
+      - name: Preserve and verify SBOM signature bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SBOM_BUNDLE: ${{ steps.sbom_attestation.outputs.bundle-path }}
+        run: |
+          cp "$SBOM_BUNDLE" release-sbom/sbom-index.sigstore.json
+          gh attestation verify release-sbom/sbom-index.json --repo "$GITHUB_REPOSITORY" \
+            --bundle release-sbom/sbom-index.sigstore.json \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+
+      - name: Verify registry digests and publish immutable version tags
+        env:
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: |
+          promote() {
+            image="$1"
+            key="$2"
+            expected="$(jq -r ".images.${key}" release-candidate-receipt.json)"
+            candidate_tag="$(jq -r '.candidate_tag' release-candidate-receipt.json)"
+            actual="$(docker buildx imagetools inspect "${image}:${candidate_tag}" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
+            [[ "$actual" == "$expected" ]]
+            if existing="$(docker buildx imagetools inspect "${image}:${VERSION}" 2>/dev/null | awk '$1 == "Digest:" && !found {print $2; found=1}')" && [[ -n "$existing" ]]; then
+              [[ "$existing" == "$expected" ]]
+            else
+              docker buildx imagetools create -t "${image}:${VERSION}" "${image}@${expected}"
+            fi
+            published="$(docker buildx imagetools inspect "${image}:${VERSION}" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
+            [[ "$published" == "$expected" ]]
+          }
+          promote "$SCANNER_IMAGE" scanner
+          promote "$API_IMAGE" api
+          promote "$UI_IMAGE" ui
+          promote "$SIGNER_IMAGE" signer
+          promote "$MODEL_INTAKE_IMAGE" model_intake
+
+      - name: Create the annotated release tag
+        env:
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        shell: bash
+        run: |
+          # `gh release create` makes a lightweight tag. An annotated tag carries the candidate
+          # binding in the tag object itself and is what the installer and ledger point at, so it
+          # is created first and the release attaches to it. An existing tag must already name
+          # this candidate; a tag is never moved.
+          git fetch --no-tags origin "+refs/tags/v${VERSION}:refs/tags/v${VERSION}" 2>/dev/null || true
+          if git rev-parse -q --verify "refs/tags/v${VERSION}^{commit}" >/dev/null; then
+            [[ "$(git rev-parse "refs/tags/v${VERSION}^{commit}")" == "$CANDIDATE_SHA" ]]
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "v${VERSION}" "$CANDIDATE_SHA" \
+              -m "ShakerScan v${VERSION}" \
+              -m "candidate_sha=${CANDIDATE_SHA}" \
+              -m "candidate_run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}"
+            git push origin "refs/tags/v${VERSION}"
+          fi
+
+      - name: Create provenance-rich GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        shell: bash
+        run: |
+          jq -r '
+            "SCANNER_IMAGE=shakerscan/shakerscan-scanner@" + .images.scanner,
+            "API_IMAGE=shakerscan/shakerscan-api@" + .images.api,
+            "UI_IMAGE=shakerscan/shakerscan-ui@" + .images.ui,
+            "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer@" + .images.signer,
+            "MODEL_INTAKE_IMAGE=shakerscan/shakerscan-model-intake@" + .images.model_intake,
+            "RUNTIME_MANIFEST_SHA256=" + .runtime_manifest_sha256
+          ' release-candidate-receipt.json > release-image-lock.env
+          test "$(wc -l < release-image-lock.env | tr -d ' ')" = 6
+          cp "docs/releases/${VERSION}.md" release-notes.md
+          cat >> release-notes.md <<EOF
+
+          ## Build provenance
+
+          - Candidate commit: \`${CANDIDATE_SHA}\`
+          - Candidate workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}
+          - Runtime manifest: \`$(jq -r '.runtime_manifest_sha256' release-candidate-receipt.json)\`
+          - Certified receipt: attached as \`release-candidate-receipt.json\`
+          - SBOMs: per-image/per-platform SPDX files, \`sbom-index.json\`, checksums and signature bundle attached. Scope and verification: \`docs/sbom.md\`.
+          - Stable installer and \`latest\` are promoted separately after public smoke.
+          EOF
+          # The certified receipt is attached so the evidence hashes outlive the 30-day
+          # workflow-artifact retention that used to be their only home.
+          # --verify-tag attaches to the annotated tag created above; --target keeps the exact
+          # candidate SHA as the release's target commit (promote-stable reads it back).
+          gh release create "v${VERSION}" --verify-tag --target "$CANDIDATE_SHA" \
+            --title "ShakerScan v${VERSION}" --notes-file release-notes.md \
+            release-image-lock.env release-candidate-receipt.json release-sbom/*

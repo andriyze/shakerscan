@@ -1,0 +1,171 @@
+name: Hunt record integrity
+
+on:
+  push:
+    branches: [main, feat/2.3.0-dast-recall]
+    paths:
+      - 'api/hunt/**'
+      - 'api/scan/finding*'
+      - 'api/scan_finding_proof.py'
+      - 'scanner/findings.py'
+      - 'scanner/finding_service_identity.py'
+      - 'tests/test_finding*'
+      - 'api/exposure/**'
+      - 'tests/test_service_intelligence*'
+      - 'api/investigation_candidates.py'
+      - 'db/init.sql'
+      - 'scripts/*hunt*'
+      - 'tests/test_authorization*'
+      - 'tests/test_hunt*'
+      - 'tests/hunt_candidate_pg_schema.py'
+      - 'api/asm_inventory.py'
+      - 'api/retest_contract.py'
+      - 'api/runtime/budget_reservations.py'
+      - 'api/targets/asset_migration.py'
+      - 'api/public_api_contract.py'
+      - 'api/runtime/credential_store.py'
+      - 'api/worker.py'
+      - 'db/init.sql'
+      - 'ui/**'
+      - '.github/workflows/hunt-record-integrity.yml'
+  pull_request:
+    paths:
+      - 'api/hunt/**'
+      - 'api/scan/finding*'
+      - 'api/scan_finding_proof.py'
+      - 'scanner/findings.py'
+      - 'scanner/finding_service_identity.py'
+      - 'tests/test_finding*'
+      - 'api/exposure/**'
+      - 'tests/test_service_intelligence*'
+      - 'api/investigation_candidates.py'
+      - 'db/init.sql'
+      - 'scripts/*hunt*'
+      - 'tests/test_authorization*'
+      - 'tests/test_hunt*'
+      - 'tests/hunt_candidate_pg_schema.py'
+      - 'api/asm_inventory.py'
+      - 'api/retest_contract.py'
+      - 'api/runtime/budget_reservations.py'
+      - 'api/targets/asset_migration.py'
+      - 'api/public_api_contract.py'
+      - 'api/runtime/credential_store.py'
+      - 'api/worker.py'
+      - 'db/init.sql'
+      - 'ui/**'
+      - '.github/workflows/hunt-record-integrity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hunt-record-integrity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  postgres-records:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # Docker Hub's official image through Google's pull-through mirror: services are pulled
+        # before any step can log in, and anonymous Docker Hub pulls hit the rate limit.
+        image: mirror.gcr.io/library/postgres:18
+        env:
+          POSTGRES_DB: hunt_records
+          POSTGRES_PASSWORD: hunt-records-disposable-ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d hunt_records"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      HUNT_TEST_POSTGRES_DSN: postgresql://postgres:hunt-records-disposable-ci@127.0.0.1:5432/hunt_records
+      SERVICE_INTELLIGENCE_TEST_DATABASE_URL: postgresql://postgres:hunt-records-disposable-ci@127.0.0.1:5432/hunt_records
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+      - name: Install the locked dependency set
+        run: python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+      - name: Check retained records, real PostgreSQL locks, and offline scoring
+        run: |
+          mkdir -p artifacts
+          python -m pytest -q --junitxml=artifacts/hunt-records.xml \
+            tests/test_authorization_candidate_materialization.py \
+            tests/test_authorization_candidate_history.py \
+            tests/test_authorization_history_projection.py \
+            tests/test_authorization_review_routes.py \
+            tests/test_authorization_candidate_postgres.py \
+            tests/test_hunt_knowledge_pages.py \
+            tests/test_hunt_graph_projection.py \
+            tests/test_hunt_investigation_score.py \
+            tests/test_hunt_review_metrics.py
+      - name: Shared Hunt service evidence in real PostgreSQL
+        env:
+          PYTHONPATH: .:api:scanner
+        run: |
+          test -n "$HUNT_TEST_POSTGRES_DSN"
+          python -m pytest -q --junitxml=artifacts/hunt-services.xml \
+            tests/test_hunt_findings_attribution.py \
+            tests/test_hunt_replay_service_evidence.py \
+            tests/test_hunt_service_sources.py \
+            tests/test_hunt_service_sources_postgres.py \
+            tests/test_hunt_budget_amendments_postgres.py \
+            tests/test_hunt_coverage_ledger_postgres.py \
+            tests/test_hunt_credential_uses_postgres.py \
+            tests/test_hunt_permission_requests_postgres.py \
+            tests/test_hunt_grant_revocation_postgres.py \
+            tests/test_hunt_live_grant_dispatch_postgres.py \
+            tests/test_hunt_refusal_retry_postgres.py \
+            tests/test_public_retry_conflict_postgres.py \
+            tests/test_hunt_finding_attribution_postgres.py \
+            tests/test_hunt_concurrent_verification_postgres.py \
+            tests/test_service_intelligence_postgres.py
+          python scripts/check_module_size.py
+      - name: Hunt candidates, host holds and endpoint inventory in real PostgreSQL
+        env:
+          PYTHONPATH: .:api:scanner
+        run: |
+          test -n "$HUNT_TEST_POSTGRES_DSN"
+          for test_file in \
+            tests/test_hunt_candidate_identity.py \
+            tests/test_hunt_action_outcomes.py \
+            tests/test_hunt_budget_exhaustion.py \
+            tests/test_hunt_content_discover_replay.py; do
+            python -m pytest -q -p no:cacheprovider \
+              --junitxml="artifacts/$(basename "$test_file" .py).xml" "$test_file"
+          done
+      - name: Canonical authorization proof and real PostgreSQL materialization
+        run: |
+          test -n "$HUNT_TEST_POSTGRES_DSN"
+          python -m pytest -q --junitxml=artifacts/hunt-authz-proof.xml \
+            tests/test_hunt_authz_proof_materialization.py \
+            tests/test_finding_service_identity.py
+      - name: Retain the test result for this exact revision
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hunt-record-integrity-${{ github.sha }}
+          path: |
+            artifacts/hunt-records.xml
+            artifacts/hunt-services.xml
+            artifacts/hunt-authz-proof.xml
+          if-no-files-found: error
+          retention-days: 14
+  review-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci --prefix ui
+      - run: npm --prefix ui test
+      - run: npm --prefix ui run build

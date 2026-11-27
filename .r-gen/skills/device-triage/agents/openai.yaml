@@ -1,0 +1,4 @@
+interface:
+  display_name: "Device Triage"
+  short_description: "Read-only connected-device evidence review"
+  default_prompt: "Use $device-triage to explain this connected device from existing evidence without sending new traffic."

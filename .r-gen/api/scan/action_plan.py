@@ -1,0 +1,2512 @@
+"""Immutable, content-addressed action graph for one canonical Scan."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import hashlib
+import json
+import re
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping, Sequence
+import uuid
+
+try:
+    from runtime.budgets import BUDGET_DIMENSIONS
+    from runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityRegistry
+    from runtime.credentials import (
+        CredentialContractError,
+        HTTP_CREDENTIAL_KINDS,
+        normalize_credential_kind,
+    )
+    from runtime.models import TargetBinding, apex_recon_roots
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..runtime.budgets import BUDGET_DIMENSIONS
+    from ..runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityRegistry
+    from ..runtime.credentials import (
+        CredentialContractError,
+        HTTP_CREDENTIAL_KINDS,
+        normalize_credential_kind,
+    )
+    from ..runtime.models import TargetBinding, apex_recon_roots
+
+try:
+    from runtime.browser_login_contract import browser_login_action_arguments
+except ModuleNotFoundError:
+    from ..runtime.browser_login_contract import browser_login_action_arguments
+try:
+    from capabilities.exposure_probe import exposure_first_slice_hold
+    from capabilities.graphql_probe import graphql_first_slice_hold
+except ModuleNotFoundError:
+    from ..capabilities.exposure_probe import exposure_first_slice_hold
+    from ..capabilities.graphql_probe import graphql_first_slice_hold
+from .capability_execution import (
+    SCAN_BASE_ORIGIN_CAPABILITIES, scan_discovery_reservation, tls_connections_per_pair,
+)
+from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS, budget_sufficiency
+from .posture_findings import CORS_PROBE_ACTIONS
+from .execution import ScanExecutionPlan
+from .work_manifests import (
+    CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
+    ScanWorkManifestError,
+    ScanWorkManifestKind,
+    ScanWorkManifestReference,
+)
+from .external_process import (
+    ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS,
+    ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+    ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS,
+    batch_attempt_floor,
+    batch_attempt_capacity,
+    batch_row_cost_class,
+)
+
+
+SCAN_ACTION_PLAN_SCHEMA = "scan-action-plan/v1"
+SCAN_ACTION_SCHEMA = "scan-action/v1"
+_HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
+_TOKEN_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$")
+_SCHEMA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+/-]{0,127}$")
+_MAX_CANONICAL_BYTES = 512 * 1024
+# Equal to api/http_experiment.MAX_REDIRECT_HOPS (pinned by a test; that module imports httpx).
+BASELINE_REDIRECT_MAX_HOPS = 3
+_MAX_ACTIONS = 512
+_MAX_DEPENDENCIES = 511
+_BATCH_CAPABILITIES = frozenset({
+    "xss.verify_batch",
+    "sqli.verify_batch",
+    "templates.passive_batch",
+    "templates.active_batch",
+    "xss.request_verify_batch",
+    "sqli.request_verify_batch",
+    "sqli.prove_batch",
+    "xss.browser_prove_batch",
+    "exposure.verify_batch",
+    "nosqli.verify_batch",
+    "authz_surface.verify_batch",
+    "graphql.verify_batch",
+    "redirect.verify_batch",
+    "injection.verify_batch",
+})
+# (slice_size, reservation) per capability, derived per profile from two measured
+# tables rather than hand-tuned absolutes.
+#
+# _BATCH_ATTEMPT_COSTS is what ONE attempt really costs, on every dimension it
+# spends. These are the measured figures the adapters' floors were written from:
+# dalfox needs roughly 200 seconds per candidate when paced to its request floor
+# (700 requests funds it well past the 120-request floor it was starved at, and
+# leaves parallel shards able to fund more than one candidate); sqlmap reaches a verdict on an
+# obvious injection in about a hundred requests but blind techniques run to ~150
+# seconds. An earlier calibration sized slices to the 30-second attempt FLOOR
+# instead, so every profile promised candidates it could only wall-kill.
+#
+# _BATCH_WALL_SHARE is the fraction of the profile's tool wall one batch of a
+# capability may hold. A bigger profile therefore funds MORE candidates per slice
+# at the SAME per-candidate time, never less time per candidate. One batch of
+# every capability plus a second active sweep fits under the ceiling, and the
+# bounded continuation rounds keep planning further slices from each lane's next
+# unplanned index until the reconciled residual cannot fund a fast-tier batch.
+_BATCH_ATTEMPT_COSTS: Mapping[str, Mapping[str, int]] = {
+    "xss.verify_batch": {"http_requests": 700, "tool_wall_seconds": 200},
+    "sqli.verify_batch": {"http_requests": 400, "tool_wall_seconds": 180},
+    # Per template, and a template runs against every endpoint in the manifest, so
+    # the time it needs grows with the target. Measured on the benchmark: a
+    # 50-template passive sweep needed ~240 s and every active batch sized at 18 s
+    # per template still timed out at its slice on a 400-endpoint manifest (three
+    # rounds in a row on the live 2.2.0 retest). Fund 12 s and 45 s per template;
+    # the rounds cover the rest of the manifest with more, smaller slices.
+    "templates.passive_batch": {"http_requests": 7, "tool_wall_seconds": 12},
+    "templates.active_batch": {"http_requests": 120, "tool_wall_seconds": 45},
+    "xss.request_verify_batch": {"http_requests": 2, "state_changing_requests": 2, "tool_wall_seconds": 12},
+    "sqli.request_verify_batch": {"http_requests": 2, "state_changing_requests": 2, "tool_wall_seconds": 12},
+    "sqli.prove_batch": {"http_requests": 8, "state_changing_requests": 8, "tool_wall_seconds": 12},
+    "xss.browser_prove_batch": {"browser_actions": 2, "http_requests": 50, "tool_wall_seconds": 45},
+    "exposure.verify_batch": {"http_requests": 5, "tool_wall_seconds": 3},
+    # The NoSQL verifier spends four requests per declared body field; fund four
+    # fields per candidate (16 requests).
+    "nosqli.verify_batch": {"http_requests": 16, "state_changing_requests": 16, "tool_wall_seconds": 12},
+    "authz_surface.verify_batch": {"http_requests": 8, "tool_wall_seconds": 6},
+    # Per manifest entry: most entries are not GraphQL routes and cost nothing; a GraphQL
+    # route costs at most six GETs. The conventional locations are held separately for the
+    # first slice (graphql_first_slice_hold).
+    "graphql.verify_batch": {"http_requests": 1, "tool_wall_seconds": 1},
+    # Per manifest entry: most routes have no redirect-named parameter and cost nothing; one
+    # that has costs one GET per parameter (open_redirect.MAX_PARAMETERS_PER_ROUTE at most).
+    "redirect.verify_batch": {"http_requests": 1, "tool_wall_seconds": 1},
+    # The baseline, then per class a handful of probes, the repeat and the control: template
+    # syntaxes (6), traversals (5), command wrappers (9) and their blind screen (7), and for a
+    # read the two reference pages and loopback addresses of the request-forgery check (8). A hit
+    # ends a class early; 40 requests cover every class on a candidate that has none of them.
+    "injection.verify_batch": {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 40},
+}
+_BATCH_WALL_SHARE: Mapping[str, float] = {
+    "xss.verify_batch": 0.12,
+    "sqli.verify_batch": 0.14,
+    "templates.passive_batch": 0.06,
+    "templates.active_batch": 0.14,
+    "xss.request_verify_batch": 0.03,
+    "sqli.request_verify_batch": 0.03,
+    "sqli.prove_batch": 0.04,
+    "xss.browser_prove_batch": 0.10,
+    "exposure.verify_batch": 0.05,
+    "nosqli.verify_batch": 0.05,
+    "authz_surface.verify_batch": 0.05,
+    "graphql.verify_batch": 0.02,
+    "redirect.verify_batch": 0.02,
+    "injection.verify_batch": 0.06,
+}
+# A discovered candidate manifest can mix query and body entries while its public
+# reference reveals only a count. Every verifier slice therefore carries one
+# conservative body-attempt hold on the state-changing dimension -- the adapter
+# settles zero mutation units for a query entry and the hold for an executed POST
+# entry -- once the profile can pay for it beside the other families (fast cannot).
+# The gate reads the profile's request ceiling: the mutation ceiling it read before (2,000)
+# now equals the request ceiling, and 20,000 requests is where the former gate opened.
+_BATCH_BODY_HOLD: Mapping[str, int] = {
+    "xss.verify_batch": 240,
+    "sqli.verify_batch": 480,
+}
+_BATCH_BODY_HOLD_MIN_REQUESTS = 20_000
+# A passive-pack attempt the wall killed before the tool reported anything is retried once
+# from what the batch has left (see the template retry in action_adapter). Each attempt is
+# charged the pack's full seven requests -- its TLS traffic has no wire count -- so a slice
+# holding exactly seven per endpoint could never fund that retry: soak 146b6c03's required
+# batch spent 126 of 126 and left its slow endpoint unexamined. One retry per two endpoints:
+# soak e5264021's `.001` slice of seven held one retry (56 of 56 spent) for two slow AI
+# endpoints, so the second could not be retried whatever its wall. A slice of fewer than
+# four keeps exactly the pack per endpoint, so the single-route required admission slice
+# still fits the smallest parallel child budget it is admitted into (and its 30-second wall
+# floor already covers a slow pack).
+_PASSIVE_PACK_REQUESTS = 7
+_PASSIVE_RETRY_EVERY = 2
+_PASSIVE_RETRY_MINIMUM_SLICE = 4
+
+
+def passive_batch_request_hold(slice_count: int) -> int:
+    """The request hold of a passive-pack slice: the pack per endpoint plus retry headroom."""
+    count = max(1, int(slice_count))
+    retries = count // _PASSIVE_RETRY_EVERY if count >= _PASSIVE_RETRY_MINIMUM_SLICE else 0
+    return _PASSIVE_PACK_REQUESTS * (count + retries)
+_BATCH_MAX_SLICE = 50
+# No single lane may hold more than this share of the tool wall in one compile:
+# a verifier that could afford the whole wall used to starve the proof stage the
+# Scan exists to reach. The later slices come back through continuation rounds.
+_LANE_WALL_SHARE = 0.25
+# Continuation rounds namespace every lane id with .rNN; slice shapes are keyed without it.
+_ROUND_SUFFIX = re.compile(r"\.r\d{2}$")
+
+
+def _profile_batch_shapes(
+    limits: Mapping[str, int],
+) -> Mapping[str, tuple[int, Mapping[str, int]]]:
+    """Size every batch for one ledger: share of the wall at the measured cost."""
+    wall = int(limits.get("tool_wall_seconds") or 0)
+    requests = int(limits.get("http_requests") or 0)
+    state_changing = int(limits.get("state_changing_requests") or 0)
+    shapes: dict[str, tuple[int, Mapping[str, int]]] = {}
+    for capability_name, cost in _BATCH_ATTEMPT_COSTS.items():
+        share = _BATCH_WALL_SHARE[capability_name]
+        size = int((wall * share) // max(1, int(cost["tool_wall_seconds"])))
+        # Requests bound the slice too: no batch may hold more than the same
+        # share (plus headroom) of the request ceiling.
+        request_cost = int(cost.get("http_requests") or 0)
+        if request_cost:
+            size = min(size, int((requests * (share + 0.05)) // request_cost))
+        size = max(1, min(_BATCH_MAX_SLICE, size))
+        budget = {name: int(amount) * size for name, amount in cost.items()}
+        hold = _BATCH_BODY_HOLD.get(capability_name)
+        if hold and state_changing > 0 and requests >= _BATCH_BODY_HOLD_MIN_REQUESTS:
+            budget["state_changing_requests"] = max(
+                int(budget.get("state_changing_requests", 0)), hold,
+            )
+        shapes[capability_name] = (size, MappingProxyType(budget))
+    return MappingProxyType(shapes)
+
+
+_BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = MappingProxyType({
+    name: _profile_batch_shapes(profile.ledger_limits())
+    for name, profile in BUDGET_PROFILES.items()
+})
+_BATCH_TIER_ORDER: tuple[str, ...] = ("deep", "thorough", "balanced", "fast")
+
+
+def batch_profile_shape(
+    profile_name: str,
+    capability_name: str,
+    *,
+    allow_state_changing_http: bool = False,
+) -> tuple[int, Mapping[str, int]]:
+    profile = _BATCH_PROFILES.get(profile_name, _BATCH_PROFILES["balanced"])
+    size, raw_budget = profile[capability_name]
+    budget = dict(raw_budget)
+    if allow_state_changing_http and capability_name in {
+        "xss.verify_batch", "sqli.verify_batch",
+    }:
+        query_floor = batch_attempt_floor(capability_name)
+        body_floor = batch_attempt_floor(capability_name, body_candidate=True)
+        for dimension, amount in body_floor.items():
+            budget[dimension] = max(int(budget.get(dimension, 0)), int(amount))
+        mixed_capacities = [
+            1 + max(0, int(budget.get(dimension, 0)) - int(body_amount)) // int(query_floor[dimension])
+            for dimension, body_amount in body_floor.items()
+            if int(query_floor.get(dimension, 0)) > 0
+        ]
+        size = min(size, min(mixed_capacities)) if mixed_capacities else size
+        # The shape keeps one body-attempt mutation hold: it is what a slice of unknown
+        # composition may need. A compiled slice whose candidates are known holds exactly
+        # what its own body candidates need instead (see slice_body_mutation_hold).
+    if allow_state_changing_http and capability_name == "templates.active_batch":
+        # Active Nuclei may send non-GET templates once state-changing HTTP is
+        # authorized. Reserve a conservative mutation hold equal to the slice's
+        # request ceiling -- every request could be a mutation. The selection
+        # resolver still restricts the templates actually run, and the adapter
+        # settles this to the requests actually sent only when non-GET templates
+        # were in the run. When the authority is absent this dimension is never
+        # reserved and the slice stays GET-only.
+        budget["state_changing_requests"] = int(budget.get("http_requests", 0))
+    return max(1, size), MappingProxyType(budget)
+
+
+_BODY_VERIFIER_CAPABILITIES = frozenset({"xss.verify_batch", "sqli.verify_batch"})
+
+
+def body_candidate_positions(manifest: Any) -> tuple[str, frozenset[int]]:
+    """The candidate manifest's digest and the indexes of its body (mutation) candidates."""
+    return (
+        manifest.reference().manifest_digest,
+        frozenset(
+            index for index, row in enumerate(manifest.entries)
+            if batch_row_cost_class(row)
+        ),
+    )
+
+
+def lane_may_hold_body_candidates(
+    capability_name: str,
+    capability_args: Mapping[str, Any],
+    body_positions: tuple[str, frozenset[int]] | None,
+    offset: int,
+) -> bool:
+    """False only when a verifier lane's remaining candidates are known to be query-only."""
+    if capability_name not in _BODY_VERIFIER_CAPABILITIES or body_positions is None:
+        return True
+    reference = capability_args.get("candidate_manifest_ref")
+    if (
+        not isinstance(reference, Mapping)
+        or str(reference.get("manifest_digest") or "") != body_positions[0]
+    ):
+        return True
+    return any(index >= offset for index in body_positions[1])
+
+
+def slice_body_mutation_hold(
+    capability_name: str,
+    capability_args: Mapping[str, Any],
+    budget: Mapping[str, int],
+    body_positions: tuple[str, frozenset[int]] | None,
+) -> int | None:
+    """The mutation hold one verifier slice needs for the body candidates it holds.
+
+    ``None`` when the slice's composition is unknown (no positions for its manifest), which
+    keeps the shape's single body hold. Otherwise the hold is the body floor for every body
+    candidate in the slice that the slice's request and wall holds can fund after its query
+    candidates' floors -- zero for a slice of query candidates. Holding a body allowance for
+    every slot a slice could hold, whatever it held, pushed active templates and verifier
+    slices out of the same mutation ceiling on targets without a single body candidate.
+    """
+    if capability_name not in _BODY_VERIFIER_CAPABILITIES or body_positions is None:
+        return None
+    reference = capability_args.get("candidate_manifest_ref")
+    raw_slice = capability_args.get("slice")
+    if (
+        not isinstance(reference, Mapping)
+        or str(reference.get("manifest_digest") or "") != body_positions[0]
+        or not isinstance(raw_slice, Mapping)
+    ):
+        return None
+    start = int(raw_slice.get("start") or 0)
+    count = int(raw_slice.get("count") or 0)
+    bodies = sum(1 for index in range(start, start + count) if index in body_positions[1])
+    if not bodies:
+        return 0
+    queries = max(0, count - bodies)
+    query_floor = batch_attempt_floor(capability_name)
+    body_floor = batch_attempt_floor(capability_name, body_candidate=True)
+    fundable = min([bodies] + [
+        max(0, int(budget.get(name, 0)) - queries * int(query_floor.get(name, 0)))
+        // int(amount)
+        for name, amount in body_floor.items()
+        if name != "state_changing_requests" and int(amount) > 0
+    ])
+    return int(body_floor.get("state_changing_requests", 0)) * fundable
+
+
+def slice_body_attempt_floor(
+    capability_name: str,
+    capability_args: Mapping[str, Any],
+    body_positions: tuple[str, frozenset[int]] | None,
+) -> dict[str, int]:
+    """The request and wall holds a verifier slice needs to attempt one of its body candidates.
+
+    Its query candidates' floors plus one body attempt's floor; empty when the slice holds no
+    body candidate or its composition is unknown. A slice is sized linearly from its tier shape,
+    so a thorough SQLi slice holding one request-body candidate held 400 requests and 180 s --
+    under the body floor of 480 requests and 420 s -- and its candidate was never attempted
+    (DVGA, every lab run).
+    """
+    if capability_name not in _BODY_VERIFIER_CAPABILITIES or body_positions is None:
+        return {}
+    reference = capability_args.get("candidate_manifest_ref")
+    raw_slice = capability_args.get("slice")
+    if (
+        not isinstance(reference, Mapping)
+        or str(reference.get("manifest_digest") or "") != body_positions[0]
+        or not isinstance(raw_slice, Mapping)
+    ):
+        return {}
+    start = int(raw_slice.get("start") or 0)
+    count = int(raw_slice.get("count") or 0)
+    bodies = sum(1 for index in range(start, start + count) if index in body_positions[1])
+    if not bodies:
+        return {}
+    queries = max(0, count - bodies)
+    query_floor = batch_attempt_floor(capability_name)
+    body_floor = batch_attempt_floor(capability_name, body_candidate=True)
+    return {
+        name: queries * int(query_floor.get(name, 0)) + int(body_floor.get(name, 0))
+        for name in ("http_requests", "tool_wall_seconds")
+    }
+
+
+def _affordable_batch_tier(
+    capability_name: str,
+    *,
+    budget_profile: str,
+    limits: Mapping[str, int],
+    allow_state_changing_http: bool = False,
+    batches: int = 1,
+) -> tuple[int, Mapping[str, int]]:
+    """Pick the largest ceiling-scaled batch shape this ledger can reserve.
+
+    Parallel children inherit the parent profile name but own a divided ledger,
+    so they may step down to a smaller published share. ``batches`` is how many
+    slices the lane must fund together (a profile's published minimum): a shape
+    whose single slice fits but whose required second slice does not would fail
+    the Scan closed at admission, so the tier is chosen for the whole minimum.
+    """
+    tiers = _BATCH_TIER_ORDER
+    start = tiers.index(budget_profile) if budget_profile in tiers else tiers.index("balanced")
+    needed = max(1, int(batches))
+    for name in tiers[start:]:
+        candidate = batch_profile_shape(
+            name, capability_name,
+            allow_state_changing_http=allow_state_changing_http,
+        )
+        _, reservation = candidate
+        if all(
+            int(limits.get(dimension, 0)) >= int(amount) * needed
+            for dimension, amount in reservation.items()
+            if int(amount) > 0
+        ):
+            return candidate
+    # The smallest shape that still verifies: one attempt at the declared floor. A
+    # parallel shard holding a sliver of the parent ledger keeps covering its
+    # candidates at the floor rather than skipping them; a ledger too small even for
+    # that keeps the floor shape and fails admission honestly.
+    return _floor_batch_shape(capability_name)
+
+
+_WINDOW_RETRY_DIMENSIONS = ("tool_wall_seconds", "http_requests", "state_changing_requests")
+
+
+def window_retry_hold(
+    slice_budget: Mapping[str, int],
+    *,
+    limits: Mapping[str, int],
+    reserved: Mapping[str, int],
+    slices: int,
+) -> dict[str, int]:
+    """What a slice of further template windows holds for one retry of a window cut off.
+
+    The retry runs at the rate the slice's positions were planned at (requests over wall), so it
+    holds requests -- and, when the slice holds mutations, as many state-changing requests -- for
+    its wall at that rate, not wall alone: a wall-only retry in a two-position final slice was
+    shortened to the few requests the slice had left and then not run at all. Each dimension is
+    capped at what the ledger has left once the lane's ``slices`` slices are paid, shared between
+    them, so the retry never prices a slice out; a ledger that cannot fund it holds none.
+    """
+    count = max(1, int(slices))
+    wall_share = int(slice_budget.get("tool_wall_seconds") or 0)
+    requests_share = int(slice_budget.get("http_requests") or 0)
+    if wall_share <= 0 or requests_share <= 0:
+        return {}
+    rate = max(1, requests_share // wall_share)
+
+    def spare(name: str) -> int:
+        left = int(limits.get(name, 0)) - int(reserved.get(name, 0)) - count * int(slice_budget[name])
+        return max(0, left) // count
+
+    wall = min(ACTIVE_TEMPLATE_WINDOW_RETRY_SECONDS, spare("tool_wall_seconds"))
+    request_names = [
+        name for name in ("http_requests", "state_changing_requests")
+        if int(slice_budget.get(name) or 0) > 0
+    ]
+    requests = min([wall * rate, *(spare(name) for name in request_names)])
+    wall = min(wall, requests // rate)
+    if wall <= 0 or requests <= 0:
+        return {}
+    return {"tool_wall_seconds": wall, **{name: requests for name in request_names}}
+
+
+def _floor_batch_shape(capability_name: str) -> tuple[int, Mapping[str, int]]:
+    floor = batch_attempt_floor(capability_name)
+    if floor:
+        return 1, MappingProxyType({name: int(amount) for name, amount in floor.items()})
+    cost = _BATCH_ATTEMPT_COSTS[capability_name]
+    return 1, MappingProxyType({name: int(amount) for name, amount in cost.items()})
+
+
+_FORBIDDEN_ACTION_KEYS = frozenset({
+    "password", "passwd", "secret", "token", "authorization", "cookie", "cookies",
+    "private_key", "client_secret", "api_key", "auth_header", "auth_cookies",
+    "headers", "body", "raw_request", "command", "argv", "shell",
+})
+
+
+# Defined in a leaf module so health_plan can raise them without importing this one;
+# re-exported here because this is where every caller imports them from.
+from .plan_errors import ScanActionPlacementError, ScanActionPlanError  # noqa: E402
+from .sqli_concurrency import (  # noqa: E402
+    CANDIDATE_CONCURRENCY_ARG,
+    planned_candidate_concurrency,
+)
+from .health_plan import with_authentication_health  # noqa: E402
+
+
+def _digest(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _hex_digest(value: Any, *, name: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not _HEX_64_RE.fullmatch(normalized):
+        raise ScanActionPlanError(f"{name} must be 64 lowercase hex characters")
+    return normalized
+
+
+def _token(value: Any, *, name: str) -> str:
+    normalized = str(value or "").strip()
+    if not _TOKEN_RE.fullmatch(normalized):
+        raise ScanActionPlanError(f"{name} is invalid")
+    return normalized
+
+
+def _schema(value: Any, *, name: str) -> str:
+    normalized = str(value or "").strip()
+    if not _SCHEMA_RE.fullmatch(normalized):
+        raise ScanActionPlanError(f"{name} is invalid")
+    return normalized
+
+
+def _canonical_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 12:
+        raise ScanActionPlanError("action input nesting is too deep")
+    if value is None or isinstance(value, (bool, int, str)):
+        if isinstance(value, str) and len(value.encode("utf-8")) > 131_072:
+            raise ScanActionPlanError("action input string is too large")
+        return value
+    if isinstance(value, Mapping):
+        if len(value) > 1_024:
+            raise ScanActionPlanError("action input object has too many fields")
+        normalized: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            if not isinstance(raw_key, str) or not raw_key or len(raw_key) > 128:
+                raise ScanActionPlanError("action input keys must be bounded strings")
+            if raw_key.strip().lower() in _FORBIDDEN_ACTION_KEYS:
+                raise ScanActionPlanError(
+                    f"secret-bearing action input key is forbidden: {raw_key}"
+                )
+            if raw_key in normalized:
+                raise ScanActionPlanError("action input contains duplicate keys")
+            normalized[raw_key] = _canonical_value(item, depth=depth + 1)
+        return {key: normalized[key] for key in sorted(normalized)}
+    if isinstance(value, (list, tuple)):
+        if len(value) > 5_000:
+            raise ScanActionPlanError("action input list is too large")
+        return [_canonical_value(item, depth=depth + 1) for item in value]
+    raise ScanActionPlanError(
+        f"action input contains unsupported value type: {type(value).__name__}"
+    )
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
+
+
+def _budget(value: Mapping[str, Any]) -> Mapping[str, int]:
+    normalized: dict[str, int] = {}
+    for raw_name, raw_amount in dict(value or {}).items():
+        name = str(raw_name or "").strip()
+        if name not in BUDGET_DIMENSIONS:
+            raise ScanActionPlanError(f"unknown action budget dimension: {name}")
+        if isinstance(raw_amount, bool) or not isinstance(raw_amount, int):
+            raise ScanActionPlanError(f"action budget {name} must be an integer")
+        if raw_amount < 0:
+            raise ScanActionPlanError(f"action budget {name} must be non-negative")
+        if raw_amount:
+            normalized[name] = raw_amount
+    return MappingProxyType({key: normalized[key] for key in sorted(normalized)})
+
+
+def digest_input_bindings(value: Mapping[str, Any]) -> str:
+    """Digest opaque IDs/versions and manifest digests without secret values."""
+    canonical = _canonical_value(value)
+    encoded = json.dumps(
+        canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    if len(encoded) > _MAX_CANONICAL_BYTES:
+        raise ScanActionPlanError("input binding material is too large")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def credential_profile_action_refs(
+    refs: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Reduce admitted profile metadata to versioned, content-free plan refs."""
+    result: list[dict[str, Any]] = []
+    for raw in refs:
+        profile_id = str(raw.get("profile_id") or "").strip()
+        lane = str(raw.get("scan_lane") or raw.get("lane") or "").strip().lower()
+        try:
+            version = int(raw.get("profile_version") or raw.get("version") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ScanActionPlanError("credential profile version is invalid") from exc
+        if not profile_id or lane not in {"primary", "secondary", "service", "ssh"} or version < 1:
+            raise ScanActionPlanError("credential profile action reference is incomplete")
+        try:
+            auth_kind = normalize_credential_kind(
+                raw.get("auth_kind"), accept_legacy_alias=True,
+            )
+        except CredentialContractError as exc:
+            raise ScanActionPlanError(
+                "credential profile action auth kind is unsupported"
+            ) from exc
+        if auth_kind not in HTTP_CREDENTIAL_KINDS:
+            raise ScanActionPlanError(
+                "credential profile action auth kind is unsupported"
+            )
+        material = {
+            "profile_id": profile_id,
+            "version": version,
+            "lane": lane,
+            "target_kind": str(raw.get("target_kind") or "").strip().lower(),
+            "auth_kind": auth_kind,
+        }
+        record_version = raw.get("credential_record_version")
+        if record_version is not None:
+            if type(record_version) is not int or record_version < 1:
+                raise ScanActionPlanError("credential metadata version is invalid")
+            material["credential_record_version"] = record_version
+        if "authenticated_profile_snapshot" in raw:
+            try:
+                from authenticated_assurance.snapshots import bound_snapshot
+            except ModuleNotFoundError:
+                from ..authenticated_assurance.snapshots import bound_snapshot
+            try:
+                material["authenticated_profile_snapshot"] = bound_snapshot(dict(raw)).model_dump(mode="json")
+            except (ValueError, TypeError) as exc:
+                raise ScanActionPlanError("authenticated profile snapshot is invalid") from exc
+        reduced = {
+            "profile_id": profile_id,
+            "version": version,
+            "digest": digest_input_bindings(material),
+            "lane": lane,
+            "auth_kind": material["auth_kind"],
+        }
+        if "authenticated_profile_snapshot" in material:
+            pinned = material["authenticated_profile_snapshot"]
+            reduced["authentication_profile_ref"] = {key: pinned[key] for key in (
+                "profile_id", "revision", "configuration_digest")}
+        result.append(reduced)
+    return tuple(result)
+
+
+def request_collection_action_refs(
+    refs: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Reduce saved executable selections to immutable Scan plan refs."""
+    result: list[dict[str, Any]] = []
+    for raw in refs:
+        collection_id = str(raw.get("collection_id") or "").strip()
+        selection_id = str(raw.get("selection_id") or "").strip()
+        binding_id = str(raw.get("binding_id") or "").strip()
+        selection_digest = str(raw.get("selection_digest") or "").strip().lower()
+        replay_policy = str(raw.get("replay_policy") or "").strip().lower()
+        if replay_policy not in {
+            "safe_reads", "safe_authentication", "confirmed_active",
+        }:
+            continue
+        try:
+            selected = int(raw.get("selected_requests") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ScanActionPlanError("request collection selected count is invalid") from exc
+        selector = raw.get("selector") if isinstance(raw.get("selector"), Mapping) else {}
+        try:
+            selector_limit = int(selector.get("max_requests") or selector.get("limit") or 500)
+        except (TypeError, ValueError) as exc:
+            raise ScanActionPlanError("request collection limit is invalid") from exc
+        if (
+            not collection_id
+            or not selection_id
+            or not binding_id
+            or not _HEX_64_RE.fullmatch(selection_digest)
+            or selected < 1
+            or selector_limit < 1
+        ):
+            raise ScanActionPlanError("request collection action reference is incomplete")
+        result.append({
+            "collection_id": collection_id,
+            "selection_id": selection_id,
+            "binding_id": binding_id,
+            "version": 1,
+            "selection_digest": selection_digest,
+            "active": replay_policy == "confirmed_active",
+            "replay_policy": replay_policy,
+            "max_requests": min(2_000, selected, selector_limit),
+        })
+    return tuple(result)
+
+
+# Capabilities funded by their own allowance on top of the Scan's shared ceilings: the plan
+# that contains one holds exactly its registry reservation in addition, so adding it never
+# displaces a slice the shared budget funds. The allowance is derived from the plan itself,
+# identically at admission, in continuation reconciliation and at runtime reservation.
+OWN_BUDGET_CAPABILITIES = frozenset({"web.identify"})
+
+
+def own_budget_allowance(actions: Iterable[Any]) -> dict[str, int]:
+    """The extra authority a plan's own-budget actions bring: their requested holds."""
+    allowance: dict[str, int] = {}
+    for action in actions:
+        if action.capability_name not in OWN_BUDGET_CAPABILITIES or action.admission_status == "skipped":
+            continue
+        for name, amount in dict(action.requested_budget).items():
+            allowance[str(name)] = allowance.get(str(name), 0) + int(amount)
+    return allowance
+
+
+def with_own_budget(limits: Mapping[str, int], actions: Iterable[Any]) -> dict[str, int]:
+    """Shared ceilings plus the plan's own-budget allowance (declared dimensions only)."""
+    allowance = own_budget_allowance(actions)
+    return {name: int(limit) + allowance.get(name, 0) for name, limit in limits.items()}
+
+
+@dataclass(frozen=True)
+class ScanAction:
+    action_id: str
+    stage: str
+    ordinal: int
+    capability_name: str
+    capability_args: Mapping[str, Any]
+    target_binding_digest: str
+    input_binding_digest: str
+    requested_budget: Mapping[str, int]
+    placement: Mapping[str, Any]
+    dependencies: tuple[str, ...]
+    required: bool
+    supporting: bool
+    output_schema: str
+    admission_status: str = "planned"
+    reason_code: str | None = None
+    schema_version: str = SCAN_ACTION_SCHEMA
+    action_digest: str | None = field(default=None, compare=True)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != SCAN_ACTION_SCHEMA:
+            raise ScanActionPlanError("unsupported Scan action schema")
+        action_id = _token(self.action_id, name="action_id")
+        stage = _token(self.stage, name="stage")
+        capability = _token(self.capability_name, name="capability_name")
+        if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int) or self.ordinal < 0:
+            raise ScanActionPlanError("action ordinal must be a non-negative integer")
+        if not isinstance(self.required, bool) or not isinstance(self.supporting, bool):
+            raise ScanActionPlanError("action classification flags must be booleans")
+        admission_status = str(self.admission_status or "").strip()
+        reason_code = str(self.reason_code or "").strip() or None
+        if admission_status not in {"planned", "skipped"}:
+            raise ScanActionPlanError("action admission_status is invalid")
+        if admission_status == "planned" and reason_code is not None:
+            raise ScanActionPlanError("planned action cannot have a skip reason")
+        if admission_status == "skipped" and reason_code not in {
+            "insufficient_plan_budget", "dependency_failed", "policy_disabled",
+        }:
+            raise ScanActionPlanError("skipped action requires a stable reason_code")
+        dependencies = tuple(
+            _token(item, name="dependency action_id") for item in self.dependencies
+        )
+        if len(dependencies) > _MAX_DEPENDENCIES or len(set(dependencies)) != len(dependencies):
+            raise ScanActionPlanError("action dependencies are too large or contain duplicates")
+        if action_id in dependencies:
+            raise ScanActionPlanError("an action cannot depend on itself")
+
+        args = _canonical_value(self.capability_args)
+        placement = _canonical_value(self.placement)
+        if not isinstance(args, Mapping) or not isinstance(placement, Mapping):
+            raise ScanActionPlanError("capability_args and placement must be objects")
+        canonical_size = len(json.dumps(
+            {"capability_args": args, "placement": placement},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8"))
+        if canonical_size > _MAX_CANONICAL_BYTES:
+            raise ScanActionPlanError("action authority is too large")
+
+        object.__setattr__(self, "action_id", action_id)
+        object.__setattr__(self, "stage", stage)
+        object.__setattr__(self, "capability_name", capability)
+        object.__setattr__(self, "capability_args", _freeze(args))
+        object.__setattr__(self, "target_binding_digest", _hex_digest(
+            self.target_binding_digest, name="target_binding_digest",
+        ))
+        object.__setattr__(self, "input_binding_digest", _hex_digest(
+            self.input_binding_digest, name="input_binding_digest",
+        ))
+        object.__setattr__(self, "requested_budget", _budget(self.requested_budget))
+        object.__setattr__(self, "placement", _freeze(placement))
+        object.__setattr__(self, "dependencies", dependencies)
+        object.__setattr__(self, "admission_status", admission_status)
+        object.__setattr__(self, "reason_code", reason_code)
+        object.__setattr__(self, "output_schema", _schema(
+            self.output_schema, name="output_schema",
+        ))
+        expected = _digest(self.digest_material())
+        supplied = self.action_digest
+        if supplied is not None and _hex_digest(supplied, name="action_digest") != expected:
+            raise ScanActionPlanError("action_digest does not match canonical action authority")
+        object.__setattr__(self, "action_digest", expected)
+
+    def digest_material(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "action_id": self.action_id,
+            "stage": self.stage,
+            "ordinal": self.ordinal,
+            "capability_name": self.capability_name,
+            "capability_args": _thaw(self.capability_args),
+            "target_binding_digest": self.target_binding_digest,
+            "input_binding_digest": self.input_binding_digest,
+            "requested_budget": dict(self.requested_budget),
+            "placement": _thaw(self.placement),
+            "dependencies": list(self.dependencies),
+            "required": self.required,
+            "supporting": self.supporting,
+            "output_schema": self.output_schema,
+            "admission_status": self.admission_status,
+            "reason_code": self.reason_code,
+        }
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {**self.digest_material(), "action_digest": self.action_digest}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ScanAction":
+        expected = {
+            "schema_version", "action_id", "stage", "ordinal", "capability_name",
+            "capability_args", "target_binding_digest", "input_binding_digest",
+            "requested_budget", "placement", "dependencies", "required", "supporting",
+            "output_schema", "admission_status", "reason_code", "action_digest",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ScanActionPlanError("Scan action fields are invalid")
+        if not isinstance(value["dependencies"], list):
+            raise ScanActionPlanError("action dependencies must be a list")
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True)
+class ScanActionPlan:
+    scan_id: str
+    execution_plan_digest: str
+    target_binding_digest: str
+    actions: tuple[ScanAction, ...]
+    schema_version: str = SCAN_ACTION_PLAN_SCHEMA
+    plan_digest: str | None = field(default=None, compare=True)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != SCAN_ACTION_PLAN_SCHEMA:
+            raise ScanActionPlanError("unsupported Scan action-plan schema")
+        try:
+            scan_id = str(uuid.UUID(str(self.scan_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ScanActionPlanError("scan_id must be a UUID") from exc
+        actions = tuple(self.actions)
+        if len(actions) > _MAX_ACTIONS:
+            raise ScanActionPlanError("Scan action plan contains too many actions")
+        ids = [action.action_id for action in actions]
+        if len(set(ids)) != len(ids):
+            raise ScanActionPlanError("Scan action IDs must be unique")
+        positions = {action_id: index for index, action_id in enumerate(ids)}
+        target_digest = _hex_digest(
+            self.target_binding_digest, name="target_binding_digest",
+        )
+        for index, action in enumerate(actions):
+            if action.ordinal != index:
+                raise ScanActionPlanError("Scan action ordinals must be contiguous and ordered")
+            if action.target_binding_digest != target_digest:
+                raise ScanActionPlanError("action target binding differs from the action plan")
+            for dependency in action.dependencies:
+                if dependency not in positions:
+                    raise ScanActionPlanError("action dependency is absent from the plan")
+                if positions[dependency] >= index:
+                    raise ScanActionPlanError("action dependencies must precede their consumer")
+        object.__setattr__(self, "scan_id", scan_id)
+        object.__setattr__(self, "execution_plan_digest", _hex_digest(
+            self.execution_plan_digest, name="execution_plan_digest",
+        ))
+        object.__setattr__(self, "target_binding_digest", target_digest)
+        object.__setattr__(self, "actions", actions)
+        expected = _digest(self.digest_material())
+        supplied = self.plan_digest
+        if supplied is not None and _hex_digest(supplied, name="plan_digest") != expected:
+            raise ScanActionPlanError("plan_digest does not match canonical action plan")
+        object.__setattr__(self, "plan_digest", expected)
+
+    def digest_material(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "scan_id": self.scan_id,
+            "execution_plan_digest": self.execution_plan_digest,
+            "target_binding_digest": self.target_binding_digest,
+            "actions": [action.canonical_dict() for action in self.actions],
+        }
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {**self.digest_material(), "plan_digest": self.plan_digest}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ScanActionPlan":
+        expected = {
+            "schema_version", "scan_id", "execution_plan_digest",
+            "target_binding_digest", "actions", "plan_digest",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ScanActionPlanError("Scan action-plan fields are invalid")
+        raw_actions = value.get("actions")
+        if not isinstance(raw_actions, list):
+            raise ScanActionPlanError("Scan action-plan actions must be a list")
+        return cls(
+            schema_version=value["schema_version"],
+            scan_id=value["scan_id"],
+            execution_plan_digest=value["execution_plan_digest"],
+            target_binding_digest=value["target_binding_digest"],
+            actions=tuple(ScanAction.from_dict(item) for item in raw_actions),
+            plan_digest=value["plan_digest"],
+        )
+
+
+@dataclass(frozen=True)
+class _ActionBlueprint:
+    action_id: str
+    stage: str
+    capability_name: str
+    capability_args: Mapping[str, Any]
+    dependencies: tuple[str, ...] = ()
+    required: bool = False
+    supporting: bool = False
+
+
+def _reference_list(
+    value: Sequence[Mapping[str, Any]],
+    *,
+    name: str,
+    allowed_keys: frozenset[str],
+    required_keys: frozenset[str],
+    maximum: int,
+) -> tuple[dict[str, Any], ...]:
+    if len(value) > maximum:
+        raise ScanActionPlanError(f"too many {name} references")
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ScanActionPlanError(f"{name} reference must be an object")
+        keys = set(item)
+        if not required_keys <= keys or keys - allowed_keys:
+            raise ScanActionPlanError(f"{name} reference fields are invalid")
+        canonical = _canonical_value(item)
+        if not isinstance(canonical, dict):
+            raise ScanActionPlanError(f"{name} reference must be an object")
+        result.append(canonical)
+    result.sort(key=lambda item: json.dumps(
+        item, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ))
+    return tuple(result)
+
+
+def _work_manifest_reference(
+    value: Mapping[str, Any] | None,
+    *,
+    kind: ScanWorkManifestKind,
+) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        reference = ScanWorkManifestReference.from_dict(value)
+    except (ScanWorkManifestError, TypeError, ValueError) as exc:
+        raise ScanActionPlanError(f"{kind.value} manifest reference is invalid") from exc
+    if reference.kind is not kind:
+        raise ScanActionPlanError(
+            f"{kind.value} manifest reference has the wrong kind"
+        )
+    return reference.canonical_dict()
+
+
+def interactive_auth_input_action_ids(
+    credential_refs: Any,
+) -> tuple[str, ...]:
+    """The ``inputs.auth_*`` actions this compiler will actually create.
+
+    Only an interactive credential needs a session established before the scan
+    can use it; a static one -- a bearer token, an API key header, a cookie --
+    is resolved worker-side at execution and gets no action of its own.
+
+    A caller that allocated a zero-cost budget entry per credential without
+    that rule named actions the compiler never creates, and the plan was
+    rejected with "action budget allocation contains unknown actions". Every
+    scan carrying a static credential failed that way, which is most
+    authenticated scans. Deriving both from this one function is what keeps the
+    allocation and the compilation from drifting apart again.
+    """
+    action_ids: list[str] = []
+    for item in credential_refs or ():
+        if not isinstance(item, Mapping):
+            continue
+        lane = str(item.get("scan_lane") or item.get("lane") or "").strip().lower()
+        auth_kind = str(item.get("auth_kind") or "").strip().lower()
+        if lane in {"primary", "secondary"} and auth_kind in SCAN_V2_INTERACTIVE_AUTH_KINDS:
+            action_ids.append(f"inputs.auth_{lane}")
+    return tuple(dict.fromkeys(action_ids))
+
+
+class ScanActionPlanCompiler:
+    """Compile policy plus opaque references into one deterministic action DAG.
+
+    This compiler selects actions and closes prerequisites. The next admission
+    boundary may pass a complete ``action_budgets`` allocation; otherwise the
+    registry's conservative fixed profiles are used as exact maximum holds.
+    """
+
+    plan_schema_version = SCAN_ACTION_PLAN_SCHEMA
+
+    def __init__(self, registry: CapabilityRegistry = CAPABILITY_REGISTRY) -> None:
+        self._registry = registry
+
+    @staticmethod
+    def _family_enabled(plan: ScanExecutionPlan, family: str) -> bool:
+        if plan.resolved_families:
+            return family in set(plan.resolved_families)
+        include = set(plan.policy.include_families)
+        exclude = set(plan.policy.exclude_families)
+        return family not in exclude and (not include or family in include)
+
+    def compile(
+        self,
+        *,
+        scan_id: str,
+        execution_plan: ScanExecutionPlan,
+        target_binding: TargetBinding,
+        credential_profile_refs: Sequence[Mapping[str, Any]] = (),
+        browser_login_profile_refs: Sequence[Mapping[str, Any]] = (),
+        request_collection_refs: Sequence[Mapping[str, Any]] = (),
+        request_manifest_refs: Mapping[str, Mapping[str, Any]] | None = None,
+        endpoint_manifest_ref: Mapping[str, Any] | None = None,
+        candidate_manifest_ref: Mapping[str, Any] | None = None,
+        request_candidate_manifest_ref: Mapping[str, Any] | None = None,
+        template_manifest_ref: Mapping[str, Any] | None = None,
+        authority_refs: Mapping[str, Any] | None = None,
+        shard_authority: Mapping[str, Any] | None = None,
+        action_scope: str = "full",
+        ledger_limits: Mapping[str, int] | None = None,
+        family_scope: Sequence[str] | None = None,
+        defer_manifest_actions: bool = False,
+        include_finalizer: bool = True,
+        continuation_round: int = 0,
+        manifest_offsets: Mapping[str, int] | None = None,
+        require_family_minimums: bool = True,
+        available_placement_capabilities: Iterable[str] | None = None,
+        placement_backends: Sequence[str] = ("local", "broker"),
+        action_budgets: Mapping[str, Mapping[str, int]] | None = None,
+        verification_extensions: Sequence[Mapping[str, Any]] = (),
+        body_positions: tuple[str, frozenset[int]] | None = None,
+        active_template_windows: bool = False,
+    ) -> ScanActionPlan:
+        scope = str(action_scope or "").strip().lower()
+        if scope not in {"full", "global", "discovery", "endpoint"}:
+            raise ScanActionPlanError("action_scope is invalid")
+        if not isinstance(defer_manifest_actions, bool):
+            raise ScanActionPlanError("defer_manifest_actions must be a boolean")
+        if not isinstance(include_finalizer, bool):
+            raise ScanActionPlanError("include_finalizer must be a boolean")
+        if (
+            isinstance(continuation_round, bool)
+            or not isinstance(continuation_round, int)
+            or not 0 <= continuation_round <= 8
+        ):
+            raise ScanActionPlanError("continuation_round must be between zero and eight")
+        if not isinstance(require_family_minimums, bool):
+            raise ScanActionPlanError("require_family_minimums must be a boolean")
+        if not isinstance(active_template_windows, bool):
+            raise ScanActionPlanError("active_template_windows must be a boolean")
+        offsets: dict[str, int] = {}
+        for raw_name, raw_offset in dict(manifest_offsets or {}).items():
+            name = _token(raw_name, name="manifest offset action")
+            if (
+                isinstance(raw_offset, bool)
+                or not isinstance(raw_offset, int)
+                or raw_offset < 0
+            ):
+                raise ScanActionPlanError("manifest offsets must be non-negative integers")
+            offsets[name] = raw_offset
+        if defer_manifest_actions and scope != "full":
+            raise ScanActionPlanError(
+                "manifest action deferral is only valid for a full admission phase"
+            )
+        narrowed_families = tuple(dict.fromkeys(
+            _token(item, name="family scope") for item in (family_scope or ())
+        ))
+        if any(
+            not self._family_enabled(execution_plan, family)
+            for family in narrowed_families
+        ):
+            raise ScanActionPlanError(
+                "family_scope cannot widen the immutable Scan policy"
+            )
+        credentials = _reference_list(
+            credential_profile_refs,
+            name="credential profile",
+            allowed_keys=frozenset({
+                "profile_id", "version", "digest", "lane", "auth_kind",
+                "principal_ref", "authentication_profile_ref",
+            }),
+            required_keys=frozenset({
+                "profile_id", "version", "digest", "lane", "auth_kind",
+            }),
+            maximum=4,
+        )
+        collections = _reference_list(
+            request_collection_refs,
+            name="request collection",
+            allowed_keys=frozenset({
+                "collection_id", "selection_id", "binding_id", "version",
+                "selection_digest", "principal_ref", "active", "max_requests",
+                "replay_policy",
+            }),
+            required_keys=frozenset({
+                "collection_id", "selection_id", "binding_id", "version",
+                "selection_digest",
+            }),
+            maximum=32,
+        )
+        for reference in credentials:
+            if (
+                isinstance(reference.get("version"), bool)
+                or not isinstance(reference.get("version"), int)
+                or int(reference["version"]) < 1
+                or not _HEX_64_RE.fullmatch(str(reference.get("digest") or ""))
+                or reference.get("lane") not in {"primary", "secondary", "service", "ssh"}
+            ):
+                raise ScanActionPlanError("credential profile reference is invalid")
+        for reference in collections:
+            if (
+                isinstance(reference.get("version"), bool)
+                or not isinstance(reference.get("version"), int)
+                or int(reference["version"]) < 1
+                or not _HEX_64_RE.fullmatch(
+                    str(reference.get("selection_digest") or "")
+                )
+                or not isinstance(reference.get("active", False), bool)
+                or (
+                    "max_requests" in reference
+                    and (
+                        isinstance(reference["max_requests"], bool)
+                        or not isinstance(reference["max_requests"], int)
+                        or not 1 <= reference["max_requests"] <= 2_000
+                    )
+                )
+            ):
+                raise ScanActionPlanError("request collection reference is invalid")
+        request_refs: dict[str, dict[str, Any]] = {}
+        for raw_digest, raw_reference in dict(request_manifest_refs or {}).items():
+            digest = str(raw_digest or "").strip().lower()
+            if not _HEX_64_RE.fullmatch(digest):
+                raise ScanActionPlanError("request manifest selection digest is invalid")
+            reference = _work_manifest_reference(
+                raw_reference, kind=ScanWorkManifestKind.REQUEST,
+            )
+            request_refs[digest] = reference
+        collection_digests = {
+            str(reference["selection_digest"]) for reference in collections
+        }
+        if set(request_refs) != collection_digests:
+            raise ScanActionPlanError(
+                "request manifests must exactly cover executable collection selections"
+            )
+        endpoint_ref = _work_manifest_reference(
+            endpoint_manifest_ref, kind=ScanWorkManifestKind.ENDPOINT,
+        )
+        candidate_ref = _work_manifest_reference(
+            candidate_manifest_ref, kind=ScanWorkManifestKind.CANDIDATE,
+        )
+        request_candidate_ref = _work_manifest_reference(
+            request_candidate_manifest_ref,
+            kind=ScanWorkManifestKind.REQUEST_CANDIDATE,
+        )
+        template_ref = _work_manifest_reference(
+            template_manifest_ref, kind=ScanWorkManifestKind.TEMPLATE,
+        )
+        authority = _canonical_value({
+            "scope_receipt_id": execution_plan.policy.scope_receipt_id,
+            "approval_receipt_id": execution_plan.policy.approval_receipt_id,
+            "parallel_family_scope": list(narrowed_families),
+            **dict(authority_refs or {}),
+        })
+        shard = _canonical_value(shard_authority or {})
+        for name, value in (
+            ("endpoint_manifest_ref", endpoint_ref),
+            ("candidate_manifest_ref", candidate_ref),
+            ("request_candidate_manifest_ref", request_candidate_ref),
+            ("template_manifest_ref", template_ref),
+            ("authority_refs", authority),
+            ("shard_authority", shard),
+        ):
+            if not isinstance(value, Mapping):
+                raise ScanActionPlanError(f"{name} must be an object")
+
+        backends = tuple(dict.fromkeys(_token(item, name="placement backend") for item in placement_backends))
+        if not backends:
+            raise ScanActionPlacementError("at least one placement backend is required")
+        available = (
+            None
+            if available_placement_capabilities is None
+            else frozenset(
+                _token(item, name="available placement capability")
+                for item in available_placement_capabilities
+            )
+        )
+
+        policy = execution_plan.policy
+        active = policy.active_testing
+        family_filter = set(narrowed_families)
+
+        def enabled(family: str) -> bool:
+            return self._family_enabled(execution_plan, family) and (
+                not family_filter or family in family_filter
+            )
+
+        passive_nuclei = enabled("nuclei_passive")
+        xss = active and enabled("xss")
+        sqli = active and enabled("sqli")
+        active_nuclei = active and enabled("nuclei_active")
+        bola = active and enabled("bola")
+        # Read-only (ADR 0001 passive): runs whenever selected, active authority or not.
+        sensitive_exposure = enabled("sensitive_exposure")
+        nosqli = active and enabled("nosqli")
+        # Only when named, like recon_active: it is in no preset, so a plan that names no families
+        # (a legacy plan without resolved families enables every family it does not exclude)
+        # never runs it.
+        server_injection = (
+            active and enabled("server_injection")
+            and "server_injection" in set(
+                execution_plan.resolved_families or execution_plan.policy.include_families
+            )
+        )
+        authz_surface = active and enabled("authz_surface")
+        graphql = active and enabled("graphql")
+        # Only an explicit selection: recon_active is in no preset, so a policy that names no
+        # families (or a legacy plan without resolved families) never runs it.
+        recon_active = (
+            active and enabled("recon_active")
+            and "recon_active" in set(execution_plan.resolved_families or ())
+        )
+        template_actions_expected = (
+            (scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions)
+            or (scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions)
+        )
+        if template_actions_expected and (
+            not template_ref
+            or int(template_ref.get("entry_count") or 0)
+            < len(CANONICAL_PASSIVE_NUCLEI_TEMPLATES)
+            or template_ref.get("status") != "complete"
+        ):
+            raise ScanActionPlanError(
+                "Nuclei actions require an immutable template manifest with the complete passive pack"
+            )
+        explicitly_requested = set(
+            execution_plan.resolved_families or policy.include_families
+        )
+        needs_candidates = xss or sqli or active_nuclei or passive_nuclei
+        lane_refs = {str(item.get("lane") or ""): item for item in credentials}
+
+        blueprints: list[_ActionBlueprint] = []
+        origin_resolution_required = bool(target_binding.inferred_origins)
+
+        def add(
+            action_id: str,
+            stage: str,
+            capability_name: str,
+            capability_args: Mapping[str, Any],
+            *,
+            dependencies: Sequence[str] = (),
+            required: bool = False,
+            supporting: bool = False,
+        ) -> None:
+            if origin_resolution_required and capability_name in SCAN_BASE_ORIGIN_CAPABILITIES:
+                dependencies = (*dependencies, "origin.select")
+            def round_id(value: str) -> str:
+                if (
+                    continuation_round < 1
+                    or value == "finalize.report"
+                    or value == "origin.select"
+                    or value.startswith(("inputs.auth_", "inputs.collection_"))
+                ):
+                    return value
+                suffix = f".r{continuation_round:02d}"
+                return value if value.endswith(suffix) else f"{value}{suffix}"
+
+            blueprints.append(_ActionBlueprint(
+                action_id=round_id(action_id),
+                stage=stage,
+                capability_name=capability_name,
+                capability_args=capability_args,
+                dependencies=tuple(round_id(item) for item in dependencies),
+                required=required,
+                supporting=supporting,
+            ))
+
+        if origin_resolution_required:
+            add(
+                "origin.select", "resolve_inputs", "scan.origin_select",
+                {"origins": list(target_binding.inferred_origins)}, required=True,
+            )
+
+        try:
+            browser_actions = browser_login_action_arguments(
+                browser_login_profile_refs, policy=policy,
+                max_workers=execution_plan.budget.max_workers,
+                scope=scope, continuation_round=continuation_round,
+            )
+        except ValueError as exc:
+            raise ScanActionPlanError(str(exc)) from exc
+        for browser_args in browser_actions:
+            add(f"qa.browser_login_{browser_args['as_principal']}", "resolve_inputs",
+                "browser.login_check", browser_args, required=True)
+
+        for lane in ("primary", "secondary", "service", "ssh"):
+            reference = lane_refs.get(lane)
+            if (
+                scope != "discovery"
+                and reference is not None
+                and lane in {"primary", "secondary"}
+                and str(reference.get("auth_kind") or "") in {
+                    "form_login", "oauth_client_credentials", "oauth_password", "json_login",
+                }
+            ):
+                add(
+                    f"inputs.auth_{lane}",
+                    "resolve_inputs",
+                    "auth.session.establish",
+                    {"lane": lane, "credential_profile_ref": reference},
+                    required=True,
+                    supporting=True,
+                )
+
+        auth_dependencies = tuple(
+            row.action_id for row in blueprints if row.capability_name == "auth.session.establish"
+        )
+        primary_dependency = (
+            ("inputs.auth_primary",)
+            if any(row.action_id == "inputs.auth_primary" for row in blueprints)
+            else ()
+        )
+        if scope in {"full", "global"}:
+            add(
+                "baseline.http",
+                "deterministic_baseline",
+                "http.request",
+                {"method": "GET", "path": "/", "follow_redirects": False, "principal": "primary" if primary_dependency else None},
+                dependencies=primary_dependency,
+                required=True,
+            )
+            add(
+                "baseline.http_redirect",
+                "deterministic_baseline",
+                "http.request",
+                {
+                    "method": "GET", "path": "/", "scheme": "http", "follow_redirects": True,
+                    # The bound HTTP capability follows up to MAX_REDIRECT_HOPS on the bound
+                    # origins: http://host/ -> https://host/ -> https://host/login takes two.
+                    # The reservation covers every hop the capability may send.
+                    "max_redirects": BASELINE_REDIRECT_MAX_HOPS,
+                },
+                dependencies=("baseline.http",),
+            )
+            add(
+                "baseline.security_txt",
+                "deterministic_baseline",
+                "http.request",
+                {"method": "GET", "path": "/.well-known/security.txt", "follow_redirects": False},
+                dependencies=("baseline.http",),
+            )
+            # Two read-only CORS probes of the same page: one foreign Origin, one `null`. The
+            # response headers say whether the server grants them (posture_findings).
+            for cors_action_id, probe_origin in CORS_PROBE_ACTIONS.items():
+                add(
+                    cors_action_id,
+                    "deterministic_baseline",
+                    "http.request",
+                    # The Origin value is fixed by the action id (posture_findings); request
+                    # headers are never plan inputs.
+                    {"method": "GET", "path": "/", "follow_redirects": False,
+                     "cors_probe_origin": probe_origin},
+                    dependencies=("baseline.http",),
+                )
+            if target_binding.canonical_host:
+                add(
+                    "baseline.dns",
+                    "deterministic_baseline",
+                    "dns.inspect",
+                    {"canonical_host": target_binding.canonical_host},
+                )
+            https_origin_count = sum(
+                1 for origin in target_binding.allowed_origins
+                if origin.startswith("https://")
+            )
+            if https_origin_count:
+                if (
+                    https_origin_count > 64
+                    or not target_binding.allowed_addresses
+                    or len(target_binding.allowed_addresses) > 64
+                ):
+                    raise ScanActionPlanError(
+                        "TLS target matrix exceeds the canonical bounded profile"
+                    )
+                add(
+                    "baseline.tls",
+                    "deterministic_baseline",
+                    "tls.inspect",
+                    {
+                        "origins_ref": "frozen_https_origins",
+                        "origin_count": https_origin_count,
+                        "addresses_ref": "frozen_addresses",
+                        "address_count": len(target_binding.allowed_addresses),
+                    },
+                    required=True,
+                )
+        if scope in {"full", "discovery"}:
+            add(
+                "discover.web_probe",
+                "discover_surface",
+                "web.probe",
+                {"target_ref": "canonical_origin", "endpoint_manifest_ref": endpoint_ref or None},
+                dependencies=primary_dependency,
+                required=True,
+                supporting=needs_candidates,
+            )
+
+        crawl_required = bool(explicitly_requested) and needs_candidates and not endpoint_ref and not candidate_ref
+        if (
+            scope in {"full", "discovery"}
+            and (self._family_enabled(execution_plan, "recon") or needs_candidates)
+        ):
+            add(
+                "discover.web_crawl",
+                "discover_surface",
+                "web.crawl",
+                {"endpoint_manifest_ref": endpoint_ref or None, "read_only": True},
+                dependencies=("discover.web_probe",),
+                required=crawl_required,
+                supporting=needs_candidates,
+            )
+            # Runtime observation of the application's own requests. A
+            # single-page application builds its API calls in JavaScript, so the
+            # static crawl above sees the route but never the query the client
+            # actually sends, and candidates are only ever made from observed
+            # parameters. Supporting, never required: a target with no browser
+            # runtime must still complete its scan on the static crawl alone.
+            add(
+                "discover.browser_crawl",
+                "discover_surface",
+                "web.browser_crawl",
+                {"endpoint_manifest_ref": endpoint_ref or None, "read_only": True},
+                dependencies=("discover.web_probe",),
+                required=False,
+                supporting=needs_candidates,
+            )
+            if self._family_enabled(execution_plan, "recon"):
+                add(
+                    "discover.web_content",
+                    "discover_surface",
+                    "web.content_discover",
+                    {
+                        "target_manifest_ref": endpoint_ref or None,
+                        # Active authority adds the authored corporate paths (mail, identity,
+                        # VPN and admin consoles) after the common list, in the same
+                        # reservation. Pinned here so the action is immutable.
+                        "wordlist": "corporate" if policy.active_testing else "common",
+                    },
+                    dependencies=("discover.web_probe",),
+                )
+            # The application's own API description declares routes a black-box crawl never
+            # exercises -- body-bearing endpoints above all -- so it is planned alongside the
+            # crawlers whenever candidates are wanted or recon breadth is selected. Supporting,
+            # never required: a target with no published spec still completes its scan.
+            # Ranked with its sibling content-discovery producer, not above the primary crawl:
+            # a plain optional action, so under a scarce budget the crawl is funded first and
+            # spec ingestion degrades to a coverage gap rather than starving it.
+            add(
+                "discover.spec",
+                "discover_surface",
+                "web.spec_ingest",
+                {},
+                dependencies=primary_dependency,
+            )
+            if self._family_enabled(execution_plan, "recon"):
+                # Product recipes: fixed read-only GETs naming the edge, server, application and
+                # plugins behind the origin, each against a negative control. Optional: a Scan
+                # without the budget records the gap, and nothing depends on its output.
+                add(
+                    "discover.identify",
+                    "discover_surface",
+                    "web.identify",
+                    {},
+                    dependencies=("discover.web_probe",),
+                )
+        if scope in {"full", "discovery"} and policy.subdomain_discovery:
+            add(
+                "discover.subdomains",
+                "discover_surface",
+                "subdomains.discover",
+                {"root_domains": list(target_binding.allowed_root_domains)},
+                required=True,
+                supporting=True,
+            )
+            # Passive takeover check of what discovery found: DNS evidence for discovered names,
+            # an HTTP fingerprint only for the bound host (capabilities/takeover.py). Optional:
+            # a scan without the budget for it records the gap instead of failing.
+            add(
+                "discover.takeover",
+                "discover_surface",
+                "subdomains.takeover_check",
+                {"discovery_ref": "discover.subdomains"},
+                dependencies=("discover.subdomains",),
+                supporting=True,
+            )
+        if scope in {"full", "discovery"} and policy.network_discovery:
+            add(
+                "discover.ports",
+                "discover_network",
+                "ports.discover",
+                {"address_ref": "frozen_target_addresses"},
+                required=True,
+                supporting=True,
+            )
+            add(
+                "discover.services",
+                "discover_network",
+                "service.fingerprint",
+                {"open_port_manifest_ref": "discover.ports"},
+                dependencies=("discover.ports",),
+                required=True,
+                supporting=True,
+            )
+        if scope in {"full", "discovery"} and recon_active:
+            recon_required = "recon_active" in explicitly_requested
+            route_producers = tuple(
+                row.action_id for row in blueprints
+                if row.capability_name in {
+                    "web.crawl", "web.browser_crawl", "web.content_discover", "web.spec_ingest",
+                }
+            ) or primary_dependency
+            # Confirmed parameter names become inputs to this Scan's own candidate pipeline
+            # for routes discovery already observed, so it runs before manifests compile.
+            add(
+                "discover.parameters", "discover_surface", "web.param_discover",
+                {"route_refs": list(route_producers)},
+                dependencies=route_producers, required=recon_required, supporting=True,
+            )
+            # Guessing names under a root (Host/SNI or DNS) needs apex authority: the policy's
+            # subdomain discovery and an operator-declared apex. The registrable domain of a
+            # host bound below it (acme.zendesk.com -> zendesk.com) is a provider's, not the
+            # operator's, so neither action is planned for it.
+            apex_roots = apex_recon_roots(policy, target_binding)
+            if apex_roots:
+                add(
+                    "discover.virtual_hosts", "discover_network", "vhost.discover",
+                    {"root_domains": list(apex_roots)},
+                    dependencies=primary_dependency, supporting=True,
+                )
+                add(
+                    "discover.dns_names", "discover_network", "dns.enumerate",
+                    {"root_domains": list(apex_roots)},
+                    supporting=True,
+                )
+        replay_inputs_required = scope in {"full", "endpoint"}
+        if (
+            scope == "endpoint"
+            and bool(request_candidate_ref)
+            and policy.allow_state_changing_http
+            and (xss or sqli)
+            and not collections
+        ):
+            raise ScanActionPlanError(
+                "request verification requires immutable collection replay inputs"
+            )
+        for index, reference in enumerate(
+            collections if replay_inputs_required else ()
+        ):
+            capability_name = (
+                "collections.replay_active"
+                if reference.get("active") is True and policy.allow_state_changing_http
+                else "collections.replay_authentication"
+                if reference.get("replay_policy") == "safe_authentication"
+                else "collections.replay_safe"
+            )
+            add(
+                f"inputs.collection_{index:02d}",
+                "discover_surface",
+                capability_name,
+                {
+                    "request_collection_ref": reference,
+                    "request_manifest_ref": request_refs[
+                        str(reference["selection_digest"])
+                    ],
+                },
+                dependencies=primary_dependency,
+                required=True,
+                supporting=True,
+            )
+
+        discovery_dependencies = tuple(
+            row.action_id for row in blueprints
+            if row.stage == "discover_surface"
+            and row.capability_name not in {"subdomains.discover", "subdomains.takeover_check"}
+        )
+        candidate_dependencies = (
+            ()
+            if candidate_ref or (scope == "endpoint" and endpoint_ref)
+            else tuple(
+                item for item in ("discover.web_probe", "discover.web_crawl")
+                if any(row.action_id == item for row in blueprints)
+            )
+        )
+        active_dependencies = tuple(dict.fromkeys((
+            *primary_dependency, *candidate_dependencies,
+        )))
+
+        # The shape each compiled slice was admitted at. A lane that stepped down to a
+        # smaller tier (a parallel shard, a starved continuation round) must request that
+        # tier's reservation, not the profile's: re-deriving the cost from the profile
+        # shape used to hand a floor-tier slice the full per-candidate cost and fail the
+        # child closed at allocation.
+        slice_shapes: dict[str, tuple[int, Mapping[str, int]]] = {}
+        # An extension carries the holds its measured latency earned (see
+        # verification_extension); they are frozen per action like any other override.
+        extension_budgets: dict[str, Mapping[str, int]] = {}
+
+        def blueprint_budget(blueprint: _ActionBlueprint) -> Mapping[str, int]:
+            override = {
+                **dict(action_budgets or {}), **extension_budgets,
+            }.get(blueprint.action_id)
+            if override is not None:
+                return override
+            if blueprint.capability_name in _BATCH_CAPABILITIES:
+                shaped = slice_shapes.get(_ROUND_SUFFIX.sub("", blueprint.action_id))
+                if shaped is not None:
+                    batch_size, maximum = shaped
+                else:
+                    batch_size, maximum = batch_profile_shape(
+                        execution_plan.budget_profile,
+                        blueprint.capability_name,
+                        allow_state_changing_http=policy.allow_state_changing_http,
+                    )
+                raw_slice = blueprint.capability_args.get("slice")
+                slice_count = (
+                    int(raw_slice.get("count") or 0)
+                    if isinstance(raw_slice, Mapping) else batch_size
+                )
+                wall_floor = {
+                    # A root Scan executes the reviewed fixed seven-request
+                    # passive pack through ``templates.passive_scan``.  Its
+                    # smallest process profile is 30 seconds; scaling a
+                    # one-target manifest down to 10 seconds made ordinary
+                    # public targets deterministically report partial coverage.
+                    # Parallel children must keep the same floor: admitting a
+                    # smaller shard with a predictably incomplete required
+                    # baseline is worse than rejecting that partition budget.
+                    "templates.passive_batch": 30,
+                    "templates.active_batch": 30,
+                    "xss.verify_batch": 10,
+                    "sqli.verify_batch": 20,
+                    "xss.request_verify_batch": 10,
+                    "sqli.request_verify_batch": 10,
+                    "sqli.prove_batch": 20,
+                    "xss.browser_prove_batch": 50,
+                    "exposure.verify_batch": 15,
+                    "nosqli.verify_batch": 20,
+                    "authz_surface.verify_batch": 15,
+                    "graphql.verify_batch": 15,
+                    "redirect.verify_batch": 15,
+                    "injection.verify_batch": 20,
+                }[blueprint.capability_name]
+                budget = {
+                    name: max(
+                        wall_floor if name == "tool_wall_seconds" else 1,
+                        (int(amount) * slice_count + batch_size - 1) // batch_size,
+                    )
+                    for name, amount in maximum.items()
+                }
+                window_retry = blueprint.capability_args.get("window_retry_hold")
+                if blueprint.capability_name == "templates.active_batch" and isinstance(
+                    window_retry, Mapping,
+                ):
+                    for name, amount in window_retry.items():
+                        if name in budget and isinstance(amount, int) and amount > 0:
+                            budget[name] = int(budget[name]) + int(amount)
+                if blueprint.capability_name == "templates.passive_batch":
+                    budget["http_requests"] = max(
+                        int(budget.get("http_requests", 0)),
+                        passive_batch_request_hold(slice_count),
+                    )
+                if (
+                    blueprint.capability_name == "exposure.verify_batch"
+                    and isinstance(raw_slice, Mapping)
+                    and int(raw_slice.get("start") or 0) == 0
+                ):
+                    # The first slice also reads the whole seed list; hold it explicitly.
+                    for name, amount in exposure_first_slice_hold(
+                        slice_count, execution_plan.budget_profile,
+                    ).items():
+                        budget[name] = max(int(budget.get(name, 0)), amount)
+                if (
+                    blueprint.capability_name == "graphql.verify_batch"
+                    and isinstance(raw_slice, Mapping)
+                    and int(raw_slice.get("start") or 0) == 0
+                ):
+                    # The first slice also checks the conventional GraphQL locations.
+                    for name, amount in graphql_first_slice_hold(slice_count).items():
+                        budget[name] = max(int(budget.get(name, 0)), amount)
+                if (
+                    policy.allow_state_changing_http
+                    and blueprint.capability_name == "xss.browser_prove_batch"
+                ):
+                    budget["state_changing_requests"] = max(
+                        int(budget.get("state_changing_requests", 0)),
+                        slice_count,
+                    )
+                if (
+                    blueprint.capability_name in {
+                        "xss.verify_batch", "sqli.verify_batch",
+                        "xss.request_verify_batch", "sqli.request_verify_batch",
+                        "sqli.prove_batch", "xss.browser_prove_batch",
+                        "nosqli.verify_batch", "templates.active_batch",
+                        "injection.verify_batch",
+                    }
+                    and not policy.allow_state_changing_http
+                ):
+                    budget.pop("state_changing_requests", None)
+                if (
+                    blueprint.capability_name in {"nosqli.verify_batch", "injection.verify_batch"}
+                    and "candidate_manifest_ref" in blueprint.capability_args
+                ):
+                    budget.pop("state_changing_requests", None)
+                if budget_sufficiency(execution_plan.budget_profile) and (
+                    policy.allow_state_changing_http
+                ):
+                    # A slice holding a body candidate holds what one body attempt needs
+                    # beside its query candidates, within the tier shape it was admitted at,
+                    # so the mutation hold below can fund it. A floor-shaped lane's shape has
+                    # no room for a body attempt and is unchanged.
+                    for name, amount in slice_body_attempt_floor(
+                        blueprint.capability_name, blueprint.capability_args, body_positions,
+                    ).items():
+                        budget[name] = max(
+                            int(budget.get(name, 0)), min(int(amount), int(maximum.get(name, 0))),
+                        )
+                body_hold = (
+                    slice_body_mutation_hold(
+                        blueprint.capability_name, blueprint.capability_args,
+                        budget, body_positions,
+                    )
+                    if policy.allow_state_changing_http else None
+                )
+                if body_hold is not None:
+                    budget.pop("state_changing_requests", None)
+                    if body_hold > 0:
+                        budget["state_changing_requests"] = body_hold
+                return budget
+            specification = self._registry.require(blueprint.capability_name)
+            # Discovery decides whether every later family has work, so its
+            # reservation scales with the authority the operator granted instead
+            # of staying at the constant sized for the smallest profile.
+            scaled_discovery = scan_discovery_reservation(
+                execution_plan.budget, blueprint.capability_name,
+                registry_cost=specification.budget_cost,
+            )
+            requested = dict(scaled_discovery or specification.budget_cost)
+            if (
+                blueprint.capability_name == "http.request"
+                and blueprint.action_id == "baseline.http_redirect"
+            ):
+                requested["http_requests"] = 1 + int(
+                    blueprint.capability_args.get("max_redirects") or 0
+                )
+            if blueprint.capability_name in {
+                "collections.replay_safe", "collections.replay_authentication",
+                "collections.replay_active",
+            }:
+                reference = blueprint.capability_args.get("request_collection_ref")
+                if isinstance(reference, Mapping):
+                    request_limit = int(reference.get("max_requests") or 0)
+                    requested = {
+                        name: min(amount, request_limit)
+                        if name in {"http_requests", "state_changing_requests"}
+                        else amount
+                        for name, amount in requested.items()
+                    }
+            if blueprint.capability_name == "tls.inspect":
+                pair_count = (
+                    int(blueprint.capability_args.get("origin_count") or 0)
+                    * int(blueprint.capability_args.get("address_count") or 0)
+                )
+                # Per pair: up to four stdlib handshakes (TLS 1.2, TLS 1.3, default, trust)
+                # plus the raw legacy-protocol/weak-suite probes (tls_legacy_probe.PROBE_COUNT)
+                # when the Scan's TCP authority pays for them on every pair.
+                tcp_granted = int(getattr(execution_plan.budget, "max_tcp_ports", 0) or 0)
+                requested = {
+                    "tcp_ports_attempted": tls_connections_per_pair(tcp_granted, pair_count) * pair_count,
+                    "tool_wall_seconds": 15 * pair_count,
+                }
+            return requested
+
+        def has_manifest_work(
+            enabled: bool, reference: Mapping[str, Any],
+        ) -> bool:
+            return enabled and (
+                not reference or int(reference.get("entry_count") or 0) > 0
+            )
+
+        def add_manifest_batches(
+            base_action_id: str,
+            stage: str,
+            capability_name: str,
+            capability_args: Mapping[str, Any],
+            *,
+            manifest_ref: Mapping[str, Any],
+            dependencies: Sequence[str],
+            required: bool,
+            minimum_batches: int = 1,
+            reserve_dependency_slots: int = 0,
+        ) -> None:
+            """Compile bounded ranked slices instead of one process per candidate."""
+            required = required and require_family_minimums
+            limits = (
+                dict(ledger_limits) if ledger_limits is not None
+                else execution_plan.budget.ledger_limits()
+            )
+            reserved = {name: 0 for name in limits}
+            finalizer_budget = dict(action_budgets or {}).get(
+                "finalize.report",
+                self._registry.require("scan.finalize").budget_cost,
+            )
+            for name, amount in finalizer_budget.items():
+                reserved[name] = reserved.get(name, 0) + amount
+            for blueprint in blueprints:
+                if not blueprint.required:
+                    continue
+                for name, amount in blueprint_budget(blueprint).items():
+                    reserved[name] = reserved.get(name, 0) + amount
+            # Choose the batch shape against what is LEFT after the required work
+            # already planned, not the raw ceiling: the shortfall that failed a
+            # sharded Scan was 483 requests of a 600-request slice, i.e. the ledger
+            # was large enough until its siblings were counted.
+            entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
+            # A thorough or deep direct Scan runs every active-template window, not only the
+            # one each endpoint's manifest ordinal picks: position o runs window o on endpoint
+            # o % E (see action_adapter). The first continuation round plans the endpoints' own
+            # positions exactly as before; later rounds plan the remaining windows. Parallel
+            # shards and verify Scans keep one position per endpoint. Without state-changing
+            # HTTP the allowlist is the GET-only one, which has fewer windows.
+            planned_windows = (
+                ACTIVE_TEMPLATE_PLANNED_WINDOWS if policy.allow_state_changing_http
+                else ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS
+            )
+            window_sweep = (
+                capability_name == "templates.active_batch"
+                and active_template_windows
+                and budget_sufficiency(execution_plan.budget_profile)
+                and not shard_authority
+            )
+            work_count = (
+                planned_windows
+                if window_sweep and 0 < entry_count < planned_windows
+                else entry_count
+            )
+            planned_entries = work_count if continuation_round >= 2 else entry_count
+            manifest_offset = min(planned_entries, offsets.get(base_action_id, 0))
+            batch_size, batch_budget = _affordable_batch_tier(
+                capability_name,
+                budget_profile=execution_plan.budget_profile,
+                # A verifier lane whose remaining candidates are known to hold no body
+                # candidate is shaped for query candidates: the body-attempt expansion of
+                # its request, wall and mutation holds would fund work that cannot exist.
+                allow_state_changing_http=bool(
+                    policy.allow_state_changing_http
+                    and lane_may_hold_body_candidates(
+                        capability_name, capability_args, body_positions, manifest_offset,
+                    )
+                ),
+                batches=minimum_batches if required else 1,
+                limits={
+                    name: max(0, int(limit) - int(reserved.get(name, 0)))
+                    for name, limit in limits.items()
+                },
+            )
+            if (
+                capability_name == "templates.active_batch"
+                and continuation_round >= 2
+                and budget_sufficiency(execution_plan.budget_profile)
+                and not shard_authority
+                and policy.allow_state_changing_http
+                and int(batch_budget.get("state_changing_requests") or 0) <= 0
+            ):
+                # A later round chooses its tier against the residual. One without a mutation
+                # hold (the floor shape) would run the GET-only allowlist where the Scan's
+                # state-changing one was planned, and read as scheduled: the positions are left
+                # unscheduled instead, and the report says so.
+                return
+            remaining_entries = max(0, planned_entries - manifest_offset)
+            if continuation_round > 0 and manifest_ref and entry_count == 0:
+                # A materialized empty worklist is exhaustion, not the unknown
+                # admission surface. Do not append eight placeholder attempts.
+                return
+            if entry_count:
+                total_batches = (
+                    (remaining_entries + batch_size - 1) // batch_size
+                    if remaining_entries else 0
+                )
+            else:
+                # The candidate manifest is not materialized at admission: its
+                # entries arrive through the discovery continuation. Assuming a
+                # single batch here capped `count` at 1, so any profile whose
+                # published minimum is higher -- thorough requires two XSS
+                # batches -- failed to compile at all with
+                # "required batch action verify.xss exceeds plan graph capacity".
+                # Reserve the published minimum instead of guessing one.
+                total_batches = max(1, minimum_batches)
+            if total_batches < 1:
+                return
+            affordable = total_batches
+            for name, amount in batch_budget.items():
+                if amount > 0:
+                    available_amount = max(
+                        0, limits.get(name, 0) - reserved.get(name, 0),
+                    )
+                    affordable = min(affordable, available_amount // amount)
+            # ``affordable`` is what this plan's own ledger can actually pay for.
+            # Taking max() with the published minimum discarded that: a parallel
+            # endpoint child holds a fraction of the parent ceiling but inherits the
+            # parent's profile name, so thorough's floor of two XSS batches was
+            # forced onto a child that could fund one. The second slice is required,
+            # so the whole Scan failed closed -- "required Scan action verify.xss.001
+            # exceeds the plan budget: {'http_requests': 48}" -- rather than running
+            # the breadth it could afford. The minimum is a target for planning, not
+            # authority over a budget; ``total_batches`` below still reserves it when
+            # the candidate manifest is not yet materialized.
+            count = max(1, affordable)
+            # One lane never holds more than its share of the wall in one compile,
+            # so verifiers cannot starve the proof stage; the remaining slices are
+            # picked up from this lane's next index by the continuation rounds.
+            lane_wall = int(batch_budget.get("tool_wall_seconds") or 0)
+            if lane_wall > 0:
+                # The share is of the frozen profile wall: a continuation round of a thorough
+                # or deep Scan is compiled against what is left (``ledger_limits``), and its
+                # lanes must not shrink round after round as the residual does.
+                lane_wall_limit = (
+                    execution_plan.budget.ledger_limits()["tool_wall_seconds"]
+                    if budget_sufficiency(execution_plan.budget_profile) and not shard_authority
+                    else limits.get("tool_wall_seconds", 0)
+                )
+                lane_cap = int((int(lane_wall_limit) * _LANE_WALL_SHARE) // lane_wall)
+                count = min(count, max(minimum_batches, 1, lane_cap))
+            count = min(
+                total_batches,
+                count,
+                32,
+                max(0, _MAX_DEPENDENCIES - len(blueprints) - reserve_dependency_slots),
+            )
+            # minimum_batches is the profile's published intent when there is
+            # enough work, not a floor that can fail a scan for finding too few
+            # candidates. thorough asks for two XSS batches; a target that
+            # yields one batch of candidates has still run the family, and
+            # failing there is why no thorough scan could complete. Fail only
+            # when the plan cannot fit the batches the work actually needs.
+            # Budget shortage degrades; only graph capacity fails. Comparing
+            # against the published minimum alone conflated the two once
+            # affordability bounded ``count``: a child that could fund one batch
+            # tripped a check meant for dependency-slot exhaustion.
+            if required and count < min(minimum_batches, total_batches, max(1, affordable)):
+                raise ScanActionPlanError(
+                    f"required batch action {base_action_id} exceeds plan graph capacity"
+                )
+            # A slice of further template windows also holds one retry of a window its wall
+            # cut off, from what the ledger has left once this lane's slices are paid. So does
+            # a later round's slice on a host with as many endpoints as windows: its positions
+            # are the endpoints' own, and they run the same windows. The first round's slices
+            # are planned as before and retry from what their other windows leave.
+            later_window_slices = (
+                window_sweep and work_count == entry_count and continuation_round >= 2
+            )
+            window_retry = (
+                window_retry_hold(batch_budget, limits=limits, reserved=reserved, slices=count)
+                if work_count != entry_count or later_window_slices else {}
+            )
+            for batch_index in range(count):
+                start = manifest_offset + batch_index * batch_size
+                slice_count = (
+                    min(batch_size, max(0, planned_entries - start))
+                    if entry_count else 1
+                )
+                slice_id = (
+                    base_action_id if batch_index == 0 else f"{base_action_id}.{batch_index:03d}"
+                )
+                slice_shapes[slice_id] = (batch_size, batch_budget)
+                add(
+                    slice_id,
+                    stage,
+                    capability_name,
+                    {
+                        **dict(capability_args),
+                        "slice": {"start": start, "count": slice_count},
+                        **(
+                            {"continuation_work_key": base_action_id}
+                            if continuation_round > 0 else {}
+                        ),
+                        # The manifest's full size, carried so completeness can be measured against
+                        # the work that EXISTS rather than the work that was scheduled. Budget
+                        # affordability, the batch ceiling and graph capacity can all cut `count`
+                        # below `total_batches`; without this the finalizer compares attempts with
+                        # scheduled slices and reports complete coverage over a truncated plan.
+                        "manifest_entries": int(work_count),
+                        # Positions past the endpoints run further template windows on them.
+                        **(
+                            {"endpoint_entries": int(entry_count)}
+                            if work_count != entry_count else {}
+                        ),
+                        **(
+                            {"window_retry_hold": dict(window_retry)}
+                            if window_retry and (later_window_slices or start >= entry_count)
+                            else {}
+                        ),
+                        "scheduled_batches": int(count),
+                        "total_batches": int(total_batches),
+                        "profile": f"{execution_plan.budget_profile}_batch_v1",
+                        "proof_policy": (
+                            "deterministic_differential_required"
+                            if capability_name == "sqli.verify_batch"
+                            else "deterministic_proof_contract_required"
+                        ),
+                    },
+                    dependencies=dependencies,
+                    required=required and batch_index < minimum_batches,
+                )
+
+        authz_will_run = (
+            scope in {"full", "endpoint"}
+            and bola
+            and {"primary", "secondary"} <= set(lane_refs)
+            and continuation_round <= 1
+        )
+        if scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions:
+            add_manifest_batches(
+                "passive.templates",
+                "deterministic_baseline",
+                "templates.passive_batch",
+                {
+                    "target_ref": "canonical_origin",
+                    **(
+                        {"target_manifest_ref": endpoint_ref}
+                        if endpoint_ref else {}
+                    ),
+                    "template_manifest_ref": template_ref,
+                },
+                manifest_ref=endpoint_ref,
+                # The reviewed GET-only pack is executable against the frozen
+                # canonical origin. Optional crawl/content breadth must not be
+                # able to block this required passive baseline.
+                dependencies=primary_dependency,
+                required=True,
+                reserve_dependency_slots=(
+                    int(active_nuclei and not defer_manifest_actions)
+                    + int(has_manifest_work(xss, candidate_ref))
+                    + int(has_manifest_work(sqli, candidate_ref))
+                    + int(authz_will_run)
+                ),
+            )
+        if scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions:
+            add_manifest_batches(
+                "active.templates",
+                "deterministic_active",
+                "templates.active_batch",
+                {
+                    "target_manifest_ref": endpoint_ref or "discover.web_crawl",
+                    "template_manifest_ref": template_ref or None,
+                },
+                manifest_ref=endpoint_ref,
+                dependencies=active_dependencies,
+                required="nuclei_active" in explicitly_requested,
+                reserve_dependency_slots=(
+                    int(has_manifest_work(xss, candidate_ref))
+                    + int(has_manifest_work(sqli, candidate_ref))
+                    + int(authz_will_run)
+                ),
+            )
+        if scope in {"full", "endpoint"} and xss and not defer_manifest_actions:
+            xss_verify_start = len(blueprints)
+            add_manifest_batches(
+                "verify.xss",
+                "verify_candidates",
+                "xss.verify_batch",
+                {
+                    "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                    "endpoint_manifest_ref": endpoint_ref or None,
+                },
+                manifest_ref=candidate_ref,
+                dependencies=active_dependencies,
+                required="xss" in explicitly_requested,
+                minimum_batches=(
+                    2 if execution_plan.budget_profile in {"thorough", "deep"} else 1
+                ),
+                reserve_dependency_slots=(
+                    int(has_manifest_work(sqli, candidate_ref))
+                    + int(authz_will_run) + 1
+                ),
+            )
+            xss_verify_dependencies = tuple(
+                row.action_id for row in blueprints[xss_verify_start:]
+                if row.capability_name == "xss.verify_batch"
+            )
+            if xss_verify_dependencies:
+                add_manifest_batches(
+                    "prove.xss",
+                    "prove_candidates",
+                    "xss.browser_prove_batch",
+                    {
+                        "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                        "endpoint_manifest_ref": endpoint_ref or None,
+                    },
+                    manifest_ref=candidate_ref,
+                    dependencies=xss_verify_dependencies,
+                    # Browser proof consumes ``browser_actions``, a backbone-only
+                    # budget: parallel endpoint shards structurally carry none, so a
+                    # strictly-required browser proof would make every sharded active
+                    # XSS scan un-plannable. It stays a best-effort escalation that
+                    # still compiles and runs whenever browser budget exists (always
+                    # in the single-worker authoritative path), and degrades to a
+                    # coverage gap in a shard that cannot fund a browser.
+                    required=False,
+                    minimum_batches=1,
+                    reserve_dependency_slots=(
+                        int(has_manifest_work(sqli, candidate_ref))
+                        + int(authz_will_run)
+                    ),
+                )
+        if scope in {"full", "endpoint"} and sqli and not defer_manifest_actions:
+            sqli_verify_start = len(blueprints)
+            add_manifest_batches(
+                "verify.sqli",
+                "verify_candidates",
+                "sqli.verify_batch",
+                {
+                    "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                    "endpoint_manifest_ref": endpoint_ref or None,
+                    # How many of the slice's candidates may run at once: the Scan's worker
+                    # ceiling, bounded again by the slice's pacing contract when it runs.
+                    CANDIDATE_CONCURRENCY_ARG: planned_candidate_concurrency(
+                        execution_plan.budget.max_workers,
+                    ),
+                },
+                manifest_ref=candidate_ref,
+                dependencies=active_dependencies,
+                required="sqli" in explicitly_requested,
+                minimum_batches=(
+                    2 if execution_plan.budget_profile in {"thorough", "deep"} else 1
+                ),
+                reserve_dependency_slots=int(authz_will_run) + 1,
+            )
+            sqli_verify_dependencies = tuple(
+                row.action_id for row in blueprints[sqli_verify_start:]
+                if row.capability_name == "sqli.verify_batch"
+            )
+            if sqli_verify_dependencies:
+                add_manifest_batches(
+                    "prove.sqli",
+                    "prove_candidates",
+                    "sqli.prove_batch",
+                    {
+                        "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                        "endpoint_manifest_ref": endpoint_ref or None,
+                    },
+                    manifest_ref=candidate_ref,
+                    dependencies=sqli_verify_dependencies,
+                    required="sqli" in explicitly_requested,
+                    minimum_batches=1,
+                    reserve_dependency_slots=int(authz_will_run),
+                )
+        if (
+            scope in {"full", "endpoint"}
+            and sensitive_exposure
+            and not defer_manifest_actions
+        ):
+            add_manifest_batches(
+                "verify.exposure",
+                "verify_candidates",
+                "exposure.verify_batch",
+                {"endpoint_manifest_ref": endpoint_ref or None},
+                manifest_ref=endpoint_ref,
+                dependencies=active_dependencies,
+                # Required only when the operator named the family. From a preset it is
+                # best-effort: a parallel shard or tight ledger that cannot fund the seed
+                # sweep skips it with a reason code instead of rejecting the whole plan.
+                required="sensitive_exposure" in set(execution_plan.requested_families or ()),
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
+        if scope in {"full", "endpoint"} and nosqli and not defer_manifest_actions:
+            add_manifest_batches(
+                "verify.nosqli",
+                "verify_candidates",
+                "nosqli.verify_batch",
+                {
+                    "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                    "endpoint_manifest_ref": endpoint_ref or None,
+                },
+                manifest_ref=candidate_ref,
+                dependencies=active_dependencies,
+                required="nosqli" in explicitly_requested,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
+        if scope in {"full", "endpoint"} and server_injection and not defer_manifest_actions:
+            add_manifest_batches(
+                "verify.server_injection",
+                "verify_candidates",
+                "injection.verify_batch",
+                {
+                    "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                    "endpoint_manifest_ref": endpoint_ref or None,
+                },
+                manifest_ref=candidate_ref,
+                dependencies=active_dependencies,
+                required="server_injection" in explicitly_requested,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
+        if scope in {"full", "endpoint"} and graphql and not defer_manifest_actions:
+            add_manifest_batches(
+                "verify.graphql",
+                "verify_candidates",
+                "graphql.verify_batch",
+                {"endpoint_manifest_ref": endpoint_ref or None},
+                manifest_ref=endpoint_ref,
+                dependencies=active_dependencies,
+                required="graphql" in explicitly_requested,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
+        if scope in {"full", "endpoint"} and xss and not defer_manifest_actions:
+            # Open redirects ride the XSS family's authority: both test how the application
+            # uses a request parameter it reflects (into the page, into a Location header), and
+            # both read the same discovered query parameters. Best-effort, never required.
+            add_manifest_batches(
+                "verify.redirect",
+                "verify_candidates",
+                "redirect.verify_batch",
+                {"endpoint_manifest_ref": endpoint_ref or None},
+                manifest_ref=endpoint_ref,
+                dependencies=active_dependencies,
+                required=False,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
+        authz_surface_will_run = (
+            scope in {"full", "endpoint"}
+            and authz_surface
+            and "primary" in lane_refs
+            and not defer_manifest_actions
+        )
+        if authz_surface_will_run:
+            # BFLA proof needs an authenticated principal to contrast against the
+            # anonymous lane; without primary auth the family cannot run.
+            add_manifest_batches(
+                "verify.authz_surface",
+                "verify_candidates",
+                "authz_surface.verify_batch",
+                {"endpoint_manifest_ref": endpoint_ref or None},
+                manifest_ref=endpoint_ref,
+                dependencies=tuple(dict.fromkeys((
+                    *primary_dependency,
+                    *(() if endpoint_ref else discovery_dependencies),
+                ))),
+                required="authz_surface" in explicitly_requested,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
+        private_request_dependencies = tuple(
+            row.action_id for row in blueprints
+            if row.action_id.startswith("inputs.collection_")
+        )
+        if (
+            scope in {"full", "endpoint"}
+            and policy.active_testing
+            and not defer_manifest_actions
+            and request_candidate_ref
+        ):
+            if xss:
+                add_manifest_batches(
+                    "verify.request_xss",
+                    "verify_candidates",
+                    "xss.request_verify_batch",
+                    {"request_candidate_manifest_ref": request_candidate_ref},
+                    manifest_ref=request_candidate_ref,
+                    dependencies=tuple(dict.fromkeys((
+                        *primary_dependency, *private_request_dependencies,
+                    ))),
+                    required=False,
+                    reserve_dependency_slots=int(sqli),
+                )
+            if sqli:
+                request_sqli_start = len(blueprints)
+                add_manifest_batches(
+                    "verify.request_sqli",
+                    "verify_candidates",
+                    "sqli.request_verify_batch",
+                    {"request_candidate_manifest_ref": request_candidate_ref},
+                    manifest_ref=request_candidate_ref,
+                    dependencies=tuple(dict.fromkeys((
+                        *primary_dependency, *private_request_dependencies,
+                    ))),
+                    required=False,
+                    reserve_dependency_slots=1,
+                )
+                request_sqli_dependencies = tuple(
+                    row.action_id for row in blueprints[request_sqli_start:]
+                    if row.capability_name == "sqli.request_verify_batch"
+                )
+                if request_sqli_dependencies:
+                    add_manifest_batches(
+                        "prove.request_sqli",
+                        "prove_candidates",
+                        "sqli.prove_batch",
+                        {"request_candidate_manifest_ref": request_candidate_ref},
+                        manifest_ref=request_candidate_ref,
+                        dependencies=tuple(dict.fromkeys((
+                            *private_request_dependencies,
+                            *request_sqli_dependencies,
+                        ))),
+                        required=False,
+                    )
+            if nosqli:
+                add_manifest_batches(
+                    "verify.request_nosqli",
+                    "verify_candidates",
+                    "nosqli.verify_batch",
+                    {"request_candidate_manifest_ref": request_candidate_ref},
+                    manifest_ref=request_candidate_ref,
+                    dependencies=tuple(dict.fromkeys((
+                        *primary_dependency, *private_request_dependencies,
+                    ))),
+                    required=False,
+                )
+            if server_injection:
+                add_manifest_batches(
+                    "verify.request_server_injection",
+                    "verify_candidates",
+                    "injection.verify_batch",
+                    {"request_candidate_manifest_ref": request_candidate_ref},
+                    manifest_ref=request_candidate_ref,
+                    dependencies=tuple(dict.fromkeys((
+                        *primary_dependency, *private_request_dependencies,
+                    ))),
+                    required=False,
+                )
+        if authz_will_run and not defer_manifest_actions:
+            add(
+                "verify.authz",
+                "verify_candidates",
+                "authz.verify",
+                {"principal_lanes": ["primary", "secondary"], "endpoint_manifest_ref": endpoint_ref or None},
+                dependencies=tuple(dict.fromkeys((
+                    *auth_dependencies,
+                    *(() if endpoint_ref else discovery_dependencies),
+                ))),
+                required="bola" in explicitly_requested,
+            )
+
+        if verification_extensions and (scope != "endpoint" or continuation_round < 2):
+            raise ScanActionPlanError(
+                "verification extensions belong to a later continuation round"
+            )
+        for extension in verification_extensions:
+            add(
+                _token(extension.get("action_id"), name="extension action"),
+                str(extension.get("stage") or "verify_candidates"),
+                str(extension.get("capability_name") or ""),
+                dict(extension.get("capability_args") or {}),
+                dependencies=tuple(extension.get("dependencies") or ()),
+                required=False,
+            )
+            extension_budgets[blueprints[-1].action_id] = {
+                str(name): int(amount)
+                for name, amount in dict(extension.get("budget") or {}).items()
+            }
+
+        if include_finalizer:
+            add(
+                "finalize.report",
+                "finalize_evidence",
+                "scan.finalize",
+                {"report_only": True},
+                dependencies=tuple(row.action_id for row in blueprints),
+                required=True,
+            )
+
+        stage_order = {
+            name: index for index, name in enumerate((
+                "bind_target", "resolve_inputs", "discover_surface", "discover_network",
+                "deterministic_baseline", "deterministic_active", "verify_candidates",
+                "prove_candidates", "finalize_evidence",
+            ))
+        }
+        # Cheap read-only verifiers run ahead of the active batches. An exposure attempt costs
+        # about five requests and a GraphQL one a single request, while active templates and
+        # injection verification take most of a Scan's wall; ordered after them, the cheap
+        # verifiers were still waiting when a Scan reached its time limit and never started (lab,
+        # release/2.11.0: juice-shop and VAmPI lost every exposure proof). They keep their stage;
+        # only their turn moves ahead of deterministic_active.
+        cheap_first = {"exposure.verify_batch", "graphql.verify_batch"}
+        blueprints.sort(key=lambda row: (
+            stage_order["deterministic_active"] - 0.5
+            if row.stage == "verify_candidates" and row.capability_name in cheap_first
+            else stage_order[row.stage]
+        ))
+        blueprints = with_authentication_health(blueprints, credentials, self._registry)
+        if any("authentication_profile_ref" in ref for ref in credentials):
+            if "local" not in backends:
+                raise ScanActionPlacementError("authenticated profile health requires a local worker")
+            backends = ("local",)
+
+        override_budgets = dict(action_budgets or {})
+        known_action_ids = {row.action_id for row in blueprints}
+        unknown_allocations = set(override_budgets) - known_action_ids
+        if unknown_allocations:
+            raise ScanActionPlanError(
+                "action budget allocation contains unknown actions: "
+                + ", ".join(sorted(unknown_allocations))
+            )
+        global_bindings = {
+            "execution_plan_digest": execution_plan.digest,
+            "target_binding_digest": target_binding.digest,
+            "credential_profile_refs": list(credentials),
+            "request_collection_refs": list(collections),
+            "request_manifest_refs": request_refs,
+            "endpoint_manifest_ref": endpoint_ref,
+            "candidate_manifest_ref": candidate_ref,
+            "request_candidate_manifest_ref": request_candidate_ref,
+            "template_manifest_ref": template_ref,
+            "authority_refs": authority,
+            "shard_authority": shard,
+            "action_scope": scope,
+            "defer_manifest_actions": defer_manifest_actions,
+            "include_finalizer": include_finalizer,
+        }
+        actions: list[ScanAction] = []
+        for ordinal, blueprint in enumerate(blueprints):
+            try:
+                specification = self._registry.require(blueprint.capability_name)
+            except KeyError as exc:
+                raise ScanActionPlanError(
+                    f"action capability is absent from the canonical registry: {blueprint.capability_name}"
+                ) from exc
+            if target_binding.target_kind not in specification.target_kinds:
+                raise ScanActionPlanError(
+                    f"{blueprint.capability_name} does not support target kind {target_binding.target_kind}"
+                )
+            if available is not None and blueprint.capability_name not in available:
+                raise ScanActionPlacementError(
+                    f"placement cannot execute capability {blueprint.capability_name}"
+                )
+            if (
+                (blueprint.capability_name in _BATCH_CAPABILITIES
+                 or specification.placement_requirements.get("local_worker_only"))
+                and "local" not in backends
+            ):
+                raise ScanActionPlacementError(
+                    f"{blueprint.capability_name} requires the single-worker local adapter"
+                )
+            requested = blueprint_budget(blueprint)
+            action_bindings = {
+                **global_bindings,
+                "action_id": blueprint.action_id,
+                "capability_args": blueprint.capability_args,
+            }
+            placement = {
+                "schema_version": "scan-action-placement/v1",
+                "eligible_backends": list(
+                    ("local",)
+                    if (blueprint.capability_name in _BATCH_CAPABILITIES
+                        or specification.placement_requirements.get("local_worker_only"))
+                    else backends
+                ),
+                "requirements": dict(specification.placement_requirements),
+                "adapter_name": specification.adapter,
+                "adapter_version": specification.adapter_version,
+            }
+            actions.append(ScanAction(
+                action_id=blueprint.action_id,
+                stage=blueprint.stage,
+                ordinal=ordinal,
+                capability_name=blueprint.capability_name,
+                capability_args=blueprint.capability_args,
+                target_binding_digest=target_binding.digest,
+                input_binding_digest=digest_input_bindings(action_bindings),
+                requested_budget=requested,
+                placement=placement,
+                dependencies=blueprint.dependencies,
+                required=blueprint.required,
+                supporting=blueprint.supporting,
+                output_schema=specification.output_schema,
+            ))
+        return ScanActionPlan(
+            scan_id=scan_id,
+            execution_plan_digest=execution_plan.digest,
+            target_binding_digest=target_binding.digest,
+            actions=tuple(actions),
+        )

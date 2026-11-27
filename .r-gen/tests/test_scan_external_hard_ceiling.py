@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+import asyncio
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
+sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *_args, **_kwargs: None))
+
+import agent_tools
+import external_wire_acceptance
+import worker
+
+
+def test_external_execution_contract_requires_a_hard_reserved_wire_limit():
+    plan = agent_tools.build_enforced_scanner_plan(
+        "katana",
+        "https://app.example.test/",
+        {},
+        reserved_budget={"http_requests": 3, "tool_wall_seconds": 5},
+        pinned_address="192.0.2.1",
+        pinned_proxy_url="socks5://127.0.0.1:41000",
+    )
+
+    assert plan.hard_budget_dict["http_requests"] == 3
+    assert plan.budget_proof["method"] == "rate_time_upper_bound"
+    assert plan.argv[plan.argv.index("-rate-limit") + 1] == "1"
+
+
+def test_broker_external_process_uses_lease_cancel_file_without_redis(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_BROKER_LEASE", "1")
+    monkeypatch.setattr(
+        worker,
+        "get_redis",
+        lambda: (_ for _ in ()).throw(AssertionError("broker touched Redis")),
+    )
+
+    result = asyncio.run(worker._execute_agent_scanner_process({
+        "job_id": "broker-action-1",
+        "tool_name": "httpx",
+        "execution_target": "not-an-http-url",
+        "registered_target": "https://app.example.test",
+        "scanner_options": {},
+        "_reserved_budget": {"http_requests": 1, "tool_wall_seconds": 1},
+        "pinned_address": "192.0.2.10",
+        "authorized_addresses": ["192.0.2.10"],
+    }))
+
+    assert result["status"] == "failed"
+    assert str(result["error"]).startswith("contract:")
+
+
+@pytest.mark.parametrize(
+    ("tool", "reservation", "options", "runtime", "method"),
+    [
+        ("httpx", {"http_requests": 1, "tool_wall_seconds": 10}, {}, {}, "exact_request_count"),
+        ("katana", {"http_requests": 3, "tool_wall_seconds": 2}, {}, {}, "rate_time_upper_bound"),
+        (
+            "ffuf", {"http_requests": 3, "tool_wall_seconds": 10}, {},
+            {"ffuf_wordlist": "/tmp/bounded.txt", "ffuf_word_count": 3},
+            "exact_wordlist",
+        ),
+        (
+            "nuclei", {"http_requests": 7, "tool_wall_seconds": 30},
+            {
+                "template_ids": agent_tools._CANONICAL_PASSIVE_NUCLEI_IDS,
+                "template_request_cost_upper_bound": (
+                    agent_tools.canonical_passive_nuclei_request_upper_bound()
+                ),
+            }, {}, "reviewed_template_allowlist",
+        ),
+        # Reserved at the tool's own declared floor for the fixed conservative
+        # profile, so raising the floor cannot silently leave this below it.
+        (
+            "dalfox", dict(agent_tools.EXTERNAL_VERIFICATION_FLOORS["dalfox"]),
+            {}, {}, "fixed_conservative_profile",
+        ),
+        (
+            "sqlmap", dict(agent_tools.EXTERNAL_VERIFICATION_FLOORS["sqlmap"]), {},
+            {"sqlmap_output_dir": "/tmp/shakerscan-wire-sqlmap"},
+            "fixed_conservative_profile",
+        ),
+        (
+            "nmap", {"tcp_ports_attempted": 60, "tool_wall_seconds": 10},
+            {}, {}, "version_probe_upper_bound",
+        ),
+        ("naabu", {"tcp_ports_attempted": 200, "tool_wall_seconds": 10}, {}, {}, "port_retry_upper_bound"),
+    ],
+)
+def test_every_external_adapter_has_a_prelaunch_wire_proof(
+    tool, reservation, options, runtime, method,
+):
+    plan = agent_tools.build_enforced_scanner_plan(
+        tool,
+        "http://app.example.test:8080/",
+        options,
+        reserved_budget=reservation,
+        pinned_address="192.0.2.10",
+        pinned_proxy_url=(
+            None if tool in {"nmap", "naabu"}
+            else "socks5://127.0.0.1:41000"
+        ),
+        runtime_paths=runtime,
+    )
+
+    assert plan.budget_proof["method"] == method
+    assert plan.budget_proof["upper_bound"] == plan.hard_budget_dict
+    assert all(
+        amount <= reservation[name]
+        for name, amount in plan.hard_budget_dict.items()
+    )
+    assert plan.timeout_ms <= reservation["tool_wall_seconds"] * 1_000
+
+
+def test_release_wire_gate_cases_have_prelaunch_enforcement_plans():
+    """Keep the live candidate gate aligned with the authoritative builder."""
+    for case in external_wire_acceptance.TOOL_CASES:
+        tool = str(case["tool"])
+        runtime = {}
+        if tool == "ffuf":
+            runtime = {
+                "ffuf_wordlist": "/tmp/shakerscan-wire-wordlist.txt",
+                "ffuf_word_count": int(case["budget"]["http_requests"]),
+            }
+        elif tool == "sqlmap":
+            runtime = {"sqlmap_output_dir": "/tmp/shakerscan-wire-sqlmap"}
+        plan = agent_tools.build_enforced_scanner_plan(
+            tool,
+            f"http://app.example.test:8080{case['path']}",
+            dict(case.get("options") or {}),
+            reserved_budget=dict(case["budget"]),
+            pinned_address="192.0.2.10",
+            pinned_proxy_url=(
+                None if tool in {"nmap", "naabu"}
+                else "socks5://127.0.0.1:41000"
+            ),
+            runtime_paths=runtime,
+        )
+
+        assert plan.enforcement_receipt()["hard_budget"]
+        assert all(
+            amount <= int(case["budget"][name])
+            for name, amount in plan.hard_budget_dict.items()
+        )
+        if tool in {"dalfox", "sqlmap"}:
+            assert plan.budget_proof["inputs"]["profile"] == "batch_attempt"
+
+
+@pytest.mark.parametrize(
+    ("tool", "reservation"),
+    [
+        ("httpx", {"tool_wall_seconds": 10}),
+        ("katana", {"http_requests": 1, "tool_wall_seconds": 10}),
+        ("katana", {"http_requests": 2, "tool_wall_seconds": 1}),
+        ("nuclei", {"tool_wall_seconds": 10}),
+        ("dalfox", {"http_requests": 1, "tool_wall_seconds": 10}),
+        ("sqlmap", {"http_requests": 1, "tool_wall_seconds": 10}),
+        ("nmap", {"tcp_ports_attempted": 59, "tool_wall_seconds": 10}),
+        ("naabu", {"tcp_ports_attempted": 199, "tool_wall_seconds": 10}),
+    ],
+)
+def test_external_adapter_refuses_to_start_below_provable_minimum(tool, reservation):
+    with pytest.raises(agent_tools.AgentToolError):
+        agent_tools.build_enforced_scanner_plan(
+            tool,
+            "http://app.example.test:8080/",
+            {},
+            reserved_budget=reservation,
+            pinned_address="192.0.2.10",
+            pinned_proxy_url=(
+                None if tool in {"nmap", "naabu"}
+                else "socks5://127.0.0.1:41000"
+            ),
+            runtime_paths={"sqlmap_output_dir": "/tmp/sqlmap"},
+        )
+
+
+def test_wire_gate_rejects_a_failed_or_zero_traffic_http_adapter():
+    base_result = {
+        "status": "success",
+        "process_enforcement": {
+            "schema_version": "external-process-enforcement/v1",
+            "hard_budget": {"http_requests": 1, "tool_wall_seconds": 10},
+        },
+    }
+    with pytest.raises(RuntimeError, match="did not execute successfully"):
+        external_wire_acceptance._assert_wire_bound(
+            tool="nuclei",
+            result={**base_result, "status": "failed", "error": "no templates"},
+            traffic={"traffic": [], "connections": 0},
+        )
+    with pytest.raises(RuntimeError, match="no target-observed HTTP traffic"):
+        external_wire_acceptance._assert_wire_bound(
+            tool="nuclei", result=base_result,
+            traffic={"traffic": [], "connections": 0},
+        )
+
+
+def test_wire_gate_accepts_a_fired_connection_limiter_as_a_bounded_pass():
+    # The pinned proxy stopping a tool at its connection ceiling is the egress
+    # ceiling working, not a tool failure; it must pass as a limiter-triggered case.
+    result = {
+        "status": "failed",
+        "error": "connection_limit_exceeded",
+        "process_enforcement": {
+            "schema_version": "external-process-enforcement/v1",
+            "hard_budget": {"http_requests": 11, "tool_wall_seconds": 10},
+        },
+    }
+    case = external_wire_acceptance._assert_wire_bound(
+        tool="dalfox", result=result,
+        traffic={"traffic": [{"u": i} for i in range(11)], "connections": 11},
+    )
+    assert case["status"] == "failed" and case["limiter_triggered"] is True
+    # Traffic that actually leaked past the ceiling is still a hard failure.
+    with pytest.raises(RuntimeError, match="connection ceiling"):
+        external_wire_acceptance._assert_wire_bound(
+            tool="dalfox", result=result,
+            traffic={"traffic": [{"u": i} for i in range(11)], "connections": 99},
+        )
+
+
+def test_crawl_spends_its_reserved_request_budget():
+    """A reserved crawl budget must actually be usable.
+
+    The enforced plan forced rate-limit 1, so a crawl reserving 150 requests
+    emitted about 31 and discarded the rest. Against a single-page application
+    that returned paths with no query parameters, which meant candidate
+    generation produced nothing and every selected active family had no work to
+    do -- a scan that completed while testing nothing.
+    """
+    reservation = {"http_requests": 150, "tool_wall_seconds": 75}
+    plan = agent_tools.build_enforced_scanner_plan(
+        "katana",
+        "http://app.example.test:8080/",
+        {},
+        reserved_budget=reservation,
+        pinned_address="192.0.2.10",
+        pinned_proxy_url="socks5://127.0.0.1:41000",
+    )
+    hard = plan.hard_budget_dict
+    # Never exceed the reservation...
+    for name, amount in hard.items():
+        assert amount <= reservation[name], (name, amount, reservation[name])
+    # ...but actually use most of it. A crawl that spends a fifth of its budget
+    # cannot enumerate a real application.
+    assert hard["http_requests"] >= reservation["http_requests"] // 2, hard
+    assert plan.budget_proof["inputs"]["rate_per_second"] > 1
+
+    # A tiny reservation must still degrade safely rather than overspend.
+    small = {"http_requests": 2, "tool_wall_seconds": 10}
+    small_plan = agent_tools.build_enforced_scanner_plan(
+        "katana",
+        "http://app.example.test:8080/",
+        {},
+        reserved_budget=small,
+        pinned_address="192.0.2.10",
+        pinned_proxy_url="socks5://127.0.0.1:41000",
+    )
+    for name, amount in small_plan.hard_budget_dict.items():
+        assert amount <= small[name], (name, amount, small[name])
+
+
+def test_release_wire_gate_runs_an_active_nuclei_attempt_with_both_ceilings(monkeypatch):
+    """The active template batch had no wire case. The gate now resolves the reviewed active
+    allowlist from the image's pinned bundle (here: the fixture templates) with state-changing
+    HTTP authorized, and the launch plan bounds HTTP and state-changing requests by the
+    per-endpoint reservation a Scan uses."""
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "nuclei_templates"
+    monkeypatch.setattr(external_wire_acceptance, "nuclei_templates_directory", lambda: str(fixtures))
+    case = external_wire_acceptance.active_nuclei_case()
+    assert case["case"] == "nuclei_active"
+    assert case["options"]["template_profile"] == "active"
+    assert case["budget"] == {
+        "http_requests": 120, "state_changing_requests": 120, "tool_wall_seconds": 45,
+    }
+    plan = agent_tools.build_enforced_scanner_plan(
+        "nuclei", "http://app.example.test:8080/", dict(case["options"]),
+        reserved_budget=dict(case["budget"]), pinned_address="192.0.2.10",
+        pinned_proxy_url="socks5://127.0.0.1:41000", runtime_paths={},
+    )
+    hard = plan.hard_budget_dict
+    assert 0 < hard["http_requests"] <= 120
+    if case["options"]["nuclei_active_state_changing"]:
+        assert 0 < hard["state_changing_requests"] <= hard["http_requests"]
+    assert "-id" in plan.argv
+
+
+def test_the_active_wire_case_fails_closed_without_a_template_index(monkeypatch, tmp_path):
+    monkeypatch.setattr(external_wire_acceptance, "nuclei_templates_directory", lambda: str(tmp_path))
+    with pytest.raises(RuntimeError, match="did not resolve"):
+        external_wire_acceptance.active_nuclei_case()

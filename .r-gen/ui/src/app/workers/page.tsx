@@ -1,0 +1,101 @@
+'use client'
+
+import { useCallback, useEffect, useState } from 'react'
+import { Button, Card, ErrorState, LastUpdated, PageHeader } from '@/components/ui'
+import { getWorkers, type WorkerStats } from '@/lib/api'
+import { poolBadge, poolDetail } from '@/lib/workerPools.mjs'
+import { usePoll } from '@/lib/usePoll'
+
+const REFRESH_MS = 10_000
+const POOLS: { key: keyof NonNullable<WorkerStats['pools']>; label: string; detail: string; optIn?: boolean }[] = [
+  { key: 'web_dast', label: 'Web DAST', detail: 'Deterministic Scan execution and verification' },
+  { key: 'agent_tool', label: 'Agent tools', detail: 'Isolated process capabilities used by Hunt' },
+  { key: 'device', label: 'Network scanning', detail: 'Dedicated capacity for network and device examination' },
+  { key: 'model_intake', label: 'Model Intake', detail: 'Dedicated artifact inspection toolchain' },
+]
+
+export default function WorkersPage() {
+  const [workers, setWorkers] = useState<WorkerStats | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
+
+  const load = useCallback(async (background = false) => {
+    if (background) setRefreshing(true)
+    else setLoading(true)
+    try {
+      const response = await getWorkers()
+      setWorkers(response)
+      setError(response.error || null)
+      setUpdatedAt(new Date())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Worker pools unavailable')
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+  // Quiet refresh every 10 s after the first load; paused in a hidden tab.
+  usePoll(() => load(true), { intervalMs: REFRESH_MS, leading: false, deps: [load] })
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        title="Worker Pools"
+        description="Readiness is tracked independently for every release image and execution boundary."
+        actions={<Button variant="secondary" size="sm" onClick={() => void load(true)} loading={refreshing}>Refresh</Button>}
+      />
+
+      {error && <ErrorState message={error} onRetry={() => void load()} />}
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {POOLS.map(({ key, label, detail, optIn }) => {
+          const pool = workers?.pools?.[key]
+          const badge = pool ? poolBadge(pool, optIn) : null
+          return (
+            <Card key={key} className="p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="font-medium text-white">{label}</h2>
+                  <p className="mt-1 text-xs text-gray-500">{detail}</p>
+                </div>
+                <span className={`rounded-sm px-2 py-1 text-xs font-medium ${badge ? badge.className : 'bg-gray-800 text-gray-400'}`}>
+                  {loading && !pool ? 'loading' : badge?.text || 'unknown'}
+                </span>
+              </div>
+              <dl className="mt-5 grid grid-cols-4 gap-2 text-center">
+                {([
+                  ['Total', pool?.count],
+                  ['Current', pool?.current],
+                  ['Stale', pool?.stale],
+                  ['Pending', pool?.pending],
+                ] as const).map(([name, value]) => (
+                  <div key={name}>
+                    <dt className="text-[10px] uppercase tracking-wide text-gray-600">{name}</dt>
+                    <dd className="mt-1 font-mono text-lg text-gray-200">{value ?? '—'}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="mt-4 border-t border-gray-800 pt-3 text-xs text-gray-500">
+                {pool ? poolDetail(pool) : 'Waiting for the pool summary.'}
+              </p>
+            </Card>
+          )
+        })}
+      </div>
+
+      <Card className="p-4 text-sm text-gray-400">
+        <p>
+          The Web DAST pool remains the source of the legacy worker count and build-fingerprint fields.
+          Specialized pools use fresh heartbeats and capability checks, so a running container is not
+          counted as current until it reports the expected release identity and required tools.
+        </p>
+      </Card>
+
+      <LastUpdated updatedAt={updatedAt} onRefresh={() => void load(true)} refreshing={refreshing} />
+    </div>
+  )
+}

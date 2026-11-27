@@ -589,6 +589,7 @@ def _hunt_start_payload(args: argparse.Namespace, contract: Mapping[str, Any]) -
             "allow_state_changing_http": bool(args.allow_state_changing_http),
             "network_discovery": bool(args.network_discovery),
             "allow_oob_interactions": bool(args.allow_oob_interactions),
+            "allow_account_creation": bool(getattr(args, "allow_account_creation", False)),
             "authorization_confirmed": bool(args.authorized),
             "approval_receipt_id": args.approval_receipt_id,
             "scope_receipt_id": args.scope_receipt_id,
@@ -1244,6 +1245,9 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_start.add_argument("--allow-state-changing-http", action="store_true")
     hunt_start.add_argument("--network-discovery", action="store_true")
     hunt_start.add_argument("--allow-oob-interactions", action="store_true")
+    hunt_start.add_argument("--allow-account-creation", action="store_true",
+                            help="let the engine register two accounts where anyone can sign up and use the "
+                                 "application as them (listed in the debrief for clean-up)")
     hunt_start.add_argument("--authorized", action="store_true")
     hunt_start.add_argument("--approval-receipt-id")
     hunt_start.add_argument("--scope-receipt-id")

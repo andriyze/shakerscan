@@ -1,0 +1,378 @@
+"""Deterministic whole-plan budget admission for canonical Scan actions."""
+
+from __future__ import annotations
+
+import re
+
+from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import Mapping, Protocol
+
+try:
+    from runtime.models import ScanBudget
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..runtime.models import ScanBudget
+
+from .action_plan import (
+    OWN_BUDGET_CAPABILITIES, ScanAction, ScanActionPlan, own_budget_allowance, with_own_budget,
+)
+from .external_process import fit_reservation_scaled_profile
+
+
+MANDATORY_ACTION_IDS = frozenset({
+    "baseline.http",
+    "baseline.tls",
+    "discover.web_probe",
+    "finalize.report",
+})
+
+TARGET_TRAFFIC_DIMENSIONS = frozenset({
+    "http_requests",
+    "state_changing_requests",
+    "browser_actions",
+    "tcp_ports_attempted",
+    "hosts_attempted",
+})
+
+
+class ScanBudgetAllocationError(ValueError):
+    """A required action graph cannot fit inside its immutable Scan budget."""
+
+    def __init__(self, action_id: str, shortages: Mapping[str, int]) -> None:
+        self.action_id = action_id
+        self.shortages = dict(sorted(shortages.items()))
+        super().__init__(
+            f"required Scan action {action_id} exceeds the plan budget: {self.shortages}"
+        )
+
+
+@dataclass(frozen=True)
+class ScanBudgetAllocation:
+    plan: ScanActionPlan
+    limits: Mapping[str, int]
+    allocated: Mapping[str, int]
+    residual_scan_execute_budget: Mapping[str, int]
+    skipped_action_ids: tuple[str, ...]
+
+    @property
+    def unallocated_budget(self) -> Mapping[str, int]:
+        """Authority not assigned to any action in this immutable plan."""
+        return self.residual_scan_execute_budget
+
+
+class ScanBudgetLimits(Protocol):
+    def ledger_limits(self) -> Mapping[str, int]: ...
+
+
+_PRIMARY_ACTIVE_VERIFIER_IDS = {
+    "verify.sqli",
+    "verify.xss",
+    "verify.request_sqli",
+    "verify.request_xss",
+    "verify.authz",
+}
+# Capabilities that verify a candidate deterministically, as opposed to broadening
+# coverage. Derived from the registry rather than listed by hand: the hand-written set
+# named only the sqli/xss/authz verifiers that existed when it was written, so the
+# exposure, nosqli and authz_surface families -- added later, and all three REQUIRED --
+# fell to the default tier below broad template breadth. On Juice Shop that made
+# `passive.templates.001` outrank `verify.exposure.001` on nothing but alphabetical
+# order, skipping 102 of 210 exposure candidates and leaving the grade unreliable.
+#
+# `device.service.verify` and `candidate.verify` are excluded deliberately: neither
+# participates in a canonical Scan action plan.
+_VERIFIER_NAME_SUFFIXES = (".verify", ".verify_batch", ".request_verify", ".request_verify_batch")
+_NON_SCAN_VERIFIER_CAPABILITIES = frozenset({"candidate.verify", "device.service.verify"})
+# Proof capabilities take an existing candidate and produce the deterministic
+# execution evidence that promotes a finding to verified. Only their names differ
+# from the verifier suffixes above, so the same registry-derived treatment applies:
+# written by hand they would drift out again, and they already had. Measured on a
+# thorough Scan, `sqli.prove_batch` and `xss.browser_prove_batch` matched neither
+# the verifier set nor the breadth set, so they fell to the catch-all tier BELOW a
+# broad template sweep. `prove.xss` was then skipped for wall budget while all
+# 1,000 of the profile's browser actions went unspent -- the profile funded
+# breadth it did not need and starved the only stage that can produce proof.
+# Suffixes, not dotted segments: the browser prover is `xss.browser_prove_batch`,
+# so a ".prove_batch" match would have silently covered only half the tier.
+_PROOF_NAME_SUFFIXES = ("prove", "prove_batch")
+
+
+def _derive_capabilities(suffixes: tuple[str, ...]) -> frozenset[str]:
+    try:
+        from runtime.capability_registry import CAPABILITY_REGISTRY
+    except ModuleNotFoundError:  # package import in host-side tests
+        from ..runtime.capability_registry import CAPABILITY_REGISTRY
+    return frozenset(
+        name for name in (
+            str(getattr(spec, "name", spec)) for spec in CAPABILITY_REGISTRY.list()
+        )
+        if name.endswith(suffixes)
+        and name not in _NON_SCAN_VERIFIER_CAPABILITIES
+    )
+
+
+_ACTIVE_VERIFIER_CAPABILITIES = _derive_capabilities(_VERIFIER_NAME_SUFFIXES)
+_ACTIVE_PROOF_CAPABILITIES = _derive_capabilities(_PROOF_NAME_SUFFIXES)
+
+# Template sweeps broaden coverage; they never prove anything. Passive batches belong
+# here with the rest -- omitting them left them in the catch-all tier, competing with
+# proof work as an equal.
+_TEMPLATE_BREADTH_CAPABILITIES = frozenset({
+    "templates.scan",
+    "templates.active_batch",
+    "templates.passive_batch",
+    "templates.passive_scan",
+})
+
+
+# A three-digit occurrence marker names an additional slice of the same lane.
+_BATCH_OCCURRENCE_SUFFIX = re.compile(r"\.\d{3}(?:\.r\d{2})?$")
+# Continuation rounds namespace every lane id with .rNN; the primary verifier of a
+# family is the same lane whichever round materialized its candidates.
+_ROUND_SUFFIX = re.compile(r"\.r\d{2}$")
+
+
+def _allocation_priority(action: ScanAction) -> int:
+    """Fund useful proof attempts before optional breadth.
+
+    A thorough scan must not spend its finite process budget on a broad Nuclei
+    sweep and then leave SQLMap/Dalfox with a tiny residual tier.  The first
+    candidate for each deterministic verifier is the highest-value optional
+    active work; additional candidate breadth follows, then general templates.
+    Required and supporting actions retain their existing precedence.
+    """
+    if action.action_id in MANDATORY_ACTION_IDS:
+        return 0
+    if action.capability_name in OWN_BUDGET_CAPABILITIES:
+        # Admitted first against its own allowance, so the shared ceilings left for every
+        # other action are exactly what they would be without it.
+        return 0
+    if action.required:
+        return 1
+    if action.supporting:
+        return 2
+    # The discovery continuation plans every verifier as `verify.<lane>.r01`, so an
+    # exact id match ranked the first request-body verifier (two mutation units) as
+    # breadth below the family's proof escalation (eight units): on a bounded
+    # mutation ledger sqli.prove_batch took its hold first and the deterministic
+    # request verifier was skipped for insufficient_plan_budget.
+    if _ROUND_SUFFIX.sub("", action.action_id) in _PRIMARY_ACTIVE_VERIFIER_IDS:
+        return 3
+    # Proving one existing candidate outranks verifying another. Only deterministic
+    # proof promotes a finding to verified, so it is funded before candidate breadth
+    # and well before a template sweep that proves nothing.
+    if action.capability_name in _ACTIVE_PROOF_CAPABILITIES:
+        # The FIRST proof slice of each family is the proof tier. Extra proof
+        # breadth ranks with verifier breadth: five spare sqli.prove slices used to
+        # sort ahead of the first prove.xss and eat the wall it needed.
+        return 4 if not _BATCH_OCCURRENCE_SUFFIX.search(action.action_id) else 5
+    if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES:
+        return 5
+    if action.capability_name in _TEMPLATE_BREADTH_CAPABILITIES:
+        return 6
+    return 7
+
+
+def _lane_position(action_id: str) -> tuple[str, int]:
+    """(lane, occurrence) of an action: a lane's additional slices come after its first.
+
+    A continuation round names a lane's first slice ``<lane>.rNN`` and its next ones
+    ``<lane>.001.rNN``, ``<lane>.002.rNN`` ..., which sort before the first by id.
+    """
+    match = _BATCH_OCCURRENCE_SUFFIX.search(action_id)
+    if match is None:
+        return action_id, 0
+    occurrence = match.group(0)
+    round_suffix = _ROUND_SUFFIX.search(occurrence)
+    return (
+        action_id[:match.start()] + (round_suffix.group(0) if round_suffix else ""),
+        int(occurrence[1:4]),
+    )
+
+
+def allocate_scan_action_plan(
+    plan: ScanActionPlan,
+    budget: ScanBudget | ScanBudgetLimits,
+    *,
+    assign_residual_to_finalizer: bool = False,
+    require_finalizer: bool = True,
+    reserved_budget: Mapping[str, int] | None = None,
+    lane_order: bool = False,
+) -> ScanBudgetAllocation:
+    """Admit the complete worst-case graph before any action may execute.
+
+    Registry maximums are retained unless a capability declares reviewed process
+    tiers. A selected smaller tier is frozen into the returned action digest before
+    traffic. Required work fails admission when no tier fits; optional work remains
+    in the immutable plan with a stable skip reason. Residual authority remains
+    visibly unallocated; explicit continuation holds stay in that residual authority.
+    The pure finalizer never receives target-traffic authority.
+
+    With ``lane_order`` (continuation rounds of thorough and deep Scans) a lane's later slices
+    that rank with its first slice are admitted right after it, in order. By id ``.001``
+    came first: when the residual funded one slice of a lane, that one was admitted, the first
+    was skipped, and the round then dropped both (a lane's appended slices must be a contiguous
+    prefix), so a large target's second-round template sweep never ran.
+    """
+    limits = with_own_budget(budget.ledger_limits(), plan.actions)
+    reserved = {
+        str(name): int(amount)
+        for name, amount in dict(reserved_budget or {}).items()
+    }
+    undeclared_reserved = set(reserved) - set(limits)
+    invalid_reserved = {
+        name: amount for name, amount in reserved.items()
+        if amount < 0 or amount > limits.get(name, 0)
+    }
+    if undeclared_reserved or invalid_reserved:
+        raise ScanBudgetAllocationError(
+            "reserved_budget",
+            {
+                **{f"undeclared:{name}": reserved[name]
+                   for name in sorted(undeclared_reserved)},
+                **{f"invalid:{name}": amount
+                   for name, amount in sorted(invalid_reserved.items())},
+            },
+        )
+    allocated = {name: 0 for name in limits}
+    admitted: dict[str, ScanAction] = {}
+    def shortages(action: ScanAction) -> dict[str, int]:
+        undeclared = set(action.requested_budget) - set(limits)
+        if undeclared:
+            raise ScanBudgetAllocationError(
+                action.action_id,
+                {f"undeclared:{name}": action.requested_budget[name]
+                 for name in sorted(undeclared)},
+            )
+        return {
+            name: allocated[name] + reserved.get(name, 0) + amount - limits[name]
+            for name, amount in action.requested_budget.items()
+            if allocated[name] + reserved.get(name, 0) + amount > limits[name]
+        }
+
+    priorities = {action.action_id: _allocation_priority(action) for action in plan.actions}
+
+    def admission_order(item: ScanAction) -> tuple[int, str, int]:
+        priority = priorities[item.action_id]
+        if lane_order:
+            lane, occurrence = _lane_position(item.action_id)
+            if occurrence and priorities.get(lane) == priority:
+                # Right after the lane's first slice; every other action keeps its place.
+                return priority, lane, occurrence
+        return priority, item.action_id, 0
+
+    for action in sorted(plan.actions, key=admission_order):
+        failed_dependencies = tuple(
+            dependency
+            for dependency in action.dependencies
+            if dependency in admitted
+            and admitted[dependency].admission_status == "skipped"
+        )
+        # Finalization consumes all terminal action states, including skips.
+        if failed_dependencies and action.action_id != "finalize.report":
+            if action.required or action.action_id in MANDATORY_ACTION_IDS:
+                raise ScanBudgetAllocationError(
+                    action.action_id, {"dependency_failed": len(failed_dependencies)},
+                )
+            admitted[action.action_id] = replace(
+                action,
+                requested_budget={},
+                admission_status="skipped",
+                reason_code="dependency_failed",
+                action_digest=None,
+            )
+            continue
+
+        missing = shortages(action)
+        # An extension is admitted at the holds its measured latency earned or not at
+        # all: shrinking it to a reviewed floor tier would re-run the slice on less than
+        # the slice already had, and supersede it with a result that proves nothing.
+        if missing and not action.capability_args.get("extends"):
+            scaled = fit_reservation_scaled_profile(
+                action.capability_name,
+                requested=action.requested_budget,
+                available={
+                    name: max(
+                        0,
+                        limits[name] - allocated[name] - reserved.get(name, 0),
+                    )
+                    for name in limits
+                },
+            )
+            if scaled is not None:
+                action = replace(
+                    action, requested_budget=scaled, action_digest=None,
+                )
+                missing = shortages(action)
+        if missing:
+            if action.required or action.action_id in MANDATORY_ACTION_IDS:
+                raise ScanBudgetAllocationError(action.action_id, missing)
+            admitted[action.action_id] = replace(
+                action,
+                requested_budget={},
+                admission_status="skipped",
+                reason_code="insufficient_plan_budget",
+                action_digest=None,
+            )
+            continue
+
+        admitted[action.action_id] = action
+        for name, amount in action.requested_budget.items():
+            allocated[name] += amount
+
+    finalizer = admitted.get("finalize.report")
+    if require_finalizer and (
+        finalizer is None or finalizer.admission_status != "planned"
+    ):
+        raise ScanBudgetAllocationError("finalize.report", {"action": 1})
+    if not require_finalizer and finalizer is not None:
+        raise ScanBudgetAllocationError(
+            "finalize.report", {"unexpected_action": 1},
+        )
+    if finalizer is not None and finalizer.capability_name == "scan.finalize":
+        forbidden = {
+            name: int(finalizer.requested_budget.get(name, 0))
+            for name in TARGET_TRAFFIC_DIMENSIONS
+            if int(finalizer.requested_budget.get(name, 0)) > 0
+        }
+        if forbidden:
+            raise ScanBudgetAllocationError(finalizer.action_id, forbidden)
+
+    residual = {name: limits[name] - allocated[name] for name in limits}
+    if assign_residual_to_finalizer:
+        if finalizer is None:
+            raise ScanBudgetAllocationError("finalize.report", {"action": 1})
+        if finalizer.capability_name != "scan.execute":
+            raise ScanBudgetAllocationError(
+                "finalize.report", {"legacy_residual_assignment": 1},
+            )
+        final_budget = dict(finalizer.requested_budget)
+        for name, amount in residual.items():
+            if amount:
+                final_budget[name] = final_budget.get(name, 0) + amount
+                allocated[name] += amount
+        admitted[finalizer.action_id] = replace(
+            finalizer, requested_budget=final_budget, action_digest=None,
+        )
+
+    allocated_plan = ScanActionPlan(
+        scan_id=plan.scan_id,
+        execution_plan_digest=plan.execution_plan_digest,
+        target_binding_digest=plan.target_binding_digest,
+        actions=tuple(admitted[action.action_id] for action in plan.actions),
+    )
+    for name, amount in allocated.items():
+        if amount > limits[name]:
+            raise AssertionError(f"allocated {name} exceeds its immutable Scan limit")
+
+    return ScanBudgetAllocation(
+        plan=allocated_plan,
+        limits=MappingProxyType(dict(limits)),
+        allocated=MappingProxyType(dict(allocated)),
+        residual_scan_execute_budget=MappingProxyType(dict(residual)),
+        skipped_action_ids=tuple(
+            action.action_id
+            for action in allocated_plan.actions
+            if action.admission_status == "skipped"
+        ),
+    )

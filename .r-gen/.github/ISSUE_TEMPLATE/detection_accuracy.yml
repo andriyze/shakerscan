@@ -1,0 +1,36 @@
+name: False positive / false negative
+description: A finding that is wrong, or a vulnerability ShakerScan missed.
+labels: [detection]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A minimal reproduction is the most valuable report a scanner can receive. Only describe
+        systems you own or are authorized to test, and redact anything sensitive.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options: [False positive, False negative]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+    validations:
+      required: true
+  - type: textarea
+    id: finding
+    attributes:
+      label: Finding or expected finding
+      description: Title, severity, proof state, and the affected URL pattern (redacted).
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence or reproduction
+      description: A redacted request/response pair, or a small public test application that reproduces it.
+    validations:
+      required: true

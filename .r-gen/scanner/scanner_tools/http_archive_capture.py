@@ -1,0 +1,545 @@
+"""Process-local capture of the calls scanner tools make.
+
+The scanner runs in the worker process, so calls are collected here and drained by the
+worker once the scan finishes. Nothing is written to a database from scanner code.
+
+Fidelity differs by plane and is recorded rather than glossed over. A curl invocation
+yields its argv -- method, URL and request headers -- plus whatever it wrote to stdout,
+which is the response body only when the invocation did not redirect it elsewhere.
+Response headers are absent unless the caller asked curl to dump them. Claiming otherwise
+would make an archive look complete when it is a partial record.
+"""
+
+from __future__ import annotations
+
+import contextvars
+import os
+import shlex
+import time
+from typing import Any, Iterable, Mapping, Sequence
+import urllib.parse
+
+
+CAPTURE_SCHEMA = "scanner-http-capture/v1"
+# A thorough scan makes tens of thousands of calls. This bounds what one scan can hold in
+# memory before the worker drains it; the count of dropped calls is reported so the archive
+# never silently claims to be the whole run.
+DEFAULT_MAX_CAPTURED = 50_000
+# Count limits alone do not bound memory: 50,000 responses at the per-call stdout ceiling
+# would retain roughly 100 GB. This aggregate budget is the authoritative process-local cap.
+DEFAULT_MAX_CAPTURE_BYTES = 64 * 1024 * 1024
+# curl writes the response body to stdout unless told otherwise. Anything past this is not
+# worth holding in memory for every call in a scan.
+MAX_STDOUT_CAPTURE_BYTES = 2 * 1024 * 1024
+
+_METHOD_FLAGS = {"-X", "--request"}
+_HEADER_FLAGS = {"-H", "--header"}
+_DATA_FLAGS = {"-d", "--data", "--data-raw", "--data-binary", "--data-ascii"}
+_DISCARD_TARGETS = {"/dev/null", "nul"}
+
+
+def _capture_size(value: Any, *, seen: set[int] | None = None) -> int:
+    """Conservative retained-payload estimate without serializing secret-bearing content."""
+    visited = seen if seen is not None else set()
+    identity = id(value)
+    if identity in visited:
+        return 0
+    visited.add(identity)
+    if value is None:
+        return 8
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return len(value) + 64
+    if isinstance(value, str):
+        return len(value.encode("utf-8", errors="replace")) + 64
+    if isinstance(value, Mapping):
+        return 128 + sum(
+            _capture_size(key, seen=visited) + _capture_size(item, seen=visited)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return 96 + sum(_capture_size(item, seen=visited) for item in value)
+    return 64
+
+
+class _Capture:
+    def __init__(self, limit: int, byte_limit: int) -> None:
+        self.limit = limit
+        self.byte_limit = byte_limit
+        self.bytes_used = 0
+        self.calls: list[dict[str, Any]] = []
+        self.dropped = 0
+        self.dropped_bytes = 0
+
+    def add(self, call: Mapping[str, Any]) -> None:
+        size = _capture_size(call)
+        if len(self.calls) >= self.limit or size > self.byte_limit - self.bytes_used:
+            self.dropped += 1
+            self.dropped_bytes += size
+            return
+        retained = dict(call)
+        self.calls.append(retained)
+        self.bytes_used += size
+
+
+_active: contextvars.ContextVar[_Capture | None] = contextvars.ContextVar(
+    "shakerscan_http_capture", default=None,
+)
+
+
+def max_captured() -> int:
+    raw = os.environ.get("HTTP_ARCHIVE_MAX_CAPTURED_CALLS")
+    try:
+        return max(0, int(str(raw).strip())) if raw else DEFAULT_MAX_CAPTURED
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CAPTURED
+
+
+def max_capture_bytes() -> int:
+    raw = os.environ.get("HTTP_ARCHIVE_MAX_CAPTURE_BYTES")
+    try:
+        return max(0, int(str(raw).strip())) if raw else DEFAULT_MAX_CAPTURE_BYTES
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CAPTURE_BYTES
+
+
+def start_capture() -> None:
+    """Begin collecting for the current scan."""
+    _active.set(_Capture(max_captured(), max_capture_bytes()))
+
+
+def capture_active() -> bool:
+    return _active.get() is not None
+
+
+def drain_capture() -> dict[str, Any]:
+    """Return everything captured and stop collecting."""
+    capture = _active.get()
+    _active.set(None)
+    if capture is None:
+        return {
+            "schema_version": CAPTURE_SCHEMA, "calls": [], "dropped": 0,
+            "bytes_used": 0, "byte_limit": max_capture_bytes(), "dropped_bytes": 0,
+        }
+    return {
+        "schema_version": CAPTURE_SCHEMA,
+        "calls": capture.calls,
+        # Stated so a reader can tell a bounded archive from a complete one.
+        "dropped": capture.dropped,
+        "bytes_used": capture.bytes_used,
+        "byte_limit": capture.byte_limit,
+        "dropped_bytes": capture.dropped_bytes,
+    }
+
+
+def record(call: Mapping[str, Any]) -> None:
+    capture = _active.get()
+    if capture is not None:
+        capture.add(call)
+
+
+def note_dropped(count: int) -> None:
+    """Count calls the run made that this capture cannot hold, so the archive says partial."""
+    capture = _active.get()
+    if capture is not None and int(count) > 0:
+        capture.dropped += int(count)
+
+
+TUNNEL_FIDELITY = "pinned_tunnel"
+TUNNEL_REQUEST_FIDELITY = "tunnel_request_line"
+# A transaction an external tool recorded in its own wire log (sqlmap's traffic file, Dalfox's
+# HAR): method, URL, headers, bodies and status as the tool sent and received them.
+TOOL_WIRE_LOG_FIDELITY = "tool_wire_log"
+
+
+def _tunnel_origin(tunnel: Mapping[str, Any]) -> str:
+    scheme = str(tunnel.get("scheme") or "http").lower()
+    host = str(tunnel.get("host") or "")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = int(tunnel.get("port") or 0)
+    # Written as the engine's own calls write it, so one origin reads as one destination.
+    if (scheme, port) in {("http", 80), ("https", 443)} or not port:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def _tool_input(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """What the engine asked the tool to test, value-free: the method, the URL with its query
+    values and userinfo withheld, and the names of the body fields the tool fills in."""
+    if not isinstance(value, Mapping) or not value.get("url"):
+        return None
+    try:
+        from .url_redaction import redact_url
+    except ImportError:  # flat import layout
+        from scanner_tools.url_redaction import redact_url
+    names = [
+        str(name)[:120] for name in list(value.get("body_field_names") or ())[:50]
+        if isinstance(name, str) and name
+    ]
+    return {
+        "method": str(value.get("method") or "GET").upper()[:16],
+        "url": redact_url(str(value["url"])),
+        **({"body_field_names": names} if names else {}),
+    }
+
+
+def record_tunnel(
+    tunnel: Mapping[str, Any],
+    *,
+    capability_name: str | None,
+    tool: str | None,
+    elapsed_ms: int | None = None,
+    error: str | None = None,
+    tool_input: Mapping[str, Any] | None = None,
+) -> None:
+    """Archive what an external tool sent through its pinned tunnel.
+
+    External tools (templates, crawlers, content discovery, probes, process verifiers) and the
+    engine's browser reach the target only through a pinned tunnel that admits one host and
+    port. One row records that tunnel -- its destination, the frozen addresses it connected
+    to, its byte counts and any destination it refused -- so every destination a Scan's
+    capabilities contacted is in the archive. A cleartext tunnel adds one row per request line
+    it relayed (method, request target and Host header; no other headers, no bodies). An
+    encrypted tunnel is ciphertext to the engine: its row proves where the traffic went and
+    says the content was not readable. ``tool_input`` is the request the engine gave the tool
+    (``_tool_input``): with an encrypted tunnel it is the only record of what the tool tested,
+    such as a seeded form POST a verifier sent its payloads to.
+    """
+    if not capture_active() or not isinstance(tunnel, Mapping) or not tunnel.get("host"):
+        return
+    origin = _tunnel_origin(tunnel)
+    connected = [
+        str(address) for address, count in dict(tunnel.get("address_connections") or {}).items()
+        if count
+    ]
+    request_lines = [
+        item for item in tunnel.get("request_lines") or () if isinstance(item, Mapping)
+    ]
+    dropped = max(0, int(tunnel.get("request_lines_dropped") or 0))
+    summary = {
+        key: tunnel.get(key)
+        for key in (
+            "scheme", "host", "port", "address_connections", "connections_attempted",
+            "connections_opened", "connections_rejected", "bytes_to_target",
+            "bytes_from_target", "http_requests_observed", "content_readable",
+            "methods_observed", "request_lines_dropped", "refused_destinations",
+            "refused_destinations_other",
+        )
+    }
+    summary["tool"] = str(tool or "")
+    summary["request_lines_archived"] = len(request_lines)
+    given = _tool_input(tool_input)
+    if given:
+        summary["tool_input"] = given
+    # The tool's own log of what it sent (``tool_wire_log``), to this tunnel's destination only.
+    logged = [
+        item for item in tunnel.get("wire_log_transactions") or ()
+        if isinstance(item, Mapping) and _same_origin(str(item.get("url") or ""), origin)
+    ]
+    if logged:
+        summary["wire_log_archived"] = len(logged)
+        # The log is the fuller record of the same requests: their request lines are not
+        # archived a second time (nor counted as lines it could not keep).
+        request_lines, dropped = [], 0
+        summary["request_lines_archived"] = 0
+    record({
+        "plane": "scan",
+        "source": "pinned_tunnel",
+        "capability_name": capability_name,
+        "method": "CONNECT",
+        "url": origin + "/",
+        "request_headers": {},
+        "request_body": None,
+        "response_headers": {},
+        "response_body": None,
+        "status_code": None,
+        "elapsed_ms": elapsed_ms,
+        "error": (str(error)[:200] or None) if error else None,
+        "remote_ip": connected[0] if connected else None,
+        "fidelity": TUNNEL_FIDELITY,
+        "tunnel": summary,
+    })
+    for index, line in enumerate(request_lines):
+        target = str(line.get("target") or "")
+        if target.startswith(("http://", "https://")):
+            # Absolute form still went to the tunnel's one destination; the archive URL names
+            # that destination and keeps the target as the tool wrote it.
+            parts = urllib.parse.urlsplit(target)
+            path = urllib.parse.urlunsplit(("", "", parts.path or "/", parts.query, ""))
+        elif target.startswith("/"):
+            path = target
+        else:
+            path = "/"
+        record({
+            "plane": "scan",
+            "source": "pinned_tunnel",
+            "capability_name": capability_name,
+            "method": str(line.get("method") or "GET"),
+            "url": origin + path,
+            "request_headers": (
+                {"host": str(line["host"])} if line.get("host") else {}
+            ),
+            "request_body": None,
+            "response_headers": {},
+            "response_body": None,
+            "status_code": None,
+            "remote_ip": connected[0] if len(connected) == 1 else None,
+            "fidelity": TUNNEL_REQUEST_FIDELITY,
+            "tunnel_request": {
+                "tool": str(tool or ""), "line": index,
+                # Kept only when it is not already the URL's path (absolute form).
+                **({"request_target": target} if not target.startswith("/") else {}),
+            },
+        })
+    for item in logged:
+        record({
+            "plane": "scan",
+            "source": "tool_wire_log",
+            "capability_name": capability_name,
+            "method": str(item.get("method") or "GET"),
+            "url": str(item["url"]),
+            "request_headers": dict(item.get("request_headers") or {}),
+            "request_body": item.get("request_body"),
+            "response_headers": dict(item.get("response_headers") or {}),
+            "response_body": item.get("response_body"),
+            "response_body_truncated": bool(item.get("response_body_truncated")),
+            "status_code": item.get("status_code"),
+            "remote_ip": connected[0] if len(connected) == 1 else None,
+            "fidelity": TOOL_WIRE_LOG_FIDELITY,
+            "tunnel_request": {
+                "tool": str(tool or ""), "source": "tool_wire_log",
+                **({"request_body": "not_logged_by_tool"} if item.get("request_body_not_logged") else {}),
+            },
+        })
+    note_dropped(dropped + max(0, int(tunnel.get("wire_log_dropped") or 0)))
+
+
+def _same_origin(url: str, origin: str) -> bool:
+    def key(value: str) -> tuple[str, str, int] | None:
+        try:
+            parts = urllib.parse.urlsplit(value)
+            port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
+        except ValueError:
+            return None
+        if not parts.hostname:
+            return None
+        return parts.scheme.lower(), parts.hostname.lower().rstrip("."), port
+
+    return key(url) is not None and key(url) == key(origin)
+
+
+def parse_curl_command(cmd: Sequence[str]) -> dict[str, Any]:
+    """Recover method, URL, headers and body from a curl invocation.
+
+    argv is the only description of the request that exists for the curl plane, so it is
+    read rather than guessed at. ``-o /dev/null`` is noted because it means stdout is not
+    the response body, and treating it as one would archive an empty body as though the
+    server returned nothing.
+    """
+    method = ""
+    url = ""
+    headers: dict[str, str] = {}
+    body: str | None = None
+    output_discarded = False
+    dumps_headers = False
+    index = 1
+    while index < len(cmd):
+        value = str(cmd[index])
+        if value in _METHOD_FLAGS and index + 1 < len(cmd):
+            method = str(cmd[index + 1]).upper()
+            index += 2
+            continue
+        if value in _HEADER_FLAGS and index + 1 < len(cmd):
+            raw = str(cmd[index + 1])
+            name, separator, header_value = raw.partition(":")
+            if separator:
+                headers[name.strip().lower()] = header_value.strip()
+            index += 2
+            continue
+        if value in _DATA_FLAGS and index + 1 < len(cmd):
+            body = str(cmd[index + 1])
+            index += 2
+            continue
+        if value in {"-o", "--output"} and index + 1 < len(cmd):
+            output_discarded = str(cmd[index + 1]) in _DISCARD_TARGETS
+            index += 2
+            continue
+        if value in {"-D", "--dump-header"}:
+            dumps_headers = True
+            index += 2
+            continue
+        if value.startswith(("http://", "https://")):
+            url = value
+        index += 1
+    if not method:
+        # curl defaults to GET, or POST when a body is supplied without -X.
+        method = "POST" if body is not None else "GET"
+    return {
+        "method": method,
+        "url": url,
+        "headers": headers,
+        "body": body,
+        "output_discarded": output_discarded,
+        "dumps_headers": dumps_headers,
+    }
+
+
+def record_curl_invocation(
+    cmd: Sequence[str],
+    *,
+    stdout: str,
+    stderr: str,
+    returncode: int,
+    started: float,
+) -> None:
+    """Record one curl call, saying plainly what part of it could be recovered."""
+    if not capture_active():
+        return
+    parsed = parse_curl_command(cmd)
+    if not parsed["url"]:
+        return
+    body: str | None = None
+    if not parsed["output_discarded"] and stdout:
+        body = stdout[:MAX_STDOUT_CAPTURE_BYTES]
+    record({
+        "plane": "scan",
+        "source": "curl",
+        "method": parsed["method"],
+        "url": parsed["url"],
+        "request_headers": parsed["headers"],
+        "request_body": parsed["body"],
+        "response_body": body,
+        # curl exposes no response headers unless the caller dumped them, and no status
+        # code unless it was written out. Recorded as unknown rather than invented.
+        "response_headers": {},
+        "status_code": None,
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        "error": (stderr or "").strip()[:500] or None if returncode != 0 else None,
+        "exit_code": returncode,
+        "fidelity": "argv_and_stdout",
+        "redacted_argv": _redacted_argv(cmd),
+    })
+
+
+def record_scan_call(
+    captured: Mapping[str, Any],
+    *,
+    capability_name: str | None = None,
+    source: str = "http.request",
+) -> None:
+    """Record a call made by an in-process scan capability.
+
+    Takes the executor's own capture, which describes the request as built rather than as
+    requested, so a Scan row carries the same fidelity a Hunt row does. The capability is
+    named because archive completeness is judged per capability: a row stamped only with
+    its transport left the capability that sent it reported as unarchived.
+    """
+    if not capture_active():
+        return
+    record({
+        "plane": "scan",
+        "source": source,
+        "capability_name": capability_name,
+        # Values under arbitrary names (CSRF tokens, PINs, session headers) that masked
+        # views must withhold rather than trust key-name redaction to find.
+        "workflow_values_private": captured.get("workflow_values_private") is True,
+        "method": captured.get("method") or "GET",
+        "url": captured.get("url") or "",
+        "request_headers": dict(captured.get("request_headers") or {}),
+        "request_body": captured.get("request_body"),
+        "response_headers": dict(captured.get("response_headers") or {}),
+        "response_body": captured.get("response_body"),
+        "response_body_sha256": captured.get("response_body_sha256"),
+        "response_body_bytes": captured.get("response_body_bytes"),
+        "status_code": captured.get("status_code"),
+        "http_version": captured.get("http_version"),
+        "elapsed_ms": captured.get("elapsed_ms"),
+        "error": captured.get("error"),
+        "started_at": captured.get("started_at"),
+        "principal_slot": captured.get("principal_slot"),
+        "remote_ip": captured.get("remote_ip"),
+        "direct_origin": bool(captured.get("direct_origin")),
+        "response_body_truncated": bool(captured.get("response_body_truncated")),
+        "response_digest_scope": captured.get("response_digest_scope"),
+        "fidelity": captured.get("fidelity") or "wire_request",
+    })
+
+
+def record_client_call(
+    *,
+    method: Any,
+    url: Any,
+    status_code: int | None,
+    response_headers: Mapping[str, str] | None = None,
+    response_body: bytes | str | None = None,
+    elapsed_ms: int | None = None,
+    source: str = "httpx",
+) -> None:
+    """Record a call made by an in-process HTTP client rather than a subprocess."""
+    if not capture_active():
+        return
+    record({
+        "plane": "scan",
+        "source": source,
+        "method": str(method or "GET").upper(),
+        "url": str(url or ""),
+        "request_headers": {},
+        "request_body": None,
+        "response_headers": dict(response_headers or {}),
+        "response_body": response_body,
+        "status_code": status_code,
+        "elapsed_ms": elapsed_ms,
+        "error": None,
+        "fidelity": "client_response",
+    })
+
+
+def _redacted_argv(cmd: Iterable[Any]) -> list[str]:
+    """argv with credential-bearing flag values removed.
+
+    The archive stores request headers separately and deliberately; the argv is provenance
+    for how the tool was invoked, and duplicating a bearer token into it adds exposure
+    without adding information.
+    """
+    out: list[str] = []
+    redact_next = False
+    for raw in cmd:
+        value = str(raw)
+        if redact_next:
+            out.append("[REDACTED]")
+            redact_next = False
+            continue
+        if value in _HEADER_FLAGS | _DATA_FLAGS | {"-b", "--cookie", "-u", "--user"}:
+            redact_next = True
+        out.append(shlex.quote(value) if " " in value else value)
+    return out[:200]
+
+
+def scan_target_host(url: str) -> str | None:
+    try:
+        return urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
+__all__ = [
+    "CAPTURE_SCHEMA",
+    "DEFAULT_MAX_CAPTURED",
+    "DEFAULT_MAX_CAPTURE_BYTES",
+    "MAX_STDOUT_CAPTURE_BYTES",
+    "capture_active",
+    "drain_capture",
+    "max_captured",
+    "max_capture_bytes",
+    "TUNNEL_FIDELITY",
+    "TUNNEL_REQUEST_FIDELITY",
+    "note_dropped",
+    "parse_curl_command",
+    "record",
+    "record_client_call",
+    "record_curl_invocation",
+    "record_scan_call",
+    "record_tunnel",
+    "scan_target_host",
+    "start_capture",
+]

@@ -1,0 +1,124 @@
+"""Vendor the runtime's MCP adapter and product CLI into the client at build time.
+
+The release runtime ships ``scripts/shakerscan_mcp.py`` (``scanner.sh mcp``) and
+``scripts/v2_cli.py`` (``scanner.sh hunt``) as standalone files. The client is that same code
+installed without the engine. Rather than committing copies that drift, the build maps them from
+the repository checkout into the package:
+
+- wheel: ``../scripts/shakerscan_mcp.py`` -> ``shakerscan/_mcp.py`` (and ``v2_cli.py`` -> ``_v2_cli.py``)
+- sdist: the same files under ``src/shakerscan/`` so a wheel built from the sdist carries them
+
+A wheel built from an unpacked sdist has no repository beside it; the copies are already in
+``src/`` and nothing is mapped. A build that can find neither fails rather than ship a client
+without its adapter.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+try:
+    from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+except ImportError:  # the pure helpers are importable (and tested) without a build backend
+    BuildHookInterface = object  # type: ignore[assignment,misc]
+
+VENDORED = {
+    "shakerscan_mcp.py": "_mcp.py",
+    "v2_cli.py": "_v2_cli.py",
+    "api_cli.py": "_api_cli.py",
+    "scan_cli.py": "_scan_cli.py",
+    # Helpers the scripts above import; the client loader makes them importable by these names.
+    "mcp_stdio.py": "_mcp_stdio.py",
+    "mcp_ssh_stream.py": "_mcp_ssh_stream.py",
+    "api_stream.py": "_api_stream.py",
+    "hunt_approve.py": "_hunt_approve.py",
+    "person_decision.py": "_person_decision.py",
+    "person_decision_routes.py": "_person_decision_routes.py",
+    "redirect_hint.py": "_redirect_hint.py",
+    "mcp_agent_tools.py": "_mcp_agent_tools.py",
+    "agent_catalog.py": "_agent_catalog.py",
+    "catalog_routes.py": "_catalog_routes.py",
+}
+# The agent kit the launcher runs agents inside (`shakerscan agent …`): materialized into a
+# workspace by the client's `agent` command against the connected instance. `.claude` is
+# carried as `claude` so no hidden directory has to survive packaging.
+KIT = {"skills": "_kit/skills", ".claude": "_kit/claude", "AGENTS.md": "_kit/AGENTS.md", "VERSION": "_kit/VERSION"}
+REPOSITORY_MARKERS = ("VERSION", "scanner.sh")
+
+
+def repository_scripts(root: Path) -> Path | None:
+    """The repository's ``scripts/`` directory when ``root`` is ``<repo>/client``, else None."""
+    repo = Path(root).resolve().parent
+    if all((repo / marker).is_file() for marker in REPOSITORY_MARKERS) and (repo / "scripts").is_dir():
+        return repo / "scripts"
+    return None
+
+
+def plan_force_include(target_name: str, root: Path) -> dict[str, str]:
+    """Source path -> distribution path for the vendored runtime modules of one build target."""
+    root = Path(root)
+    prefix = "src/shakerscan/" if target_name == "sdist" else "shakerscan/"
+    scripts = repository_scripts(root)
+    if scripts is not None:
+        repo = scripts.parent
+        missing = [name for name in VENDORED if not (scripts / name).is_file()]
+        missing += [name for name in KIT if not (repo / name).exists()]
+        if missing:
+            raise RuntimeError(f"vendored runtime sources are missing from the repository: {missing}")
+        mapping = {str(scripts / name): prefix + module for name, module in VENDORED.items()}
+        mapping.update({str(repo / name): prefix + target for name, target in KIT.items()})
+        return mapping
+    package = root / "src" / "shakerscan"
+    copies = [module for module in VENDORED.values() if (package / module).is_file()]
+    copies += [target for target in KIT.values() if (package / target).exists()]
+    if len(copies) == len(VENDORED) + len(KIT):
+        return {}
+    raise RuntimeError(
+        "vendored runtime sources not found: build from the repository checkout (../scripts, "
+        "../skills, ../.claude) or from an sdist that carries them under src/shakerscan/"
+    )
+
+
+BUILD_INFO = "_build.json"
+
+
+def source_commit(root: Path) -> str | None:
+    """The repository commit a build is made from, or None outside a git checkout.
+
+    D15: a client installed from ``git+…@<commit>#subdirectory=client`` reported only the last
+    released version, so two different builds looked identical. The commit is stamped into the
+    package (``_build.json``) and ``shakerscan version`` prints it."""
+    scripts = repository_scripts(root)
+    if scripts is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(scripts.parent), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", commit) else None
+
+
+def plan_build_info(target_name: str, root: Path, directory: Path) -> dict[str, str]:
+    """Write ``_build.json`` (the source commit) into ``directory``; map it into the package."""
+    commit = source_commit(root)
+    if commit is None:
+        return {}
+    path = Path(directory) / BUILD_INFO
+    path.write_text(json.dumps({"source_commit": commit}) + "\n", encoding="utf-8")
+    prefix = "src/shakerscan/" if target_name == "sdist" else "shakerscan/"
+    return {str(path): prefix + BUILD_INFO}
+
+
+class CustomBuildHook(BuildHookInterface):  # type: ignore[misc]
+    def initialize(self, version: str, build_data: dict) -> None:  # noqa: ARG002
+        mapping = plan_force_include(self.target_name, Path(self.root))
+        mapping.update(plan_build_info(self.target_name, Path(self.root), Path(tempfile.mkdtemp(prefix="shakerscan-build-"))))
+        build_data.setdefault("force_include", {}).update(mapping)

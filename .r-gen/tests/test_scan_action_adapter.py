@@ -1,0 +1,3944 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+import ssl
+import urllib.parse
+import uuid
+
+import pytest
+
+from hunt.capability_executor import CapabilityAdapterResult
+from capabilities.auth import TargetBoundSessionCredential, WorkerPrivateScanSession
+from capabilities.tls_legacy_probe import PROBE_COUNT as TLS_LEGACY_PROBE_COUNT
+from runtime.capability_registry import CAPABILITY_REGISTRY
+from runtime.models import PreparedExecution, ScanPolicy, TargetBinding
+from runtime.request_replay_executor import ReplayTransportResult
+import scan.action_adapter as action_adapter_module
+from runtime.observation_manifests import ObservationManifestReference
+from scan.action_adapter import DatabaseNeutralScanActionDispatcher
+from scan.action_plan import ScanAction, ScanActionPlan, ScanActionPlanCompiler
+from scan.capability_execution import (
+    TLS_CONNECTIONS_PER_PAIR,
+    TLS_HANDSHAKE_CONNECTIONS_PER_PAIR,
+)
+from scan.contracts import BUDGET_PROFILES
+from scan.execution import ScanExecutionPlan
+from scan.private_inputs import (
+    BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+    BrokerPrivateScanInputs,
+    private_replay_plan_payload,
+)
+from scan.private_state import (
+    SCAN_PRIVATE_STATE_KEY_OPTION,
+    generate_scan_private_state_key,
+    seal_scan_auth_session_state,
+)
+from runtime.scan_credentials import (
+    resolve_scan_http_principal,
+    resolve_scan_interactive_credential,
+)
+from scan.capability_result import (
+    CapabilityReceiptReference,
+    CapabilityResultReason,
+    CapabilityResultReference,
+    CapabilityResultStatus,
+)
+from scan.execution_backend import ActionLease
+from scan.work_manifests import (
+    build_candidate_manifest,
+    build_canonical_nuclei_template_manifest,
+    build_canonical_passive_nuclei_template_manifest,
+    build_endpoint_manifest,
+    build_request_candidate_manifest,
+    build_request_manifest,
+)
+try:
+    from scanner_tools.request_replay import ReplayAuthorization, build_replay_plan
+except ModuleNotFoundError:
+    from scanner.scanner_tools.request_replay import (
+        ReplayAuthorization,
+        build_replay_plan,
+    )
+
+
+TARGET = TargetBinding(
+    target_id="target-1",
+    target_kind="web",
+    canonical_host="app.example.test",
+    allowed_origins=("https://app.example.test",),
+    allowed_addresses=("192.0.2.10",),
+    allowed_root_domains=("example.test",),
+)
+
+
+def _action(
+    action_id: str,
+    capability: str,
+    ordinal: int,
+    *,
+    dependencies=(),
+    capability_args=None,
+    target=TARGET,
+) -> ScanAction:
+    spec = CAPABILITY_REGISTRY.require(capability)
+    return ScanAction(
+        action_id=action_id,
+        stage="finalize_evidence" if action_id == "finalize.report" else "resolve_inputs",
+        ordinal=ordinal,
+        capability_name=capability,
+        capability_args=(
+            dict(capability_args)
+            if capability_args is not None
+            else {"report_only": True} if action_id == "finalize.report" else {}
+        ),
+        target_binding_digest=target.digest,
+        input_binding_digest=f"{ordinal + 1:064x}",
+        requested_budget=dict(spec.budget_cost),
+        placement={
+            "schema_version": "scan-action-placement/v1",
+            "eligible_backends": ["local", "broker"],
+            "requirements": dict(spec.placement_requirements),
+            "adapter_name": spec.adapter,
+            "adapter_version": spec.adapter_version,
+        },
+        dependencies=tuple(dependencies),
+        required=True,
+        supporting=False,
+        output_schema=spec.output_schema,
+    )
+
+
+class Backend:
+    def __init__(self, results=None, observations=None, manifests=None):
+        self.results = dict(results or {})
+        self.observations = dict(observations or {})
+        self.manifests = dict(manifests or {})
+        self.attempts = {}
+
+    async def load_result(self, action_id):
+        return self.results.get(action_id)
+
+    async def load_observations(self, action_id):
+        return tuple(self.observations.get(action_id) or ())
+
+    async def load_work_manifest(self, _action_id, reference):
+        return self.manifests[reference.manifest_id]
+
+    async def load_batch_attempts(self, action_id):
+        return tuple(self.attempts.get(action_id, {}).values())
+
+    async def checkpoint_batch_attempt(self, action_id, attempt):
+        self.attempts.setdefault(action_id, {})[attempt["attempt_id"]] = dict(attempt)
+
+
+def _dispatcher(
+    plan, backend, *, target=TARGET, policy=None, private_inputs=None,
+    private_replay_plan_loader=None, options=None, target_url="https://app.example.test/",
+):
+    async def process_runner(*_args, **_kwargs):
+        raise AssertionError("process runner must not be used")
+
+    return DatabaseNeutralScanActionDispatcher(
+        target_url=target_url,
+        options=dict(options or {}),
+        target=target,
+        policy=policy or ScanPolicy(),
+        scan_id=plan.scan_id,
+        job_id="job-1",
+        worker_id="broker:worker-1",
+        plan=plan,
+        backend=backend,
+        process_runner=process_runner,
+        cancelled=lambda: False,
+        private_inputs=private_inputs,
+        private_replay_plan_loader=private_replay_plan_loader,
+    )
+
+
+def test_browser_crawl_forwards_only_worker_private_browser_storage(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    action = _action("discover.browser_crawl", "web.browser_crawl", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    seed = {
+        "schema_version": "scan-browser-storage/v1",
+        "kind": "local_storage",
+        "key": "auth.token",
+        "value": "worker-private-token",
+    }
+    captured = {}
+
+    async def execute(_self, context, adapter, **_kwargs):
+        captured.update(adapter._process_payload)
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={name: 1 for name in context.requested_budget},
+            observations=(),
+            execution_started=True,
+            parser_version="katana-jsonl/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    dispatcher = _dispatcher(
+        plan,
+        Backend(),
+        options={"auth_browser_storage": seed},
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert captured["browser_storage"] == seed
+    assert "worker-private-token" not in json.dumps(receipt.redacted_execution)
+
+
+def _principal(lane):
+    return type("Principal", (), {
+        "authenticated": True,
+        "binding_digest": ("1" if lane == "primary" else "2") * 64,
+        "headers": lambda self: {
+            "Authorization": "Bearer " + lane,
+        },
+    })()
+
+
+def _lease(plan, action):
+    return ActionLease(
+        lease_id=str(uuid.uuid4()),
+        lease_token="x" * 32,
+        scan_id=plan.scan_id,
+        plan_digest=plan.plan_digest,
+        execution_plan_digest=plan.execution_plan_digest,
+        target_binding_digest=plan.target_binding_digest,
+        action=action,
+        backend="broker",
+        worker_id="broker:worker-1",
+        lease_seconds=60,
+        attempt=1,
+    )
+
+
+def test_dispatcher_selects_http_after_https_connection_failure(monkeypatch):
+    from scan import origin_selection
+
+    target = TargetBinding(
+        target_id=TARGET.target_id, target_kind="web", canonical_host=TARGET.canonical_host,
+        allowed_origins=("https://app.example.test", "http://app.example.test"),
+        inferred_origins=("https://app.example.test", "http://app.example.test"),
+        allowed_addresses=TARGET.allowed_addresses,
+        allowed_root_domains=TARGET.allowed_root_domains,
+    )
+    action = _action(
+        "origin.select", "scan.origin_select", 0,
+        capability_args={"origins": list(target.inferred_origins)}, target=target,
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest, actions=(action,),
+    )
+
+    async def request(origin, _args, *, target, **_kwargs):
+        if origin.startswith("https://"):
+            return {"ok": False, "request": {"origin": origin}, "error": "request_error:ConnectError"}
+        return {"ok": True, "request": {"origin": origin}, "response": {"status": 200}}
+
+    monkeypatch.setattr(origin_selection, "execute_bound_http_request", request)
+    dispatcher = _dispatcher(plan, Backend(), target=target, target_url="app.example.test")
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert receipt.status == "success"
+    assert receipt.budget_consumed["http_requests"] == 2
+    assert dispatcher.target_url == "http://app.example.test/", receipt.observations
+
+
+def test_receipt_records_only_server_exercised_principal_context(monkeypatch):
+    action = _action("baseline.http", "http.request", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name: _principal(lane),
+    )
+    receipt = _dispatcher(plan, Backend())._receipt(
+        action, status="success", parser_version="test/v1",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        consumed={"http_requests": 1, "tool_wall_seconds": 1},
+    )
+    context = next(item for item in receipt.observations if item["kind"] == "principal_context")
+    assert context == {
+        "kind": "principal_context",
+        "lane": "primary",
+        "authenticated": True,
+        "binding_digest": "1" * 64,
+        "source": "server_runtime",
+    }
+    assert "Authorization" not in json.dumps(receipt.observations)
+
+
+def test_database_neutral_dispatcher_never_treats_profile_reference_as_secret():
+    action = _action("inputs.auth_primary", "auth.session.establish", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend())
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "skipped"
+    assert receipt.budget_consumed == {
+        name: 0 for name in action.requested_budget
+    }
+    assert receipt.errors == ("not_applicable",)
+
+
+def test_database_neutral_auth_uses_worker_private_session_contract(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    profile_id = str(uuid.uuid4())
+    action = _action("inputs.auth_primary", "auth.session.establish", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    now = datetime.now(timezone.utc)
+    key = generate_scan_private_state_key()
+    options = {
+        SCAN_PRIVATE_STATE_KEY_OPTION: key,
+        "login_username": "operator",
+        "login_password": "worker-private-password",
+        "login_url": "/login",
+        "resolved_credential_profiles": [{
+            "profile_id": profile_id,
+            "profile_version": 2,
+            "auth_kind": "form_login",
+            "principal_slot": "primary",
+            "principal_label": "owner",
+            "scan_lane": "primary",
+            "allowed_capabilities": ["auth.session.establish", "http.request"],
+        }],
+    }
+    private_inputs = BrokerPrivateScanInputs.from_payload(
+        {
+            "schema_version": BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+            "lease_id": "lease-1",
+            "worker_id": "broker:worker-1",
+            "plan_digest": plan.plan_digest,
+            "target_binding_digest": TARGET.digest,
+            "expires_at": (now + timedelta(minutes=5)).isoformat(),
+            "options": options,
+            "replay_plans": {},
+        },
+        lease_id="lease-1",
+        worker_id="broker:worker-1",
+        plan_digest=plan.plan_digest,
+        target_binding_digest=TARGET.digest,
+    )
+    captured = {}
+
+    async def establish(credential, *, target):
+        captured["credential"] = credential
+        captured["target"] = target
+        return WorkerPrivateScanSession(
+            lane="primary",
+            auth_kind="form_login",
+            binding_digest=credential.binding_digest,
+            established=True,
+            observation={"kind": "credential_session", "status": "established"},
+            error=None,
+            request_count=1,
+            _headers={"Cookie": "session=worker-private-cookie"},
+            session_ref=str(uuid.uuid4()),
+            profile_id=profile_id,
+            profile_version=2,
+            principal="owner",
+            established_at=now,
+            expires_at=now + timedelta(hours=1),
+            refresh_after=now + timedelta(minutes=55),
+            compatible_capabilities=("auth.session.establish", "http.request"),
+            evidence_receipt_digest="e" * 64,
+        )
+
+    monkeypatch.setattr(
+        action_adapter_module, "establish_target_bound_http_session", establish,
+    )
+    dispatcher = _dispatcher(
+        plan, Backend(), private_inputs=private_inputs,
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert isinstance(captured["credential"], TargetBoundSessionCredential)
+    assert captured["credential"].profile_id == profile_id
+    assert captured["credential"].principal == "owner"
+    assert captured["target"] == TARGET
+    checkpoints = [
+        item for item in receipt.observations
+        if item.get("kind") == "credential_session_state"
+    ]
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["session_ref"]
+    assert "worker-private-cookie" not in json.dumps(receipt.public_dict())
+
+
+def test_database_neutral_dispatcher_replays_sealed_requests_before_mutation(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    request_id = "private-request-1"
+    route_id = "a" * 64
+    replay_plan = build_replay_plan(
+        [{
+            "id": request_id,
+            "method": "POST",
+            "url": "https://app.example.test/api/items?token=canary-query",
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer canary-header",
+            },
+            "body": '{"name":"canary-body"}',
+            "body_mode": "raw",
+            "auth_type": "bearer",
+            "has_sensitive_material": True,
+        }],
+        allowed_origins=TARGET.allowed_origins,
+        default_origin=TARGET.allowed_origins[0],
+        authorization=ReplayAuthorization(
+            active_testing=True,
+            allow_state_changing_http=True,
+            approval_receipt_id="approval-1",
+        ),
+    )
+    request_manifest = build_request_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        source_action_ids=("inputs.collection_00",),
+        requests=({
+            "request_ref_id": request_id,
+            "route_id": route_id,
+            "method": "POST",
+            "auth_lane": "primary",
+            "selected_shard": None,
+            "safe_method": False,
+            "body_schema_digest": "b" * 64,
+            "content_type": "application/json",
+            "body_field_names": ["name"],
+            "selection_digest": "c" * 64,
+        },),
+    )
+    candidates = build_request_candidate_manifest(
+        (request_manifest,),
+        source_action_ids=("inputs.collection_00",),
+        maximum=1,
+    )
+    collection = _action(
+        "inputs.collection_00",
+        "collections.replay_active",
+        0,
+        capability_args={
+            "request_manifest_ref": request_manifest.reference().canonical_dict(),
+        },
+    )
+    mutation = _action(
+        "verify.xss.request.00000",
+        "xss.request_verify",
+        1,
+        dependencies=(collection.action_id,),
+        capability_args={
+            "request_candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "request_candidate_index": 0,
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(collection, mutation),
+    )
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    private_inputs = BrokerPrivateScanInputs.from_payload(
+        {
+            "schema_version": BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+            "lease_id": "lease-1",
+            "worker_id": "broker:worker-1",
+            "plan_digest": plan.plan_digest,
+            "target_binding_digest": TARGET.digest,
+            "expires_at": expires_at.isoformat(),
+            "options": {},
+            "replay_plans": {
+                collection.action_id: private_replay_plan_payload(replay_plan),
+            },
+        },
+        lease_id="lease-1",
+        worker_id="broker:worker-1",
+        plan_digest=plan.plan_digest,
+        target_binding_digest=TARGET.digest,
+    )
+    sent = []
+
+    class Transport:
+        async def send(self, request, **_kwargs):
+            sent.append(request)
+            return ReplayTransportResult(
+                status_code=200,
+                connected_address="192.0.2.10",
+                final_url=request.url,
+                response_headers={"Content-Type": "application/json"},
+                response_body=b'{"ok":true}',
+                elapsed_ms=1,
+            )
+
+    transport = Transport()
+    monkeypatch.setattr(
+        action_adapter_module,
+        "PinnedAiohttpReplayTransport",
+        lambda: transport,
+    )
+    backend = Backend(manifests={candidates.manifest_id: candidates})
+    dispatcher = _dispatcher(
+        plan,
+        backend,
+        private_inputs=private_inputs,
+        policy=ScanPolicy(
+            active_testing=True,
+            allow_state_changing_http=True,
+            approval_receipt_id="approval-1",
+        ),
+    )
+
+    replay_receipt = asyncio.run(dispatcher(
+        collection, _lease(plan, collection), _noop,
+    ))
+    mutation_receipt = asyncio.run(dispatcher(
+        mutation, _lease(plan, mutation), _noop,
+    ))
+
+    assert replay_receipt.status == "success"
+    assert mutation_receipt.status == "success"
+    assert len(sent) == 3
+    assert sent[0].body == b'{"name":"canary-body"}'
+    assert sent[1].body == sent[0].body
+    assert sent[2].body != sent[0].body
+    durable = json.dumps({
+        "replay": replay_receipt.public_dict(),
+        "mutation": mutation_receipt.public_dict(),
+    })
+    assert "canary-body" not in durable
+    assert "canary-header" not in durable
+    assert "canary-query" not in durable
+
+    fresh = _dispatcher(
+        plan,
+        backend,
+        private_inputs=private_inputs,
+        policy=ScanPolicy(
+            active_testing=True,
+            allow_state_changing_http=True,
+            approval_receipt_id="approval-1",
+        ),
+    )
+    sent.clear()
+    assert asyncio.run(fresh.restore_terminal_state(collection, None)) is True
+    resumed_mutation = asyncio.run(fresh(
+        mutation, _lease(plan, mutation), _noop,
+    ))
+    assert resumed_mutation.status == "success"
+    assert len(sent) == 2
+
+
+def test_database_neutral_dispatcher_lazily_loads_local_private_replay(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    replay_plan = build_replay_plan(
+        [{
+            "id": "local-private-request",
+            "method": "GET",
+            "url": "https://app.example.test/api/items",
+            "headers": {},
+            "body": None,
+            "body_mode": "none",
+            "auth_type": "none",
+            "has_sensitive_material": False,
+        }],
+        allowed_origins=TARGET.allowed_origins,
+        default_origin=TARGET.allowed_origins[0],
+        authorization=ReplayAuthorization(),
+    )
+    collection = _action(
+        "inputs.collection_00", "collections.replay_safe", 0,
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(collection,),
+    )
+    loaded = []
+
+    async def loader(action, options):
+        loaded.append((action.action_id, dict(options)))
+        return replay_plan
+
+    class Transport:
+        async def send(self, request, **_kwargs):
+            return ReplayTransportResult(
+                status_code=200,
+                connected_address="192.0.2.10",
+                final_url=request.url,
+                response_headers={"Content-Type": "application/json"},
+                response_body=b'{"ok":true}',
+                elapsed_ms=1,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module,
+        "PinnedAiohttpReplayTransport",
+        Transport,
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(),
+        private_replay_plan_loader=loader,
+    )
+
+    receipt = asyncio.run(dispatcher(
+        collection, _lease(plan, collection), _noop,
+    ))
+
+    assert receipt.status == "success"
+    assert receipt.budget_consumed["http_requests"] == 1
+    assert loaded == [(collection.action_id, {})]
+
+
+def test_a_collection_action_whose_every_request_is_withheld_is_skipped_not_failed(monkeypatch):
+    """A capture indexed before path credentials were withheld can give a collection action only
+    requests the worker withholds: the action is skipped with that reason and sends nothing."""
+    from scan.collection_replay import ScanCollectionReplayWithheld
+
+    collection = _action("inputs.collection_00", "collections.replay_safe", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(collection,),
+    )
+
+    async def loader(_action, _options):
+        raise ScanCollectionReplayWithheld("every request is withheld")
+
+    class Transport:
+        async def send(self, _request, **_kwargs):
+            raise AssertionError("a withheld capture request must not be sent")
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", Transport)
+    receipt = asyncio.run(_dispatcher(
+        plan, Backend(), private_replay_plan_loader=loader,
+    )(collection, _lease(plan, collection), _noop))
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("captured_path_credential_withheld",)
+
+
+@pytest.mark.parametrize(
+    ("allowed", "session", "expected_status", "expected_cookie"),
+    [
+        # Lab Scan 5c6b0a8f (2.11.0): a primary form_login profile with its safe defaults
+        # does not allow the replay, so the replay runs as it would with no profile -- it
+        # neither fails nor borrows the session the profile established for other work.
+        (("auth.session.establish", "http.request"), True, "success", None),
+        (("auth.session.establish", "collections.replay_safe"), True, "success",
+         "session=established-primary"),
+        # A profile that allows the replay never lets it fall back to anonymous traffic.
+        (("auth.session.establish", "collections.replay_safe"), False, "skipped", None),
+    ],
+    ids=("profile_does_not_allow_replay", "profile_session_bound", "session_missing"),
+)
+def test_collection_replay_uses_the_primary_profile_only_where_it_allows(
+    monkeypatch, allowed, session, expected_status, expected_cookie,
+):
+    replay_plan = build_replay_plan(
+        [{
+            "id": "local-private-request",
+            "method": "GET",
+            "url": "https://app.example.test/hub/login",
+            "headers": {"Accept": "text/html"},
+            "body": None,
+            "body_mode": "none",
+            "auth_type": "none",
+            "has_sensitive_material": False,
+        }],
+        allowed_origins=TARGET.allowed_origins,
+        default_origin=TARGET.allowed_origins[0],
+        authorization=ReplayAuthorization(),
+    )
+    collection = _action("inputs.collection_00", "collections.replay_safe", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(collection,),
+    )
+    options = {
+        "resolved_credential_profiles": [{
+            "profile_id": str(uuid.uuid4()),
+            "profile_version": 1,
+            "auth_kind": "form_login",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+            "allowed_capabilities": list(allowed),
+        }],
+    }
+    if session:
+        options["auth_cookies"] = "session=established-primary"
+    else:
+        options["login_username"] = "operator"
+    sent = []
+
+    async def loader(_action, _options):
+        return replay_plan
+
+    class Transport:
+        async def send(self, request, **_kwargs):
+            sent.append(request)
+            return ReplayTransportResult(
+                status_code=200,
+                connected_address="192.0.2.10",
+                final_url=request.url,
+                response_headers={"Content-Type": "text/html"},
+                response_body=b"<html></html>",
+                elapsed_ms=1,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", Transport,
+    )
+    dispatcher = _dispatcher(
+        plan, Backend(), private_replay_plan_loader=loader, options=options,
+    )
+
+    receipt = asyncio.run(dispatcher(
+        collection, _lease(plan, collection), _noop,
+    ))
+
+    assert receipt.status == expected_status
+    principal_contexts = [
+        item for item in receipt.observations
+        if item.get("kind") == "principal_context"
+    ]
+    # A resumed Scan restores the same replay under the same rule.
+    fresh = _dispatcher(
+        plan, Backend(), private_replay_plan_loader=loader, options=options,
+    )
+    assert asyncio.run(fresh.restore_terminal_state(collection, None)) is (
+        expected_status != "skipped"
+    )
+    if expected_status == "skipped":
+        assert receipt.errors == ("credential_session_unavailable",)
+        assert sent == []
+        return
+    assert len(sent) == 1
+    cookies = [value for name, value in sent[0].headers if name.lower() == "cookie"]
+    assert cookies == ([expected_cookie] if expected_cookie else [])
+    assert not any(name.lower() == "authorization" for name, _ in sent[0].headers)
+    assert bool(principal_contexts) is bool(expected_cookie)
+    assert "established-primary" not in json.dumps(receipt.public_dict())
+
+
+def test_database_neutral_resume_restores_sealed_auth_without_login_traffic():
+    pytest.importorskip("cryptography")
+    scan_id = str(uuid.uuid4())
+    action = _action("inputs.auth_primary", "auth.session.establish", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    key = generate_scan_private_state_key()
+    profile_id = str(uuid.uuid4())
+    options = {
+        SCAN_PRIVATE_STATE_KEY_OPTION: key,
+        "login_username": "operator",
+        "login_password": "worker-private-password",
+        "login_url": "/login",
+        "resolved_credential_profiles": [{
+            "profile_id": profile_id,
+            "profile_version": 1,
+            "auth_kind": "form_login",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+            "allowed_capabilities": [
+                "auth.session.establish", "http.request",
+            ],
+        }],
+    }
+    credential = resolve_scan_interactive_credential(
+        options, lane="primary", capability_name="auth.session.establish",
+    )
+    assert credential is not None
+    checkpoint = seal_scan_auth_session_state(
+        key,
+        scan_id=scan_id,
+        action_id=action.action_id,
+        action_digest=action.action_digest,
+        target_binding_digest=TARGET.digest,
+        lane="primary",
+        credential_binding_digest=credential.binding_digest,
+        headers={"Cookie": "session=worker-private-session"},
+        profile_id=profile_id,
+        profile_version=1,
+        principal="primary",
+    )
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    private_inputs = BrokerPrivateScanInputs.from_payload(
+        {
+            "schema_version": BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+            "lease_id": "lease-1",
+            "worker_id": "broker:worker-1",
+            "plan_digest": plan.plan_digest,
+            "target_binding_digest": TARGET.digest,
+            "expires_at": expires_at.isoformat(),
+            "options": options,
+            "replay_plans": {},
+        },
+        lease_id="lease-1",
+        worker_id="broker:worker-1",
+        plan_digest=plan.plan_digest,
+        target_binding_digest=TARGET.digest,
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(observations={action.action_id: (checkpoint,)}),
+        private_inputs=private_inputs,
+    )
+
+    assert asyncio.run(
+        dispatcher.restore_terminal_state(action, None)
+    ) is True
+    principal = resolve_scan_http_principal(
+        dispatcher.options, lane="primary", capability_name="http.request",
+    )
+    assert principal.authenticated is True
+    assert principal.headers() == {"Cookie": "session=worker-private-session"}
+    assert "worker-private-session" not in json.dumps(checkpoint)
+
+    tampered = dict(checkpoint)
+    tampered["action_digest"] = "f" * 64
+    tampered_dispatcher = _dispatcher(
+        plan,
+        Backend(observations={action.action_id: (tampered,)}),
+        private_inputs=private_inputs,
+    )
+    assert asyncio.run(
+        tampered_dispatcher.restore_terminal_state(action, None)
+    ) is False
+
+
+async def _noop():
+    return None
+
+
+def test_database_neutral_batch_checkpoints_and_resumes_each_candidate(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {
+                    "method": "GET", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/one", "concrete_path": "/one",
+                    "query_keys": ["first"], "source": "web.crawl",
+                },
+                {
+                    "method": "GET", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/two", "concrete_path": "/two",
+                    "query_keys": ["second"], "source": "web.crawl",
+                },
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest,
+        source_action_ids=("discover.web_crawl",),
+        maximum=10,
+    )
+    action = _action(
+        "verify.xss.batch.00000", "xss.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2},
+            "profile": "balanced",
+            "proof_policy": "deterministic",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    calls = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        calls.append(adapter._process_payload["execution_target"])
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={name: 1 for name in context.requested_budget},
+            observations=({"kind": "xss_probe", "response_sha256": "e" * 64},),
+            execution_started=True,
+            parser_version="dalfox-jsonl/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidates.manifest_id: candidates,
+    })
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    first = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    second = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert first.status == "success"
+    assert second.status == "success"
+    assert len(calls) == 2
+    assert len(backend.attempts[action.action_id]) == 2
+    assert {item["candidate_id"] for item in backend.attempts[action.action_id].values()} == {
+        item["candidate_id"] for item in candidates.entries
+    }
+    assert second.redacted_execution["resumed_count"] == 2
+    assert all(len(attempt_id) == 64 for attempt_id in backend.attempts[action.action_id])
+
+
+def test_xss_batch_skips_dalfox_where_no_input_reflects(monkeypatch):
+    """Dalfox sends its whole payload set whether or not an input comes back; one request with a
+    canary in every input decides first. /one never reflects (negative, no Dalfox run); /two
+    echoes its query (Dalfox runs as before)."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/one", "concrete_path": "/one",
+                 "query_keys": ["first"], "source": "web.crawl"},
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/two", "concrete_path": "/two",
+                 "query_keys": ["second"], "source": "web.crawl"},
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=10,
+    )
+    action = _action(
+        "verify.xss.batch.00000", "xss.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2}, "profile": "balanced",
+            "proof_policy": "deterministic",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    sent = []
+
+    class EchoTransport:
+        async def send(self, request, **_kwargs):
+            sent.append(request.url)
+            query = urllib.parse.urlsplit(request.url).query
+            body = (b"<p>" + query.encode() + b"</p>") if "/two" in request.url else b"<p>nothing</p>"
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={"Content-Type": "text/html"}, response_body=body, elapsed_ms=5,
+            )
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", EchoTransport)
+    calls = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        calls.append(adapter._process_payload["execution_target"])
+        return CapabilityAdapterResult(
+            status="success", actual_budget={name: 1 for name in context.requested_budget},
+            observations=({"kind": "xss_probe", "response_sha256": "e" * 64},),
+            execution_started=True, parser_version="dalfox-jsonl/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest, candidates.manifest_id: candidates,
+    })
+    dispatcher = _dispatcher(
+        plan, backend, policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert result.status == "success"
+    assert len(sent) == 2
+    assert [urllib.parse.urlsplit(url).path for url in calls] == ["/two"]
+    skipped = [item for item in result.observations if item.get("negative_reason") == "no_reflection"]
+    assert len(skipped) == 1 and skipped[0]["verdict"] == "negative"
+    # Every request sent is counted, the check on the reflecting endpoint included: two checks
+    # and the one request the Dalfox stand-in reports.
+    assert result.budget_consumed["http_requests"] == 3
+    # Both candidates are checkpointed: a resumed batch sends nothing again, and counts the same.
+    attempts = backend.attempts[action.action_id]
+    assert len(attempts) == 2
+    assert sorted(item["budget_consumed"]["http_requests"] for item in attempts.values()) == [1, 2]
+    resumed = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert len(sent) == 2 and len(calls) == 1
+    assert resumed.budget_consumed["http_requests"] == 3
+
+
+def test_xss_batch_skips_dalfox_where_the_input_reflects_only_into_json(monkeypatch):
+    """An API that echoes its input in a JSON document reflects, but no browser renders JSON as a
+    page: /one answers application/json (negative, no Dalfox run); /two echoes the same way in
+    HTML (Dalfox runs as before)."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/one", "concrete_path": "/one",
+                 "query_keys": ["first"], "source": "web.crawl"},
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/two", "concrete_path": "/two",
+                 "query_keys": ["second"], "source": "web.crawl"},
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=10,
+    )
+    action = _action(
+        "verify.xss.batch.00000", "xss.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2}, "profile": "balanced",
+            "proof_policy": "deterministic",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    sent = []
+
+    class EchoTransport:
+        async def send(self, request, **_kwargs):
+            sent.append(request.url)
+            query = urllib.parse.urlsplit(request.url).query
+            page = "/two" in request.url
+            body = (b"<p>" + query.encode() + b"</p>") if page else b'{"echo":"' + query.encode() + b'"}'
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={
+                    "Content-Type": "text/html" if page else "application/json; charset=utf-8",
+                },
+                response_body=body, elapsed_ms=5,
+            )
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", EchoTransport)
+    calls = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        calls.append(adapter._process_payload["execution_target"])
+        return CapabilityAdapterResult(
+            status="success", actual_budget={name: 1 for name in context.requested_budget},
+            observations=({"kind": "xss_probe", "response_sha256": "e" * 64},),
+            execution_started=True, parser_version="dalfox-jsonl/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest, candidates.manifest_id: candidates,
+    })
+    dispatcher = _dispatcher(
+        plan, backend, policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert result.status == "success"
+    assert len(sent) == 2
+    assert [urllib.parse.urlsplit(url).path for url in calls] == ["/two"]
+    skipped = [item for item in result.observations if item.get("negative_reason") == "response_not_a_page"]
+    assert len(skipped) == 1 and skipped[0]["verdict"] == "negative"
+    # Every request sent is counted, the check on the reflecting endpoint included: two checks
+    # and the one request the Dalfox stand-in reports.
+    assert result.budget_consumed["http_requests"] == 3
+    # Both candidates are checkpointed: a resumed batch sends nothing again, and counts the same.
+    attempts = backend.attempts[action.action_id]
+    assert len(attempts) == 2
+    assert sorted(item["budget_consumed"]["http_requests"] for item in attempts.values()) == [1, 2]
+    resumed = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert len(sent) == 2 and len(calls) == 1
+    assert resumed.budget_consumed["http_requests"] == 3
+
+
+def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeypatch, capsys):
+    """A candidate whose request cannot be resolved must fail only its own attempt.
+
+    The 2.2.0-era batch called execution_request_for_manifest_candidate with no per-candidate
+    guard, so a ScanWorkManifestError (a ValueError) from one candidate propagated out and the
+    orchestrator failed the entire verify.sqli/verify.xss action -- every other candidate in the
+    slice, sqli-search included, lost its verdict and the family read as gapped. Regression traced
+    from the worker log (`adapter raised ValueError`), 2026-09-06.
+    """
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/one", "concrete_path": "/one",
+                 "query_keys": ["first"], "source": "web.crawl"},
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/two", "concrete_path": "/two",
+                 "query_keys": ["second"], "source": "web.crawl"},
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=10,
+    )
+    action = _action(
+        "verify.xss.batch.00000", "xss.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2},
+            "profile": "balanced",
+            "proof_policy": "deterministic",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+
+    # The first candidate the batch reaches cannot be resolved; the second resolves normally.
+    real_resolver = action_adapter_module.execution_request_for_manifest_candidate
+    seen = {"raised": False}
+
+    def flaky_resolver(endpoints, manifest, index):
+        if not seen["raised"]:
+            seen["raised"] = True
+            raise action_adapter_module.ScanWorkManifestError("candidate manifest index is invalid")
+        return real_resolver(endpoints, manifest, index)
+
+    calls = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        calls.append(adapter._process_payload["execution_target"])
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={name: 1 for name in context.requested_budget},
+            observations=({"kind": "xss_probe", "response_sha256": "e" * 64},),
+            execution_started=True, parser_version="dalfox-jsonl/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module, "execution_request_for_manifest_candidate", flaky_resolver)
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidates.manifest_id: candidates,
+    })
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    # The action is NOT failed: it completed the resolvable candidate and recorded the other as a
+    # failed attempt. Both candidates are accounted for; the good one executed.
+    assert result.status != "failed", result.status
+    assert len(calls) == 1, "the resolvable candidate must still execute"
+    attempts = backend.attempts[action.action_id]
+    assert len(attempts) == 2
+    statuses = sorted(str(item.get("status")) for item in attempts.values())
+    assert statuses == ["failed", "success"], statuses
+    assert any(
+        "candidate_failed" in str(err)
+        for item in attempts.values() for err in (item.get("errors") or ())
+    )
+    # The failed candidate is named in the worker log with its exception type, so a batch that
+    # settles partial/adapter_failed can be diagnosed from the log, not only from the database.
+    failed_id = next(
+        str(item["candidate_id"]) for item in attempts.values() if item.get("status") == "failed"
+    )
+    logged = capsys.readouterr().err
+    assert f"candidate {failed_id} failed: ScanWorkManifestError" in logged
+
+
+def test_one_unconstructable_sqli_proof_candidate_does_not_fail_the_whole_batch(monkeypatch):
+    """A candidate whose SQLiProofAdapter cannot be constructed fails only its attempt.
+
+    The adapter's constructor validates each candidate's request against its sub-budget
+    (a body candidate in a slice whose reservation tier carries no state_changing
+    dimension, for instance) and raises SQLiProofError. That raise happens outside the
+    executor, in the batch loop, so before the per-candidate guard it aborted the whole
+    sqli.prove_batch action and every other candidate lost its verdict.
+    """
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/one", "concrete_path": "/one",
+                 "query_keys": ["id"], "source": "web.crawl"},
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/two", "concrete_path": "/two",
+                 "query_keys": ["product"], "source": "web.crawl"},
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=10,
+    )
+    signal_observations = tuple(
+        {"kind": "candidate_attempt", "candidate_id": entry["candidate_id"],
+         "proof_state": "suspected"}
+        for entry in candidates.entries
+    )
+    dependency = _action("verify.sqli.00000", "sqli.verify_batch", 0)
+    action = _action(
+        "prove.sqli.00000", "sqli.prove_batch", 1,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2},
+        },
+        dependencies=("verify.sqli.00000",),
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(dependency, action),
+    )
+
+    real_adapter = action_adapter_module.SQLiProofAdapter
+    seen = {"raised": False}
+
+    def flaky_adapter(**kwargs):
+        if not seen["raised"]:
+            seen["raised"] = True
+            raise action_adapter_module.SQLiProofError(
+                "body SQLi proof requires a conservative mutation reservation"
+            )
+        return real_adapter(**kwargs)
+
+    executed = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        executed.append(adapter)
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={name: 1 for name in context.requested_budget},
+            observations=({"kind": "sqli_proof", "proof_state": "not_proven",
+                           "finding_verdict": "not_proven", "proof_contract": None},),
+            execution_started=True, parser_version="sqli-proof/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module, "SQLiProofAdapter", flaky_adapter)
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(
+        manifests={
+            endpoint_manifest.manifest_id: endpoint_manifest,
+            candidates.manifest_id: candidates,
+        },
+        observations={"verify.sqli.00000": signal_observations},
+    )
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert result.status != "failed", result.status
+    assert len(executed) == 1, "the constructable candidate must still execute"
+    attempts = backend.attempts[action.action_id]
+    assert len(attempts) == 2
+    statuses = sorted(str(item.get("status")) for item in attempts.values())
+    assert statuses == ["failed", "success"], statuses
+    assert any(
+        "sqli_proof_unconstructable" in str(err)
+        for item in attempts.values() for err in (item.get("errors") or ())
+    )
+
+
+def _two_candidate_proof(capability, family_verifier):
+    """A proof batch over two signalled candidates (unit fixtures)."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": path, "concrete_path": path, "query_keys": [key],
+                 "source": "web.crawl"}
+                for path, key in (("/one", "id"), ("/two", "q"))
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=10,
+    )
+    kind = "xss_alert" if capability == "xss.browser_prove_batch" else "candidate_attempt"
+    signals = tuple(
+        {"kind": kind, "candidate_id": entry["candidate_id"], "proof_state": "suspected"}
+        for entry in candidates.entries
+    )
+    dependency = _action("verify.family.00000", family_verifier, 0)
+    action = _action(
+        "prove.family.00000", capability, 1,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2},
+        },
+        dependencies=(dependency.action_id,),
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(dependency, action),
+    )
+    backend = Backend(
+        manifests={endpoint_manifest.manifest_id: endpoint_manifest, candidates.manifest_id: candidates},
+        observations={dependency.action_id: signals},
+    )
+    return plan, action, backend
+
+
+_PROOF_BATCHES = [
+    ("sqli.prove_batch", "sqli.verify_batch", "sqli_proof", "http_requests"),
+    ("xss.browser_prove_batch", "xss.verify_batch", "xss_browser_proof", "browser_actions"),
+]
+
+
+@pytest.mark.parametrize("capability, verifier, family, dimension", _PROOF_BATCHES)
+@pytest.mark.parametrize("stop", ["cancelled", "share_unfunded"])
+def test_a_proof_batch_names_each_signalled_candidate_it_stopped_before(
+    monkeypatch, capability, verifier, family, dimension, stop,
+):
+    """The batch stops before its second candidate: the Scan was cancelled, or what is left of
+    the budget cannot fund that attempt's share. The candidate is named with no verdict, so the
+    family's coverage counts it unresolved instead of losing it."""
+    plan, action, backend = _two_candidate_proof(capability, verifier)
+    cancelled = {"now": False}
+
+    async def execute(_self, context, adapter, **_kwargs):
+        # The first attempt spends all but a sliver of the batch's budget, or the Scan is
+        # cancelled while it runs.
+        if stop == "cancelled":
+            cancelled["now"] = True
+        spent = {name: 1 for name in context.requested_budget}
+        if stop == "share_unfunded":
+            spent[dimension] = max(1, int(action.requested_budget[dimension]) - 1)
+        observation = ({"kind": "xss_browser_proof", "proof_state": "not_proven"}
+                       if family == "xss_browser_proof" else
+                       {"kind": "sqli_proof", "proof_state": "not_proven", "finding_verdict": "not_proven",
+                        "proof_contract": None})
+        return CapabilityAdapterResult(
+            status="success", actual_budget=spent, observations=(observation,),
+            execution_started=True, parser_version="fixture/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    dispatcher = _dispatcher(plan, backend, policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"))
+    dispatcher.cancelled = lambda: cancelled["now"]
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    attempts = [item for item in receipt.observations if item.get("kind") == "candidate_attempt"]
+    left = [item for item in receipt.observations if item.get("kind") == "candidate_deferred"]
+    assert len(attempts) == 1
+    assert [(item["family"], item["reason"]) for item in left] == [
+        (family, "proof_cancelled" if stop == "cancelled" else "proof_share_unfunded")]
+    assert left[0]["attempt_id"] != attempts[0]["attempt_id"] and left[0]["candidate_id"]
+    assert receipt.redacted_execution["unattempted_count"] == 1
+
+
+def test_browser_proof_attempts_fragment_candidate_without_server_signal(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https",
+                "host": "app.example.test", "port": 443,
+                "normalized_path": "/", "concrete_path": "/",
+                "query_keys": [], "browser_fragment_path": "/search",
+                "browser_fragment_query_keys": ["q"],
+                "source": "web.browser_crawl",
+            }],
+        },
+        source_action_ids=("discover.browser_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest,
+        source_action_ids=("discover.browser_crawl",),
+        maximum=10,
+    )
+    action = _action(
+        "prove.xss", "xss.browser_prove_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 1},
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    attempted = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        attempted.append(adapter.prepared)
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={
+                "browser_actions": 2, "http_requests": 1, "tool_wall_seconds": 1,
+            },
+            observations=({
+                "kind": "xss_browser_proof", "proof_state": "not_proven",
+            },),
+            execution_started=True,
+            parser_version="xss-browser-proof/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidates.manifest_id: candidates,
+    })
+    receipt = asyncio.run(_dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert len(attempted) == 1
+    assert attempted[0].injection_location == "fragment"
+    assert "#/search?q=" in attempted[0].url
+
+
+def _fragment_xss_proof_fixture():
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https",
+                "host": "app.example.test", "port": 443,
+                "normalized_path": "/", "concrete_path": "/",
+                "query_keys": [], "browser_fragment_path": "/search",
+                "browser_fragment_query_keys": ["q"],
+                "source": "web.browser_crawl",
+            }],
+        },
+        source_action_ids=("discover.browser_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.browser_crawl",), maximum=10,
+    )
+    action = _action(
+        "prove.xss", "xss.browser_prove_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 1},
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidates.manifest_id: candidates,
+    })
+    return plan, action, backend
+
+
+def test_browser_xss_proof_runs_under_the_discovery_principal(monkeypatch):
+    plan, action, backend = _fragment_xss_proof_fixture()
+    adapters = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        adapters.append(adapter)
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={"browser_actions": 2, "http_requests": 1, "tool_wall_seconds": 1},
+            observations=({"kind": "xss_browser_proof", "proof_state": "not_proven"},),
+            execution_started=True, parser_version="xss-browser-proof/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    receipt = asyncio.run(_dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+        options={"auth_header": "Bearer proof-principal-secret"},
+    )(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert len(adapters) == 1
+    # Discovery ran authenticated; replaying the candidate anonymously renders a login page.
+    assert adapters[0]._trusted_headers == {"Authorization": "Bearer proof-principal-secret"}
+    assert "proof-principal-secret" not in json.dumps(receipt.public_dict(), default=str)
+
+
+def test_browser_xss_proof_input_rejection_fails_only_that_candidate(monkeypatch):
+    plan, action, backend = _fragment_xss_proof_fixture()
+
+    def reject(**_kwargs):
+        raise action_adapter_module.BrowserCapabilityInputError("XSS proof parameter authority is ambiguous")
+
+    async def execute(*_args, **_kwargs):
+        raise AssertionError("a rejected candidate must not execute")
+
+    monkeypatch.setattr(action_adapter_module.XSSBrowserProofAdapter, "prepare", staticmethod(reject))
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    receipt = asyncio.run(_dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "partial"
+    attempts = list(backend.attempts[action.action_id].values())
+    assert [item["status"] for item in attempts] == ["failed"]
+    assert "xss_proof_input_rejected" in attempts[0]["errors"][0]
+
+
+def test_exposure_probe_batch_probes_seeds_follows_listings_and_checkpoints(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https",
+                "host": "app.example.test", "port": 443,
+                "normalized_path": "/app", "concrete_path": "/app",
+                "query_keys": [], "source": "web.crawl",
+            }],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    canned = {
+        "/id_rsa": (200, {"Content-Type": "text/plain"},
+                    b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbn..."),
+        "/metrics": (200, {"Content-Type": "text/plain"},
+                     b"# HELP up 1\n# TYPE up gauge\nup 1\n"),
+        "/ftp": (200, {"Content-Type": "text/html"},
+                 b"<title>Index of /ftp</title><a href=\"secret.md\">secret.md</a>"),
+        "/ftp/secret.md": (200, {"Content-Type": "text/markdown"},
+                           b"# Internal\nConfidential."),
+    }
+
+    class FakeTransport:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            assert follow_redirects is False
+            self.sent.append(request.url)
+            path = "/" + request.url.split("/", 3)[3] if request.url.count("/") >= 3 else "/"
+            for suffix, (status, headers, body) in canned.items():
+                if request.url.endswith(suffix):
+                    return ReplayTransportResult(
+                        status_code=status, connected_address="192.0.2.10",
+                        final_url=request.url, response_headers=headers,
+                        response_body=body, elapsed_ms=5,
+                    )
+            return ReplayTransportResult(
+                status_code=404, connected_address="192.0.2.10",
+                final_url=request.url,
+                response_headers={"Content-Type": "text/plain"},
+                response_body=b"not found", elapsed_ms=5,
+            )
+
+    transport = FakeTransport()
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: transport,
+    )
+    action = _action(
+        "verify.exposure", "exposure.verify_batch", 0,
+        capability_args={
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 100},
+            "profile": "balanced",
+            "proof_policy": "deterministic_proof_contract_required",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    backend = Backend(manifests={endpoint_manifest.manifest_id: endpoint_manifest})
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    first = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    proofs = [
+        item for item in first.observations
+        if item.get("kind") == "sensitive_exposure_proof"
+    ]
+    classes = {item["exposure_class"] for item in proofs}
+    assert "private_key_material" in classes
+    assert "metrics_endpoint" in classes
+    assert "directory_listing" in classes
+    # The listing was followed; the reached file is recorded as a reachability
+    # observation (listed_file), not proven-confidential.
+    assert "listed_file" in classes
+    assert any(
+        item["request_url"].endswith("/ftp/secret.md") for item in proofs
+    )
+    # No secret bytes escape into the observation: evidence is content-addressed
+    # and the excerpt is redacted (the visibility flag is itself masked by the
+    # receipt redaction layer, so accept either the bool or its redacted marker).
+    assert all(item["secret_values_visible"] in (False, "***") for item in proofs)
+    assert all("PRIVATE KEY" not in (item.get("redacted_excerpt") or "") for item in proofs)
+    # A body that may hold secrets is identified by an installation-keyed digest only;
+    # a plain SHA-256 of a small leaked file would be an offline guessing oracle.
+    for item in proofs:
+        if item["exposure_class"] in {"private_key_material", "listed_file"}:
+            assert item["response_body_sha256"] is None
+            assert str(item["response_body_hmac"]).startswith("hmac-sha256-")
+        else:
+            # Keyed whatever the classifier found (2.9.0): never a plain SHA-256.
+            assert str(item["response_body_sha256"]).startswith("scrypt-")
+
+    # Every probe is checkpointed; a resumed run repeats no request.
+    assert backend.attempts[action.action_id]
+    sent_first = len(transport.sent)
+    second = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert len(transport.sent) == sent_first  # fully resumed from durable attempts
+    assert second.redacted_execution["resumed_count"] >= 1
+
+
+def test_authz_surface_batch_proves_bfla_only_with_an_established_boundary(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {
+                    "method": "GET", "scheme": "https", "host": "app.example.test",
+                    "port": 443, "normalized_path": "/admin", "concrete_path": "/admin",
+                    "query_keys": [], "source": "web.crawl",
+                },
+                {
+                    "method": "GET", "scheme": "https", "host": "app.example.test",
+                    "port": 443, "normalized_path": "/api/Users",
+                    "concrete_path": "/api/Users", "query_keys": [], "source": "web.crawl",
+                },
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    users_body = b'[{"id":1,"email":"a@b.test"},{"id":2,"email":"c@d.test"}]'
+
+    class PrincipalTransport:
+        async def send(self, request, **_kwargs):
+            authed = any(name.lower() == "authorization" for name, _ in request.headers)
+            path = urllib.parse.urlsplit(request.url).path
+            if path == "/admin" and not authed:
+                return ReplayTransportResult(
+                    status_code=401, connected_address="192.0.2.10",
+                    final_url=request.url, response_headers={"Content-Type": "application/json"},
+                    response_body=b'{"error":"unauthorized"}', elapsed_ms=5,
+                )
+            if path == "/admin":
+                return ReplayTransportResult(
+                    status_code=200, connected_address="192.0.2.10",
+                    final_url=request.url, response_headers={"Content-Type": "application/json"},
+                    response_body=b'{"panel":true}', elapsed_ms=5,
+                )
+            # /api/Users serves the identical authenticated user list to anyone.
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={"Content-Type": "application/json"},
+                response_body=users_body, elapsed_ms=5,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", PrincipalTransport,
+    )
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name=None: _principal(lane),
+    )
+    action = _action(
+        "verify.authz_surface", "authz_surface.verify_batch", 0,
+        capability_args={
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 100},
+            "profile": "balanced",
+            "proof_policy": "deterministic_proof_contract_required",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    backend = Backend(manifests={endpoint_manifest.manifest_id: endpoint_manifest})
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    first = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    proofs = [
+        item for item in first.observations
+        if item.get("kind") == "authz_surface_proof"
+    ]
+    assert len(proofs) == 1
+    assert proofs[0]["route_id"].endswith("/api/users") or "users" in proofs[0]["request_url"].lower()
+    assert first.redacted_execution["boundary_established"] is True
+
+    # Resume replays no request and reproduces the same single finding.
+    second = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert second.redacted_execution["resumed_count"] == 2
+    assert len([
+        item for item in second.observations
+        if item.get("kind") == "authz_surface_proof"
+    ]) == 1
+
+
+def test_authz_surface_batch_reports_another_accounts_password_hash(monkeypatch):
+    """A signed-in low-privileged user reads the admin record with its password hash (the
+    record of another account: two distinct hashes reach one principal)."""
+    scan_id = str(uuid.uuid4())
+    endpoints = [
+        {
+            "method": "GET", "scheme": "https", "host": "app.example.test",
+            "port": 443, "normalized_path": path, "concrete_path": path,
+            "query_keys": [], "source": "seed",
+        }
+        for path in ("/hub/api/me", "/hub/api/users/1", "/hub/api/orders/1001")
+    ]
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": endpoints,
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    own = "$2b$10$" + "VXNlclR3b0hhc2hWYWx1ZUZvclRlc3RzT25seS4uLi4uLi4uLi4uLi4u"[:53]
+    admin = "$2b$10$" + "Qm9yZWRBZG1pbkhhc2hWYWx1ZUZvclRlc3RzT25seS4uLi4uLi4uLi4u"[:53]
+    bodies = {
+        "/hub/api/me": b'{"id":2,"username":"user","role":"user","password_hash":"%s"}' % own.encode(),
+        "/hub/api/users/1": (
+            b'{"id":1,"username":"admin","role":"admin","salary":182000,"password_hash":"%s"}'
+            % admin.encode()
+        ),
+        "/hub/api/orders/1001": b'{"id":1001,"user_id":2,"total":12.5,"status":"shipped"}',
+    }
+
+    class HubTransport:
+        async def send(self, request, **_kwargs):
+            authed = any(name.lower() == "authorization" for name, _ in request.headers)
+            path = urllib.parse.urlsplit(request.url).path
+            if not authed:
+                return ReplayTransportResult(
+                    status_code=401, connected_address="192.0.2.10", final_url=request.url,
+                    response_headers={"Content-Type": "application/json"},
+                    response_body=b'{"error":"Unauthorized"}', elapsed_ms=5,
+                )
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={"Content-Type": "application/json"},
+                response_body=bodies[path], elapsed_ms=5,
+            )
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", HubTransport)
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name=None: _principal(lane),
+    )
+    action = _action(
+        "verify.authz_surface", "authz_surface.verify_batch", 0,
+        capability_args={
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 100},
+            "profile": "fast",
+            "proof_policy": "deterministic_proof_contract_required",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    backend = Backend(manifests={endpoint_manifest.manifest_id: endpoint_manifest})
+    dispatcher = _dispatcher(
+        plan, backend, policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    disclosed = {
+        item["request_url"].rsplit("/hub", 1)[-1]: item for item in result.observations
+        if item.get("proof_contract") == "authz_surface_password_hash_disclosure/v1"
+    }
+    assert set(disclosed) == {"/api/me", "/api/users/1"}
+    assert disclosed["/api/users/1"]["other_accounts_hashes"] is True
+    assert disclosed["/api/users/1"]["anonymous_reads_hashes"] is False
+    # Never the hash itself, anywhere in the receipt.
+    dumped = json.dumps([list(result.observations), result.redacted_execution], default=str)
+    assert own not in dumped
+    assert admin not in dumped
+    # The anonymous 401s and signed-in 200s are a boundary, but no route serves both alike.
+    assert not [
+        item for item in result.observations
+        if item.get("proof_contract") == "authz_surface_anonymous_access/v1"
+    ]
+
+
+def test_authz_surface_batch_makes_no_claim_on_a_fully_public_app(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https", "host": "app.example.test",
+                "port": 443, "normalized_path": "/api/Users",
+                "concrete_path": "/api/Users", "query_keys": [], "source": "web.crawl",
+            }],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+
+    class PublicTransport:
+        async def send(self, request, **_kwargs):
+            # Everything is 200 identical to everyone: no auth boundary exists.
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={"Content-Type": "application/json"},
+                response_body=b'[{"id":1},{"id":2}]', elapsed_ms=5,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", PublicTransport,
+    )
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name=None: _principal(lane),
+    )
+    action = _action(
+        "verify.authz_surface", "authz_surface.verify_batch", 0,
+        capability_args={
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 100},
+            "profile": "balanced",
+            "proof_policy": "deterministic_proof_contract_required",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    backend = Backend(manifests={endpoint_manifest.manifest_id: endpoint_manifest})
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert result.redacted_execution["boundary_established"] is False
+    assert not [
+        item for item in result.observations
+        if item.get("kind") == "authz_surface_proof"
+    ]
+
+
+def test_safe_authentication_body_batch_still_charges_state_budget(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    route_id = "d" * 64
+    request = build_replay_plan(
+        ({
+            "id": "credential-login:primary",
+            "method": "POST",
+            "url": "https://app.example.test/rest/user/login",
+            "headers": {"Content-Type": "application/json"},
+            "body": '{"email":"disposable@example.test","password":"private"}',
+            "body_mode": "application/json",
+            "auth_type": "none",
+            "has_sensitive_material": True,
+        },),
+        allowed_origins=TARGET.allowed_origins,
+        authorization=ReplayAuthorization(
+            active_testing=True,
+            allow_state_changing_http=True,
+            approval_receipt_id="credential-workflow",
+        ),
+    ).requests[0]
+    request_manifest = build_request_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        source_action_ids=("inputs.auth_primary",),
+        requests=({
+            "request_ref_id": request.request_id,
+            "route_id": route_id,
+            "method": "POST",
+            "auth_lane": "primary",
+            "selected_shard": None,
+            "request_class": "safe_authentication",
+            "content_type": "application/json",
+            "body_field_names": ["email", "password"],
+            "selection_digest": "e" * 64,
+            "body_schema_digest": "f" * 64,
+        },),
+    )
+    candidates = build_request_candidate_manifest(
+        (request_manifest,),
+        source_action_ids=("inputs.auth_primary",),
+        maximum=10,
+    )
+    action = _action(
+        "verify.request_sqli", "sqli.request_verify_batch", 0,
+        capability_args={
+            "request_candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2},
+            "profile": "balanced_batch_v1",
+            "proof_policy": "deterministic_differential_required",
+        },
+    )
+    action = ScanAction(
+        **{
+            **action.digest_material(),
+            "requested_budget": {
+                "http_requests": 4,
+                "state_changing_requests": 4,
+                "tool_wall_seconds": 20,
+            },
+        }
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+
+    class Transport:
+        async def send(self, exact_request, **_kwargs):
+            return ReplayTransportResult(
+                status_code=200,
+                connected_address="192.0.2.10",
+                final_url=exact_request.url,
+                response_body=b"normal",
+            )
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", Transport)
+    backend = Backend(manifests={candidates.manifest_id: candidates})
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+    dispatcher._private_requests[request.request_id] = request
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert receipt.budget_consumed == {
+        "http_requests": 4,
+        "state_changing_requests": 4,
+        "tool_wall_seconds": 2,
+    }
+    assert all(
+        item.get("request_class") == "safe_authentication"
+        for item in receipt.observations if item.get("kind") == "candidate_attempt"
+    )
+    public = json.dumps(receipt.public_dict())
+    assert "disposable@example.test" not in public
+    assert '"password":"private"' not in public
+
+
+def test_database_neutral_finalizer_reads_only_durable_results_and_observations():
+    baseline = _action("baseline.http", "http.request", 0)
+    final = _action("finalize.report", "scan.finalize", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(baseline, final),
+    )
+    manifest = ObservationManifestReference(
+        manifest_id=str(uuid.uuid4()),
+        sha256="b" * 64,
+        count=1,
+        size_bytes=10,
+        object_key="scan/test/baseline.json",
+        manifest_digest="c" * 64,
+    )
+    result = CapabilityResultReference(
+        action_id=baseline.action_id,
+        action_digest=baseline.action_digest,
+        capability_name=baseline.capability_name,
+        adapter_name=str(baseline.placement["adapter_name"]),
+        adapter_version=str(baseline.placement["adapter_version"]),
+        output_schema=baseline.output_schema,
+        status=CapabilityResultStatus.SUCCESS,
+        partial=False,
+        timed_out=False,
+        reason_code=None,
+        receipt_ref=CapabilityReceiptReference(
+            receipt_id=str(uuid.uuid4()), receipt_hash="d" * 64,
+        ),
+        observation_manifest_ref=manifest,
+        budget_reserved=baseline.requested_budget,
+        budget_consumed={name: 0 for name in baseline.requested_budget},
+    )
+    backend = Backend(
+        results={baseline.action_id: result},
+        observations={baseline.action_id: ({"kind": "http_observation"},)},
+    )
+    dispatcher = _dispatcher(plan, backend)
+
+    receipt = asyncio.run(dispatcher(final, _lease(plan, final), _noop))
+
+    assert receipt.status == "success"
+    assert receipt.observations[0]["kind"] == "scan_report"
+    assert receipt.redacted_execution["target_traffic"] is False
+
+
+def test_a_cancelled_scan_report_keeps_what_its_settled_actions_confirmed():
+    """Cancellation settles the finalizer cancelled; the worker still reports what ran."""
+    from scan.cancelled_report import is_kept_cancelled_report, mark_cancelled_scan_report
+
+    templates = _action("passive.templates.r01", "templates.passive_batch", 0)
+    later = _action("baseline.http", "http.request", 1)
+    final = _action(
+        "finalize.report", "scan.finalize", 2,
+        dependencies=(templates.action_id, later.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(templates, later, final),
+    )
+
+    def settled(action, status, reason=None, manifest=True):
+        return CapabilityResultReference(
+            action_id=action.action_id, action_digest=action.action_digest,
+            capability_name=action.capability_name,
+            adapter_name=str(action.placement["adapter_name"]),
+            adapter_version=str(action.placement["adapter_version"]),
+            output_schema=action.output_schema, status=status,
+            partial=False, timed_out=False, reason_code=reason,
+            receipt_ref=CapabilityReceiptReference(
+                receipt_id=str(uuid.uuid4()), receipt_hash="d" * 64,
+            ),
+            observation_manifest_ref=ObservationManifestReference(
+                manifest_id=str(uuid.uuid4()), sha256="b" * 64, count=1, size_bytes=10,
+                object_key=f"scan/test/{action.action_id}.json", manifest_digest="c" * 64,
+            ) if manifest else None,
+            budget_reserved=action.requested_budget,
+            budget_consumed={name: 0 for name in action.requested_budget},
+        )
+
+    backend = Backend(
+        results={
+            templates.action_id: settled(templates, CapabilityResultStatus.SUCCESS),
+            later.action_id: settled(
+                later, CapabilityResultStatus.CANCELLED, CapabilityResultReason.CANCELLED,
+                manifest=False,
+            ),
+            final.action_id: settled(
+                final, CapabilityResultStatus.CANCELLED, CapabilityResultReason.CANCELLED,
+                manifest=False,
+            ),
+        },
+        observations={templates.action_id: ({
+            "kind": "template_match",
+            "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers",
+            "severity": "info",
+            "matched_at": "https://app.example.test/",
+            "matcher_name": "x-frame-options",
+        },)},
+    )
+    report = mark_cancelled_scan_report(
+        asyncio.run(_dispatcher(plan, backend).build_scan_report())
+    )
+
+    assert [finding["title"] for finding in report["findings"]] == [
+        "Missing HTTP response header: X-Frame-Options",
+    ]
+    assert report["coverage"]["status"] == "cancelled"
+    assert report["scan_metadata"]["cancelled"] is True
+    assert is_kept_cancelled_report(report)
+
+
+def test_a_scan_report_is_not_built_while_an_action_is_unsettled():
+    baseline = _action("baseline.http", "http.request", 0)
+    final = _action("finalize.report", "scan.finalize", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(baseline, final),
+    )
+    with pytest.raises(Exception, match="not terminal"):
+        asyncio.run(_dispatcher(plan, Backend()).build_scan_report())
+
+
+@pytest.mark.parametrize("action_id", ["baseline.http", "baseline.security_txt"])
+def test_http_archive_principal_matches_transmitted_credentials(monkeypatch, action_id):
+    action = _action(action_id, "http.request", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    captured = {}
+
+    async def execute_bound(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "response": {"status": 200}, "request": {"path": "/"}}
+
+    monkeypatch.setattr(action_adapter_module, "execute_bound_http_request", execute_bound)
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name: _principal(lane),
+    )
+    receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+    assert receipt.status == "success"
+    if action_id == "baseline.http":
+        assert captured["trusted_headers"]
+        assert captured["principal_slot"] == "primary"
+    else:
+        assert captured["trusted_headers"] is None
+        assert captured["principal_slot"] == "anonymous"
+
+
+def test_database_neutral_http_receipt_drops_body_and_redacts_urls(monkeypatch):
+    action = _action("baseline.http", "http.request", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+
+    async def execute_bound(*_args, **_kwargs):
+        return {
+            "ok": True,
+            "request": {"method": "GET", "path": "/reset/token/abc123?key=secret"},
+            "response": {
+                "status": 200,
+                "body_sample": "Bearer should-never-enter-durable-evidence",
+                "selected_json": {"access_token": "also-secret"},
+                "selected_headers": {
+                    "authorization": "Bearer should-never-enter-durable-evidence",
+                },
+                "final_url": "https://app.example.test/reset?token=also-secret",
+            },
+            "redirect_chain": [],
+            "hops_followed": 0,
+        }
+
+    monkeypatch.setattr(
+        action_adapter_module, "execute_bound_http_request", execute_bound,
+    )
+    dispatcher = _dispatcher(plan, Backend())
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    serialized = json.dumps(receipt.public_dict(), sort_keys=True)
+
+    assert receipt.status == "success"
+    assert "should-never-enter-durable-evidence" not in serialized
+    assert "also-secret" not in serialized
+    assert receipt.observations[0]["response"]["body_sample"] == ""
+    assert receipt.observations[0]["response"]["selected_json"] == {}
+    assert "<redacted>" in serialized
+
+
+@pytest.mark.parametrize(("granted", "reflected"), [
+    ("https://shakerscan-cors-probe.invalid", True),
+    # Not the Origin a browser sent: it would refuse the cross-origin read.
+    ("https://shakerscan-cors-probe.invalid/", False),
+    ("https://app.example.test", False),
+])
+def test_cors_probe_is_judged_on_the_header_as_received_not_as_the_receipt_stores_it(
+    monkeypatch, granted, reflected,
+):
+    """Unit fixture: the probe answer of an origin-reflecting target, through the real receipt."""
+    from scan.posture_findings import CORS_PROBE_ORIGIN, cors_findings
+    action = _action("baseline.cors", "http.request", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    sent = {}
+
+    async def execute_bound(_origin, args, **_kwargs):
+        sent.update(args.get("headers") or {})
+        return {
+            "ok": True,
+            "request": {"method": "GET", "origin": "https://app.example.test", "path": "/"},
+            "response": {"status": 200, "security_headers": {
+                "access-control-allow-origin": granted, "access-control-allow-credentials": "true",
+            }},
+            "redirect_chain": [], "hops_followed": 0,
+        }
+
+    monkeypatch.setattr(action_adapter_module, "execute_bound_http_request", execute_bound)
+    receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+    assert receipt.status == "success" and sent == {"Origin": CORS_PROBE_ORIGIN}
+    [observation] = receipt.observations
+    findings = cors_findings(
+        action.action_id, observation["request"], observation["response"], make=lambda **finding: finding,
+    )
+    titles = [finding["title"] for finding in findings]
+    assert titles == (["CORS policy reflects any origin"] if reflected else [])
+
+
+def test_database_neutral_network_action_limits_commands_to_reserved_hosts(monkeypatch):
+    target = TargetBinding(
+        target_id=TARGET.target_id,
+        target_kind=TARGET.target_kind,
+        canonical_host=TARGET.canonical_host,
+        allowed_origins=TARGET.allowed_origins,
+        allowed_addresses=("192.0.2.10", "192.0.2.11", "192.0.2.12"),
+        allowed_root_domains=TARGET.allowed_root_domains,
+    )
+    spec = CAPABILITY_REGISTRY.require("ports.discover")
+    action = ScanAction(
+        action_id="discover.ports",
+        stage="discover_network",
+        ordinal=0,
+        capability_name=spec.name,
+        capability_args={},
+        target_binding_digest=target.digest,
+        input_binding_digest="e" * 64,
+        requested_budget={
+            "hosts_attempted": 1,
+            "tcp_ports_attempted": 4,
+            "tool_wall_seconds": 5,
+        },
+        placement={
+            "schema_version": "scan-action-placement/v1",
+            "eligible_backends": ["local", "broker"],
+            "requirements": dict(spec.placement_requirements),
+            "adapter_name": spec.adapter,
+            "adapter_version": spec.adapter_version,
+        },
+        dependencies=(),
+        required=True,
+        supporting=True,
+        output_schema=spec.output_schema,
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    class Factory:
+        capability_name = spec.name
+        adapter_name = spec.adapter
+        adapter_version = spec.adapter_version
+        parser_version = spec.output_schema
+
+        def prepare(self, *, target, args, policy):
+            del policy
+            captured["addresses"] = target.allowed_addresses
+            captured["ports"] = tuple(args["ports"])
+            return PreparedExecution(
+                capability_name=spec.name,
+                adapter_name=spec.adapter,
+                adapter_version=spec.adapter_version,
+                commands=(),
+                estimated_budget={
+                    "hosts_attempted": len(target.allowed_addresses),
+                    "tcp_ports_attempted": len(args["ports"]),
+                    "tool_wall_seconds": 5,
+                },
+                input_digest="f" * 64,
+                redacted_execution={},
+                parser_version=spec.output_schema,
+            )
+
+    class ExecutionAdapter:
+        manages_cancellation = False
+
+        def __init__(self, *, prepared, parser, **_kwargs):
+            del parser
+            self.capability_name = prepared.capability_name
+            self.adapter_name = prepared.adapter_name
+            self.adapter_version = prepared.adapter_version
+
+        async def execute(self, **_kwargs):
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={
+                    "hosts_attempted": 1,
+                    "tcp_ports_attempted": 4,
+                    "tool_wall_seconds": 1,
+                },
+                execution_started=True,
+                parser_version=spec.output_schema,
+            )
+
+    monkeypatch.setattr(action_adapter_module, "network_capability_adapter", lambda _name: Factory())
+    monkeypatch.setattr(action_adapter_module, "NetworkExecutionAdapter", ExecutionAdapter)
+    dispatcher = _dispatcher(plan, Backend(), target=target)
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert captured["addresses"] == ("192.0.2.10",)
+    assert len(captured["ports"]) == 4
+
+
+@pytest.mark.parametrize(
+    "capability_name, action_id",
+    [("ports.discover", "discover.ports"), ("service.fingerprint", "discover.services")],
+)
+def test_network_capabilities_reserve_the_addresses_they_slice(capability_name, action_id):
+    """The registry grant must fund the dimension the adapter binds addresses from.
+
+    ``_network`` slices ``target.allowed_addresses`` by the reserved
+    ``hosts_attempted`` grant. A spec that funds only ports reserves zero hosts,
+    so the slice is empty and the action self-skips as ``not_applicable`` on
+    every target -- which is what shipped: across the whole action history
+    ``ports.discover`` had never once executed, and ``discover.services``
+    was always blocked behind it as ``dependency_failed``.
+    """
+    spec = CAPABILITY_REGISTRY.require(capability_name)
+    del action_id
+    assert int(dict(spec.budget_cost).get("hosts_attempted") or 0) >= 1
+
+
+def test_network_action_binds_addresses_under_the_registry_budget(monkeypatch):
+    """Plan the action from the registry cost, exactly as the allocator does."""
+    target = TargetBinding(
+        target_id=TARGET.target_id,
+        target_kind=TARGET.target_kind,
+        canonical_host=TARGET.canonical_host,
+        allowed_origins=TARGET.allowed_origins,
+        allowed_addresses=("192.0.2.10", "192.0.2.11", "192.0.2.12"),
+        allowed_root_domains=TARGET.allowed_root_domains,
+    )
+    spec = CAPABILITY_REGISTRY.require("ports.discover")
+    action = ScanAction(
+        action_id="discover.ports",
+        stage="discover_network",
+        ordinal=0,
+        capability_name=spec.name,
+        capability_args={},
+        target_binding_digest=target.digest,
+        input_binding_digest="e" * 64,
+        # The allocator hands the adapter the registry cost, never a hand-written
+        # budget; pinning a literal here is what hid the missing host grant.
+        requested_budget=dict(spec.budget_cost),
+        placement={
+            "schema_version": "scan-action-placement/v1",
+            "eligible_backends": ["local", "broker"],
+            "requirements": dict(spec.placement_requirements),
+            "adapter_name": spec.adapter,
+            "adapter_version": spec.adapter_version,
+        },
+        dependencies=(),
+        required=True,
+        supporting=True,
+        output_schema=spec.output_schema,
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    class Factory:
+        capability_name = spec.name
+        adapter_name = spec.adapter
+        adapter_version = spec.adapter_version
+        parser_version = spec.output_schema
+
+        def prepare(self, *, target, args, policy):
+            del policy
+            captured["addresses"] = target.allowed_addresses
+            captured["ports"] = tuple(args["ports"])
+            return PreparedExecution(
+                capability_name=spec.name,
+                adapter_name=spec.adapter,
+                adapter_version=spec.adapter_version,
+                commands=(),
+                estimated_budget={
+                    "hosts_attempted": len(target.allowed_addresses),
+                    "tcp_ports_attempted": len(args["ports"]),
+                    "tool_wall_seconds": 5,
+                },
+                input_digest="f" * 64,
+                redacted_execution={},
+                parser_version=spec.output_schema,
+            )
+
+    class ExecutionAdapter:
+        manages_cancellation = False
+
+        def __init__(self, *, prepared, parser, **_kwargs):
+            del parser
+            self.capability_name = prepared.capability_name
+            self.adapter_name = prepared.adapter_name
+            self.adapter_version = prepared.adapter_version
+
+        async def execute(self, **_kwargs):
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={
+                    "hosts_attempted": len(captured["addresses"]),
+                    "tcp_ports_attempted": len(captured["ports"]),
+                    "tool_wall_seconds": 1,
+                },
+                execution_started=True,
+                parser_version=spec.output_schema,
+            )
+
+    monkeypatch.setattr(action_adapter_module, "network_capability_adapter", lambda _name: Factory())
+    monkeypatch.setattr(action_adapter_module, "NetworkExecutionAdapter", ExecutionAdapter)
+    dispatcher = _dispatcher(plan, Backend(), target=target)
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    # A skip would come back as a receipt that never entered execution.
+    assert receipt.status == "success"
+    # Every bound address is examined, and each one gets a real port list.
+    assert captured["addresses"] == target.allowed_addresses
+    assert len(captured["ports"]) >= 1
+
+
+
+@pytest.mark.parametrize(("reserved_connections", "legacy_probes"), [
+    # Four pairs at four connections: the handshakes only, so the raw probes must not run.
+    (4 * TLS_HANDSHAKE_CONNECTIONS_PER_PAIR, False),
+    (4 * TLS_CONNECTIONS_PER_PAIR, True),
+])
+def test_database_neutral_tls_action_inspects_the_complete_frozen_matrix(
+    monkeypatch, reserved_connections, legacy_probes,
+):
+    target = TargetBinding(
+        target_id=TARGET.target_id,
+        target_kind=TARGET.target_kind,
+        canonical_host=TARGET.canonical_host,
+        allowed_origins=(
+            "https://app.example.test",
+            "https://app.example.test:8443",
+        ),
+        allowed_addresses=("192.0.2.10", "192.0.2.11"),
+        allowed_root_domains=TARGET.allowed_root_domains,
+    )
+    spec = CAPABILITY_REGISTRY.require("tls.inspect")
+    args = {
+        "origins_ref": "frozen_https_origins",
+        "origin_count": 2,
+        "addresses_ref": "frozen_addresses",
+        "address_count": 2,
+    }
+    action = ScanAction(
+        action_id="baseline.tls",
+        stage="deterministic_baseline",
+        ordinal=0,
+        capability_name=spec.name,
+        capability_args=args,
+        target_binding_digest=target.digest,
+        input_binding_digest="e" * 64,
+        requested_budget={
+            "tcp_ports_attempted": reserved_connections,
+            "tool_wall_seconds": 60,
+        },
+        placement={
+            "schema_version": "scan-action-placement/v1",
+            "eligible_backends": ["local", "broker"],
+            "requirements": dict(spec.placement_requirements),
+            "adapter_name": spec.adapter,
+            "adapter_version": spec.adapter_version,
+        },
+        dependencies=(),
+        required=True,
+        supporting=False,
+        output_schema=spec.output_schema,
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    async def inspect(*, target, timeout_seconds_per_target, legacy_probes):
+        captured["target"] = target
+        captured["timeout"] = timeout_seconds_per_target
+        captured["legacy_probes"] = legacy_probes
+        return {
+            "ok": True,
+            "status": "success",
+            "observations": [{
+                "kind": "tls_protocol",
+                "origin": origin,
+                "pinned_address": address,
+            } for origin in target.allowed_origins
+              for address in target.allowed_addresses],
+            "budget_consumed": {
+                "tcp_ports_attempted": 12,
+                "tool_wall_seconds": 4,
+            },
+        }
+
+    monkeypatch.setattr(action_adapter_module, "inspect_tls_binding", inspect)
+    dispatcher = _dispatcher(plan, Backend(), target=target)
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert captured == {"target": target, "timeout": 15, "legacy_probes": legacy_probes}
+    assert len(receipt.observations) == 4
+    assert receipt.budget_consumed == {
+        "tcp_ports_attempted": 12,
+        "tool_wall_seconds": 4,
+    }
+
+
+class _ModernTlsSession:
+    """The live stdlib session of a TLS 1.2/1.3 server (no certificate is needed here)."""
+
+    def __init__(self, version):
+        self._version = version
+
+    def get_extra_info(self, name):
+        return self if name == "ssl_object" else None
+
+    def version(self):
+        return self._version
+
+    def cipher(self):
+        return ("ECDHE-RSA-AES128-GCM-SHA256", self._version, 128)
+
+    def selected_alpn_protocol(self):
+        return "h2"
+
+    def getpeercert(self, binary_form=False):
+        return b""
+
+    def close(self):
+        return None
+
+    async def wait_closed(self):
+        return None
+
+
+class _RefusedRawClientHello:
+    """A raw legacy ClientHello connection the server answers with a protocol_version alert."""
+
+    def __init__(self):
+        self._answered = False
+
+    def write(self, _data):
+        return None
+
+    async def drain(self):
+        return None
+
+    async def read(self, _limit):
+        if self._answered:
+            return b""
+        self._answered = True
+        return b"\x15\x03\x01\x00\x02\x02\x46"
+
+    def close(self):
+        return None
+
+    async def wait_closed(self):
+        return None
+
+
+def _modern_tls_server(monkeypatch):
+    """Count every TCP connection TLS inspection opens against a modern-only server."""
+    sockets = {"tls": 0, "raw": 0}
+
+    async def open_connection(**kwargs):
+        context = kwargs.get("ssl")
+        if context is not None:
+            sockets["tls"] += 1
+            modern = "TLSv1.3" if context.minimum_version == ssl.TLSVersion.TLSv1_3 else "TLSv1.2"
+            return object(), _ModernTlsSession(modern)
+        sockets["raw"] += 1
+        connection = _RefusedRawClientHello()
+        return connection, connection
+
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    return sockets
+
+
+def _tls_compiler_target(*addresses):
+    return TargetBinding(
+        target_id="10000000-0000-0000-0000-000000000002", target_kind="web",
+        canonical_host="app.example.test", allowed_origins=("https://app.example.test",),
+        allowed_addresses=tuple(addresses), allowed_root_domains=("example.test",),
+        scope_receipt_id="10000000-0000-0000-0000-000000000003",
+    )
+
+
+def _compiled_tls_action(target, *, max_tcp_ports):
+    execution_plan = ScanExecutionPlan(
+        policy=ScanPolicy(
+            include_families=("sensitive_exposure",),
+            scope_receipt_id=target.scope_receipt_id,
+        ),
+        budget_profile="balanced",
+        budget=replace(BUDGET_PROFILES["balanced"], max_tcp_ports=max_tcp_ports),
+    )
+    compiled = ScanActionPlanCompiler().compile(
+        scan_id=str(uuid.uuid4()), execution_plan=execution_plan,
+        target_binding=target, action_scope="full",
+    )
+    return next(item for item in compiled.actions if item.capability_name == "tls.inspect")
+
+
+def _dispatch_tls_action(action, target):
+    action = replace(action, ordinal=0, dependencies=(), action_digest=None)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest, actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend(), target=target)
+    return asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+
+def _assert_tls_handshakes_only_within_hold(receipt, sockets, action, pairs):
+    reserved = int(action.requested_budget["tcp_ports_attempted"])
+    assert reserved == pairs * TLS_HANDSHAKE_CONNECTIONS_PER_PAIR
+    assert sockets["raw"] == 0
+    assert 0 < sockets["tls"] <= reserved
+    assert receipt.status == "success", receipt.errors
+    assert not [error for error in receipt.errors if "budget_contract_violation" in error]
+    assert receipt.budget_consumed["tcp_ports_attempted"] == sockets["tls"]
+    assert len(receipt.observations) == pairs
+    assert {row.get("legacy_probes_skipped") for row in receipt.observations} == {
+        "insufficient_tcp_budget",
+    }
+
+
+@pytest.mark.parametrize(("addresses", "max_tcp_ports"), [
+    # One pair under a TCP grant one connection short of the probes.
+    (("192.0.2.10",), TLS_CONNECTIONS_PER_PAIR - 1),
+    # Two pairs need twenty connections for the probes; twelve pays for the handshakes only.
+    (("192.0.2.10", "192.0.2.11"), 12),
+])
+def test_tls_action_reserved_for_the_handshakes_runs_no_legacy_probe(
+    monkeypatch, addresses, max_tcp_ports,
+):
+    target = _tls_compiler_target(*addresses)
+    action = _compiled_tls_action(target, max_tcp_ports=max_tcp_ports)
+    sockets = _modern_tls_server(monkeypatch)
+
+    receipt = _dispatch_tls_action(action, target)
+
+    _assert_tls_handshakes_only_within_hold(receipt, sockets, action, len(addresses))
+
+
+def test_tls_action_from_a_four_connection_plan_runs_no_legacy_probe(monkeypatch):
+    # Plans compiled before the ten-connection profile reserved four connections per pair even
+    # under a large TCP grant; the dispatcher must keep such an action within that hold.
+    target = _tls_compiler_target("192.0.2.10")
+    current = _compiled_tls_action(target, max_tcp_ports=5_000)
+    assert current.requested_budget["tcp_ports_attempted"] == TLS_CONNECTIONS_PER_PAIR
+    action = replace(current, action_digest=None, requested_budget={
+        **current.requested_budget,
+        "tcp_ports_attempted": TLS_HANDSHAKE_CONNECTIONS_PER_PAIR,
+    })
+    sockets = _modern_tls_server(monkeypatch)
+
+    receipt = _dispatch_tls_action(action, target)
+
+    _assert_tls_handshakes_only_within_hold(receipt, sockets, action, 1)
+
+
+def test_tls_action_reserved_for_the_legacy_probes_runs_every_probe(monkeypatch):
+    target = _tls_compiler_target("192.0.2.10")
+    action = _compiled_tls_action(target, max_tcp_ports=5_000)
+    sockets = _modern_tls_server(monkeypatch)
+
+    receipt = _dispatch_tls_action(action, target)
+
+    assert action.requested_budget["tcp_ports_attempted"] == TLS_CONNECTIONS_PER_PAIR
+    assert sockets["raw"] == TLS_LEGACY_PROBE_COUNT
+    assert sockets["tls"] + sockets["raw"] <= TLS_CONNECTIONS_PER_PAIR
+    assert receipt.status == "success", receipt.errors
+    assert receipt.budget_consumed["tcp_ports_attempted"] == sockets["tls"] + sockets["raw"]
+    assert [row.get("legacy_probes_skipped") for row in receipt.observations] == [None]
+
+
+def test_selected_http_origin_skips_tls_on_the_refused_https_candidate(monkeypatch):
+    target = TargetBinding(
+        target_id=TARGET.target_id, target_kind="web",
+        canonical_host=TARGET.canonical_host,
+        allowed_origins=("https://app.example.test:8080", "http://app.example.test:8080"),
+        inferred_origins=("https://app.example.test:8080", "http://app.example.test:8080"),
+        allowed_addresses=TARGET.allowed_addresses,
+        allowed_root_domains=TARGET.allowed_root_domains,
+    )
+    action = _action(
+        "baseline.tls", "tls.inspect", 0, target=target,
+        capability_args={
+            "origins_ref": "frozen_https_origins", "origin_count": 1,
+            "addresses_ref": "frozen_addresses", "address_count": 1,
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest, actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend(), target=target)
+    dispatcher.target_url = "http://app.example.test:8080/"
+    dispatcher._origin_selected = True
+
+    async def unexpected_tls(**_kwargs):
+        raise AssertionError("refused HTTPS candidate must not be retried")
+
+    monkeypatch.setattr(action_adapter_module, "inspect_tls_binding", unexpected_tls)
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("not_applicable",)
+    assert all(amount == 0 for amount in receipt.budget_consumed.values())
+
+
+def test_database_neutral_active_action_executes_exact_manifest_candidate(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {
+                    "method": "GET", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/one", "concrete_path": "/one",
+                    "query_keys": ["first"], "source": "web.crawl",
+                },
+                {
+                    "method": "GET", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/two", "concrete_path": "/two",
+                    "query_keys": ["second"], "source": "web.crawl",
+                },
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidate_manifest = build_candidate_manifest(
+        endpoint_manifest,
+        source_action_ids=("discover.web_crawl",),
+        maximum=10,
+    )
+    action = _action(
+        "verify.xss.00001",
+        "xss.verify",
+        0,
+        capability_args={
+            "candidate_manifest_ref": candidate_manifest.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "candidate_index": 1,
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    class ExternalAdapter:
+        manages_cancellation = True
+
+        def __init__(
+            self, *, specification, process_payload, requested_budget, **_kwargs,
+        ):
+            self.capability_name = specification.name
+            self.adapter_name = specification.adapter
+            self.adapter_version = specification.adapter_version
+            self.requested_budget = dict(requested_budget)
+            captured.update(process_payload)
+
+        async def execute(self, **_kwargs):
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={
+                    name: min(amount, 1)
+                    for name, amount in self.requested_budget.items()
+                },
+                execution_started=True,
+                parser_version="dalfox-jsonl/v1",
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "ScannerExecutionAdapter", ExternalAdapter,
+    )
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidate_manifest.manifest_id: candidate_manifest,
+    })
+    dispatcher = _dispatcher(
+        plan,
+        backend,
+        policy=ScanPolicy(
+            active_testing=True,
+            approval_receipt_id="approval-1",
+        ),
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert captured["execution_target"] == "https://app.example.test/two?second=1"
+    assert captured["registered_target"] == "https://app.example.test"
+
+
+def test_database_neutral_required_verifier_skips_an_empty_bound_manifest():
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https",
+                "host": "app.example.test", "port": 443,
+                "normalized_path": "/", "concrete_path": "/",
+                "query_keys": [], "source": "seed",
+            }],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest,
+        source_action_ids=("discover.web_crawl",),
+        maximum=10,
+    )
+    action = _action(
+        "verify.xss", "xss.verify", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "candidate_index": 0,
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(manifests={
+            endpoint_manifest.manifest_id: endpoint_manifest,
+            candidates.manifest_id: candidates,
+        }),
+        policy=ScanPolicy(active_testing=True),
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("not_applicable",)
+
+
+def test_database_neutral_authz_uses_only_bound_endpoint_manifest(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoints = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {
+                    "method": "GET", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/api/items/{int}",
+                    "concrete_path": "/api/items/{int}",
+                    "query_keys": ["expand"], "source": "web.crawl",
+                },
+                {
+                    "method": "POST", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/api/items",
+                    "concrete_path": "/api/items",
+                    "query_keys": [], "source": "collections.replay",
+                },
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    action = _action(
+        "verify.authz", "authz.verify", 0,
+        capability_args={
+            "principal_lanes": ["primary", "secondary"],
+            "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        action_adapter_module,
+        "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name=None: _principal(lane),
+    )
+
+    async def verify(_target_url, routes, **_kwargs):
+        captured["routes"] = list(routes)
+        return {
+            "ok": True,
+            "status": "success",
+            "observation": {
+                "kind": "authz_differential",
+                "proof_state": "inconclusive",
+                "principal_contexts_distinct": True,
+            },
+            "budget_consumed": {"http_requests": 0, "tool_wall_seconds": 0},
+        }
+
+    monkeypatch.setattr(
+        action_adapter_module,
+        "verify_target_bound_object_authorization",
+        verify,
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(manifests={endpoints.manifest_id: endpoints}),
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert captured["routes"] == [
+        "https://app.example.test/api/items/1?expand=1"
+    ]
+
+
+def test_database_neutral_nuclei_uses_only_digest_checked_template_pack(monkeypatch):
+    monkeypatch.setattr(
+        action_adapter_module, "nuclei_templates_directory",
+        lambda: str(Path(__file__).parent / "fixtures" / "nuclei_templates"),
+    )
+    scan_id = str(uuid.uuid4())
+    template_manifest = build_canonical_nuclei_template_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+    )
+    action = _action(
+        "active.templates",
+        "templates.scan",
+        0,
+        capability_args={
+            "template_manifest_ref": (
+                template_manifest.reference().canonical_dict()
+            ),
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    class ExternalAdapter:
+        manages_cancellation = True
+
+        def __init__(
+            self, *, specification, process_payload, requested_budget, **kwargs,
+        ):
+            del kwargs
+            self.capability_name = specification.name
+            self.adapter_name = specification.adapter
+            self.adapter_version = specification.adapter_version
+            self.requested_budget = dict(requested_budget)
+            captured.update(process_payload)
+
+        async def execute(self, **_kwargs):
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={
+                    name: min(amount, 1)
+                    for name, amount in self.requested_budget.items()
+                },
+                execution_started=True,
+                parser_version="nuclei-jsonl/v1",
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "ScannerExecutionAdapter", ExternalAdapter,
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(manifests={
+            template_manifest.manifest_id: template_manifest,
+        }),
+        policy=ScanPolicy(
+            active_testing=True,
+            approval_receipt_id="approval-1",
+        ),
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert captured["scanner_options"]["severity"] == "high,critical"
+    assert captured["scanner_options"]["template_ids"] == "squid-analysis-report-generator"
+    assert captured["scanner_options"]["nuclei_active_state_changing"] is False
+    assert "tags" not in captured["scanner_options"]
+    assert captured["scanner_options"]["template_pack_digest"] == (
+        template_manifest.entries[0]["template_digest"]
+    )
+
+
+def test_database_neutral_passive_nuclei_uses_exact_reviewed_allowlist(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    template_manifest = build_canonical_passive_nuclei_template_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+    )
+    action = _action(
+        "passive.templates",
+        "templates.passive_scan",
+        0,
+        capability_args={
+            "template_manifest_ref": (
+                template_manifest.reference().canonical_dict()
+            ),
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    class ExternalAdapter:
+        manages_cancellation = True
+
+        def __init__(
+            self, *, specification, process_payload, requested_budget, **kwargs,
+        ):
+            del kwargs
+            self.capability_name = specification.name
+            self.adapter_name = specification.adapter
+            self.adapter_version = specification.adapter_version
+            self.requested_budget = dict(requested_budget)
+            captured.update(process_payload)
+
+        async def execute(self, **_kwargs):
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={"http_requests": 7, "tool_wall_seconds": 1},
+                execution_started=True,
+                parser_version="nuclei-jsonl/v1",
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "ScannerExecutionAdapter", ExternalAdapter,
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(manifests={
+            template_manifest.manifest_id: template_manifest,
+        }),
+        policy=ScanPolicy(active_testing=False),
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    options = captured["scanner_options"]
+    assert options["template_request_cost_upper_bound"] == 7
+    assert set(options["template_ids"].split(",")) == {
+        entry["template_id"] for entry in template_manifest.entries
+    }
+    assert "tags" not in options
+
+
+def test_directory_listing_entries_resolve_for_both_href_conventions():
+    """Listing generators disagree about what their hrefs are relative to.
+
+    Apache and nginx emit a bare filename, which resolves against the
+    directory. The Node/Express serve-index middleware emits the path from the
+    site root -- ``ftp/acquisitions.md`` for a listing of ``/ftp`` -- which
+    resolved to ``/ftp/ftp/acquisitions.md`` and was refused, so the
+    confidential files a browsable directory exposes were never reached.
+    """
+    resolve = action_adapter_module._directory_listing_child_url
+    cases = {
+        # site-root-relative (serve-index)
+        ("http://app.test/ftp", "ftp/acquisitions.md"): "http://app.test/ftp/acquisitions.md",
+        ("http://app.test/ftp", "./ftp/quarantine"): "http://app.test/ftp/quarantine",
+        # directory-relative (apache, nginx)
+        ("http://app.test/ftp", "acquisitions.md"): "http://app.test/ftp/acquisitions.md",
+        ("http://app.test/backup/", "dump.sql"): "http://app.test/backup/dump.sql",
+        # absolute path, and a genuine subdirectory that must stay nested
+        ("http://app.test/ftp", "/ftp/legal.md"): "http://app.test/ftp/legal.md",
+        ("http://app.test/ftp", "other/file.txt"): "http://app.test/ftp/other/file.txt",
+    }
+    for (directory, link), expected in cases.items():
+        assert resolve(directory, link) == expected, (directory, link)
+
+
+def test_spec_ingest_declares_body_endpoints_from_the_fetched_spec(monkeypatch):
+    import json as _json
+    scan_id = str(uuid.uuid4())
+    spec_body = _json.dumps({
+        "openapi": "3.0.0",
+        "paths": {
+            "/rest/products/search": {"get": {"parameters": [{"name": "q", "in": "query"}]}},
+            "/rest/user/login": {"post": {"requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"email": {}, "password": {}}}}}}}},
+        },
+    }).encode()
+
+    class FakeTransport:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            assert follow_redirects is False
+            self.sent.append(request.url)
+            # The application publishes its spec at exactly one conventional path.
+            if request.url.endswith("/openapi.json"):
+                return ReplayTransportResult(
+                    status_code=200, connected_address="192.0.2.10",
+                    final_url=request.url,
+                    response_headers={"Content-Type": "application/json"},
+                    response_body=spec_body, elapsed_ms=5,
+                )
+            return ReplayTransportResult(
+                status_code=404, connected_address="192.0.2.10",
+                final_url=request.url,
+                response_headers={"Content-Type": "text/html"},
+                response_body=b"not found", elapsed_ms=5,
+            )
+
+    transport = FakeTransport()
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: transport,
+    )
+    action = _action("discover.spec", "web.spec_ingest", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend())
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    routes = {
+        (item["method"], item["url"]): item
+        for item in receipt.observations
+        if item.get("kind") == "discovered_route"
+    }
+    login = next(
+        item for (method, url), item in routes.items()
+        if method == "POST" and url.endswith("/rest/user/login")
+    )
+    assert login["body_field_names"] == ["email", "password"]
+    assert login["content_type"] == "application/json"
+    # Query values never persist in an observation; the parameter key survives for candidates.
+    assert any(
+        method == "GET" and "/rest/products/search?q=" in url
+        for method, url in routes
+    )
+    # Fetched once per conventional path, bounded, and never off the pinned target.
+    assert all(url.startswith("https://app.example.test/") for url in transport.sent)
+    assert receipt.status == "success"
+
+
+def test_spec_ingest_skips_cleanly_when_no_spec_is_published(monkeypatch):
+    scan_id = str(uuid.uuid4())
+
+    class NotFoundTransport:
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            return ReplayTransportResult(
+                status_code=404, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={}, response_body=b"", elapsed_ms=1,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda: NotFoundTransport(),
+    )
+    action = _action("discover.spec", "web.spec_ingest", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+    assert receipt.status == "success"
+    assert not [o for o in receipt.observations if o.get("kind") == "discovered_route"]
+
+
+def _spec_ingest_receipt(monkeypatch, respond):
+    scan_id = str(uuid.uuid4())
+
+    class Transport:
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            status, content_type, body = respond(urllib.parse.urlsplit(request.url).path)
+            return ReplayTransportResult(
+                status_code=status, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={"Content-Type": content_type},
+                response_body=body, elapsed_ms=1,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda: Transport(),
+    )
+    action = _action("discover.spec", "web.spec_ingest", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    return asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+
+
+def _persisted_partial_reason(receipt):
+    from scan.capability_result import CapabilityResultReason
+    from scan.execution_backend import PostgresScanExecutionBackend
+
+    return PostgresScanExecutionBackend._receipt_reason(
+        receipt, CapabilityResultReason.OUTPUT_TRUNCATED,
+    ).value
+
+
+def test_spec_ingest_an_unpublished_hint_file_is_not_reported_as_truncated_output(monkeypatch):
+    """An SPA answers /robots.txt and /llms.txt with its HTML shell.
+
+    The hint file was not published, so the receipt stays partial (that coverage is not
+    real), but nothing was cut off: the persisted reason said "The bounded output limit was
+    reached", because the adapter stated no reason and the backend fell back to truncation.
+    """
+    shell = b"<!doctype html><html><head><title>app</title></head><body><div id=root></div></body></html>"
+
+    def respond(path):
+        if path in {"/robots.txt", "/llms.txt"}:
+            return 200, "text/html; charset=utf-8", shell
+        return 404, "text/html", b""
+
+    receipt = _spec_ingest_receipt(monkeypatch, respond)
+    assert receipt.status == "partial"
+    assert receipt.errors[0] == "source_not_published"
+    assert "hint_document_is_markup:robots.txt" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "source_not_published"
+
+
+def test_spec_ingest_a_spec_for_another_host_is_out_of_scope_not_a_parse_failure(monkeypatch):
+    """honey.shakerscan.com serves /swagger.json declaring `host: api.halvern.internal`.
+
+    The document parses; its routes are declared on another origin, so none belongs to this
+    binding. The scan reported parser_failed ("could not be parsed safely"), which sent an
+    operator looking for a parser bug that does not exist.
+    """
+    spec_body = json.dumps({
+        "swagger": "2.0", "host": "api.halvern.internal", "basePath": "/v1",
+        "schemes": ["https"],
+        "paths": {"/users": {"get": {"responses": {"200": {"description": "ok"}}}}},
+    }).encode()
+
+    def respond(path):
+        if path == "/swagger.json":
+            return 200, "application/json", spec_body
+        if path == "/robots.txt":
+            return 200, "text/plain", b"User-agent: *\nDisallow: /admin/\n"
+        return 404, "text/plain", b"Not Found"
+
+    receipt = _spec_ingest_receipt(monkeypatch, respond)
+    assert receipt.status == "partial"
+    assert receipt.errors[0] == "declared_out_of_scope"
+    assert "spec_off_origin_server" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "declared_out_of_scope"
+
+
+def _serve_spec(document):
+    body = json.dumps(document).encode()
+
+    def respond(path):
+        if path == "/swagger.json":
+            return 200, "application/json", body
+        return 404, "text/plain", b"Not Found"
+
+    return respond
+
+
+def _spec_routes(receipt):
+    return sorted(
+        (item["method"], item["url"]) for item in receipt.observations
+        if item.get("kind") == "discovered_route" and item.get("source") == "spec"
+    )
+
+
+def test_spec_ingest_a_server_list_with_an_off_origin_alternative_is_ingested_in_full(monkeypatch):
+    """Servers ["/", "https://api.other.example"]: every operation is ingested on the bound
+    origin, so nothing in scope was lost. It was reported as partial and "declares its routes
+    on another host", as if the description were out of scope."""
+    receipt = _spec_ingest_receipt(monkeypatch, _serve_spec({
+        "openapi": "3.0.0", "info": {"title": "x", "version": "1"},
+        "servers": [{"url": "/"}, {"url": "https://api.other.example"}],
+        "paths": {"/users": {"get": {"responses": {"200": {"description": "ok"}}}}},
+    }))
+    assert receipt.status == "success"
+    assert not receipt.errors
+    assert _spec_routes(receipt) == [("GET", "https://app.example.test/users")]
+
+
+def test_spec_ingest_operations_declared_only_off_origin_make_it_partly_out_of_scope(monkeypatch):
+    receipt = _spec_ingest_receipt(monkeypatch, _serve_spec({
+        "openapi": "3.0.0", "info": {"title": "x", "version": "1"},
+        "paths": {
+            "/users": {"get": {"responses": {"200": {"description": "ok"}}}},
+            "/billing": {"get": {
+                "servers": [{"url": "https://billing.other.example"}],
+                "responses": {"200": {"description": "ok"}},
+            }},
+        },
+    }))
+    assert receipt.status == "partial"
+    assert receipt.errors[0] == "declared_partly_out_of_scope"
+    assert "spec_off_origin_server" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "declared_partly_out_of_scope"
+    # The in-scope operation is ingested; the off-origin one never becomes a request.
+    assert _spec_routes(receipt) == [("GET", "https://app.example.test/users")]
+
+
+def test_spec_ingest_a_swagger_scheme_on_another_origin_is_named_as_a_scheme(monkeypatch):
+    """Swagger 2.0 on the bound host declaring only `schemes: [http]` while the scan is bound to
+    https is another origin, not another host."""
+    receipt = _spec_ingest_receipt(monkeypatch, _serve_spec({
+        "swagger": "2.0", "host": "app.example.test", "basePath": "/v1", "schemes": ["http"],
+        "paths": {"/users": {"get": {"responses": {"200": {"description": "ok"}}}}},
+    }))
+    assert receipt.status == "partial"
+    assert receipt.errors[0] == "declared_out_of_scope"
+    assert "spec_server_scheme_mismatch" in receipt.errors
+    assert "spec_off_origin_server" not in receipt.errors
+    assert _spec_routes(receipt) == []
+    from scan.explanation import _REASON_LABELS
+
+    assert "scheme" in _REASON_LABELS["declared_out_of_scope"]
+
+
+def test_spec_ingest_a_partly_modelled_spec_is_a_parser_limitation_not_truncation(monkeypatch):
+    spec_body = json.dumps({
+        "openapi": "3.0.0",
+        "paths": {"/orders": {"post": {"requestBody": {"content": {"application/xml": {
+            "schema": {"type": "object", "properties": {"id": {}}}}}}}}},
+    }).encode()
+
+    def respond(path):
+        if path == "/openapi.json":
+            return 200, "application/json", spec_body
+        return 404, "text/plain", b""
+
+    receipt = _spec_ingest_receipt(monkeypatch, respond)
+    assert receipt.status == "partial"
+    assert "spec_unsupported_body_media_type" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "parser_failed"
+
+
+def test_spec_ingest_a_spec_beyond_the_endpoint_ceiling_is_truncated(monkeypatch):
+    spec_body = json.dumps({
+        "openapi": "3.0.0",
+        "paths": {f"/items/n{index}": {"get": {}} for index in range(1_100)},
+    }).encode()
+
+    def respond(path):
+        if path == "/openapi.json":
+            return 200, "application/json", spec_body
+        return 404, "text/plain", b""
+
+    receipt = _spec_ingest_receipt(monkeypatch, respond)
+    assert receipt.status == "partial"
+    assert "spec_endpoint_limit" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "output_truncated"
+
+
+def test_path_candidate_goes_to_sqlmap_with_a_marker_and_is_skipped_by_dalfox(monkeypatch):
+    """A path-segment candidate is a SQLi-only site carrying the sqlmap ``*`` marker.
+
+    The SQLi verifier tests the marked URL; the XSS verifier would feed the literal ``*`` to
+    dalfox as a value, so it skips path candidates.
+    """
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                "normalized_path": "/api/orders/{int}", "concrete_path": "/api/orders/1",
+                "query_keys": [], "source": "web.spec_ingest",
+            }],
+        },
+        source_action_ids=("discover.spec",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.spec",), maximum=10,
+    )
+    assert any(c.get("parameter_location") == "path" for c in candidates.entries)
+
+    def _batch_action(capability):
+        return _action(
+            f"verify.{capability.split('.')[0]}.batch.00000", capability, 0,
+            capability_args={
+                "candidate_manifest_ref": candidates.reference().canonical_dict(),
+                "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+                "slice": {"start": 0, "count": 5},
+                "profile": "balanced", "proof_policy": "deterministic",
+            },
+        )
+
+    def run(capability, parser_version):
+        action = _batch_action(capability)
+        plan = ScanActionPlan(
+            scan_id=scan_id, execution_plan_digest="a" * 64,
+            target_binding_digest=TARGET.digest, actions=(action,),
+        )
+        calls = []
+
+        async def execute(_self, context, adapter, **_kwargs):
+            calls.append(adapter._process_payload["execution_target"])
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={name: 1 for name in context.requested_budget},
+                observations=(), execution_started=True, parser_version=parser_version,
+            )
+
+        monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+        backend = Backend(manifests={
+            endpoint_manifest.manifest_id: endpoint_manifest,
+            candidates.manifest_id: candidates,
+        })
+        dispatcher = _dispatcher(
+            plan, backend,
+            policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+        )
+        asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+        return calls
+
+    sqli_calls = run("sqli.verify_batch", "sqlmap-jsonl/v1")
+    # One candidate, verified one sqlmap technique stage at a time (scan/sqli_stages.py).
+    assert sqli_calls == ["https://app.example.test/api/orders/1*"] * 4, sqli_calls
+
+    xss_calls = run("xss.verify_batch", "dalfox-jsonl/v1")
+    assert xss_calls == [], "dalfox never receives a path candidate"
+
+
+def test_a_path_segment_candidate_is_inapplicable_to_dalfox_not_unattempted(monkeypatch):
+    """A path-segment candidate (family_hints: sqli) sliced into the XSS batch is skipped
+    because only sqlmap understands its marker. Counting that skip as unattempted reported the
+    slice partial for insufficient_plan_budget over work no budget could fund, and the false
+    gap failed the family's coverage; the skip is recorded as inapplicable instead."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/api/orders/{int}", "concrete_path": "/api/orders/7",
+                 "query_keys": [], "source": "web.spec_ingest"},
+            ],
+        },
+        source_action_ids=("discover.spec",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.spec",), maximum=10,
+    )
+    assert [item.get("parameter_location") for item in candidates.entries] == ["path"]
+    action = _action(
+        "verify.xss.r01", "xss.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 1},
+            "profile": "balanced",
+            "proof_policy": "deterministic",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+
+    async def execute(_self, _context, _adapter, **_kwargs):
+        raise AssertionError("Dalfox must not run against a path-segment candidate")
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidates.manifest_id: candidates,
+    })
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert result.status == "success", result.errors
+    assert "insufficient_plan_budget" not in result.errors
+    assert result.redacted_execution["inapplicable_count"] == 1
+    assert result.redacted_execution["unattempted_count"] == 0
+    assert result.redacted_execution["attempted_count"] == 0
+    assert [item["kind"] for item in result.observations] == ["candidate_inapplicable"]
+    assert result.observations[0]["reason"] == "path_segment_candidate"
+    assert result.observations[0]["candidate_id"] == candidates.entries[0]["candidate_id"]
+
+
+def _search_endpoint_manifest(scan_id):
+    return build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https",
+                "host": "app.example.test", "port": 443,
+                "normalized_path": "/search", "concrete_path": "/search",
+                "query_keys": ["q", "page", "sort"], "source": "seed",
+            }],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+
+
+def _prove_xss_receipt(endpoint_manifest, candidates, *, start):
+    action = _action(
+        "prove.xss", "xss.browser_prove_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": start, "count": 9},
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=endpoint_manifest.scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(manifests={
+            endpoint_manifest.manifest_id: endpoint_manifest,
+            candidates.manifest_id: candidates,
+        }),
+        policy=ScanPolicy(active_testing=True),
+    )
+    return asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+
+def test_proof_slice_beyond_a_partial_manifest_is_incomplete_dependency_work():
+    """A truncated (partial) producer never published the candidates this slice was
+    scheduled for. Reporting that as not_applicable would let the finalizer count the
+    escalation as cleanly complete; it is unavailable dependency work instead."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = _search_endpoint_manifest(scan_id)
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=1,
+    )
+    assert candidates.status == "partial" and len(candidates.entries) == 1
+
+    receipt = _prove_xss_receipt(endpoint_manifest, candidates, start=1)
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("dependency_incomplete",)
+
+
+def test_proof_slice_beyond_a_complete_manifest_stays_not_applicable():
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = _search_endpoint_manifest(scan_id)
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=50,
+    )
+    assert candidates.status == "complete"
+
+    receipt = _prove_xss_receipt(endpoint_manifest, candidates, start=len(candidates.entries))
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("not_applicable",)
+
+
+def test_every_capability_result_reason_has_an_operator_label():
+    import importlib
+    root = DatabaseNeutralScanActionDispatcher.__module__.rsplit(".", 1)[0]
+    reasons = importlib.import_module(root + ".capability_result").CapabilityResultReason
+    labels = importlib.import_module(root + ".explanation")._REASON_LABELS
+    assert sorted(item.value for item in reasons if item.value not in labels) == []
+
+
+# --- HTTP archive coverage of in-process scan capabilities --------------------------
+# These engine capabilities send their HTTP in-process over the pinned replay transport.
+# Only http.request used to pass a recorder, so the scan archive held a handful of rows
+# while spec ingest, exposure probes, request mutation and authz surface probes sent
+# hundreds of requests that were never archived.
+
+try:
+    from scanner_tools import http_archive_capture as _capture
+except ModuleNotFoundError:
+    from scanner.scanner_tools import http_archive_capture as _capture
+
+
+def _captured_calls(run):
+    _capture.start_capture()
+    try:
+        run()
+    finally:
+        captured = _capture.drain_capture()
+    return captured["calls"]
+
+
+def test_spec_ingest_archives_every_probe_under_its_capability(monkeypatch):
+    sent = []
+
+    class FakeTransport:
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            sent.append(request.url)
+            found = request.url.endswith("/openapi.json")
+            return ReplayTransportResult(
+                status_code=200 if found else 404, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={"Content-Type": "text/plain"},
+                response_body=b'{"openapi":"3.0.0","paths":{}}' if found else b"nf",
+                elapsed_ms=5,
+            )
+
+    transport = FakeTransport()
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: transport,
+    )
+    action = _action("discover.spec", "web.spec_ingest", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend())
+
+    calls = _captured_calls(
+        lambda: asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    )
+
+    assert sent and len(calls) == len(sent)
+    assert [call["url"] for call in calls] == sent
+    for call in calls:
+        assert call["capability_name"] == "web.spec_ingest"
+        assert call["source"] == "replay_transport"
+        assert call["method"] == "GET"
+        assert call["principal_slot"] == "anonymous"
+        assert call["workflow_values_private"] is False
+        assert call["status_code"] == (200 if call["url"].endswith("/openapi.json") else 404)
+
+
+def test_authenticated_spec_ingest_archives_its_probes_as_private(monkeypatch):
+    """The principal's headers can carry session values under any name, which key-name
+    masking cannot find, so an authenticated fetch is withheld from masked views."""
+    class FakeTransport:
+        async def send(self, request, **_kwargs):
+            return ReplayTransportResult(
+                status_code=404, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={}, response_body=b"", elapsed_ms=1,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: FakeTransport(),
+    )
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name=None: _principal(lane),
+    )
+    action = _action("discover.spec", "web.spec_ingest", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend())
+    calls = _captured_calls(
+        lambda: asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    )
+    assert calls
+    assert all(call["principal_slot"] == "primary" for call in calls)
+    assert all(call["workflow_values_private"] is True for call in calls)
+
+
+def test_exposure_probe_batch_archives_its_probes_withheld_from_masked_views(monkeypatch):
+    """Exposure probes deliberately fetch key files and dumps, so their bodies stay
+    raw-export-only even though the probe itself is anonymous."""
+    calls = _captured_calls(
+        lambda: test_exposure_probe_batch_probes_seeds_follows_listings_and_checkpoints(
+            monkeypatch,
+        )
+    )
+    assert calls
+    assert any(call["url"].endswith("/ftp/secret.md") for call in calls)
+    for call in calls:
+        assert call["capability_name"] == "exposure.verify_batch"
+        assert call["principal_slot"] == "anonymous"
+        assert call["workflow_values_private"] is True
+
+
+def test_authz_surface_batch_archives_both_principals_as_mixed_and_private(monkeypatch):
+    calls = _captured_calls(
+        lambda: test_authz_surface_batch_proves_bfla_only_with_an_established_boundary(
+            monkeypatch,
+        )
+    )
+    # Two routes, each probed twice anonymously and twice as the primary principal; the
+    # resumed run sends nothing.
+    assert len(calls) == 8
+    assert {call["capability_name"] for call in calls} == {"authz_surface.verify_batch"}
+    assert all(call["principal_slot"] is None for call in calls)
+    assert all(call["workflow_values_private"] is True for call in calls)
+    assert sum(
+        1 for call in calls
+        if any(name.lower() == "authorization" for name in call["request_headers"])
+    ) == 4
+
+
+def test_collection_replay_and_request_mutation_archive_as_private(monkeypatch):
+    """Both replay the private collection request with its session headers and body
+    values, so both are archived as private workflow rows under their own capability."""
+    calls = _captured_calls(
+        lambda: test_database_neutral_dispatcher_replays_sealed_requests_before_mutation(
+            monkeypatch,
+        )
+    )
+    # One collection replay, then two mutation runs of two requests each (the resumed
+    # dispatcher restores the collection without sending it again).
+    assert [call["capability_name"] for call in calls] == (
+        ["collections.replay_active"] + ["xss.request_verify"] * 4
+    )
+    for call in calls:
+        assert call["source"] == "replay_transport"
+        assert call["workflow_values_private"] is True
+        assert call["method"] == "POST"
+    assert calls[0]["request_body"] == b'{"name":"canary-body"}'
+    assert calls[0]["principal_slot"] is None
+
+
+def test_request_mutation_batch_archives_as_private(monkeypatch):
+    calls = _captured_calls(
+        lambda: test_safe_authentication_body_batch_still_charges_state_budget(monkeypatch)
+    )
+    assert len(calls) == 4
+    assert {call["capability_name"] for call in calls} == {"sqli.request_verify_batch"}
+    assert all(call["workflow_values_private"] is True for call in calls)
+
+
+def test_every_in_process_scan_transport_is_recorded():
+    """Only the recorded-transport helper may construct the pinned replay transport, so
+    a new in-process capability cannot silently send unarchived traffic."""
+    import inspect
+
+    source = inspect.getsource(action_adapter_module)
+    helper = inspect.getsource(
+        action_adapter_module.DatabaseNeutralScanActionDispatcher._scan_replay_transport
+    )
+    assert helper.count("PinnedAiohttpReplayTransport(") == 1
+    assert source.count("PinnedAiohttpReplayTransport(") == 1
+    for name in ("_sqli_proof_batch", "_nosqli_verify_batch"):
+        method = inspect.getsource(
+            getattr(action_adapter_module.DatabaseNeutralScanActionDispatcher, name)
+        )
+        assert "self._scan_replay_transport(action, private=True)" in method
+
+
+def test_takeover_action_checks_discovered_names_by_dns_and_fingerprints_only_the_bound_origin(
+    monkeypatch,
+):
+    """Discovered names are not destinations of the Scan: DNS evidence only. The one GET goes
+    to the bound origin, through the bound-request path."""
+    import capabilities.takeover as takeover_module
+
+    discover = _action("discover.subdomains", "subdomains.discover", 0)
+    check = _action(
+        "discover.takeover", "subdomains.takeover_check", 1,
+        dependencies=(discover.action_id,),
+        capability_args={"discovery_ref": "discover.subdomains"},
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(discover, check),
+    )
+    backend = Backend(observations={discover.action_id: (
+        {"kind": "subdomain", "host": "docs.example.test", "root_domain": "example.test"},
+        {"kind": "subdomain", "host": "old.example.test", "root_domain": "example.test"},
+        {"kind": "subdomain", "host": "notexample.test", "root_domain": "example.test"},
+    )})
+    records = {
+        ("app.example.test", "CNAME"): ("answer", ["bucket.s3.amazonaws.com"]),
+        ("bucket.s3.amazonaws.com", "A"): ("answer", ["52.216.1.1"]),
+        ("docs.example.test", "CNAME"): ("answer", ["org.github.io"]),
+        ("org.github.io", "A"): ("answer", ["185.199.108.153"]),
+        ("old.example.test", "CNAME"): ("answer", ["gone.azurewebsites.net"]),
+    }
+    asked = []
+
+    async def query(name, rdtype):
+        asked.append(name)
+        return records.get((name, rdtype), ("nxdomain", []))
+
+    requests = []
+
+    async def bound_request(origin, args, *, target, allow_write, private_response_sink, **_kwargs):
+        requests.append((origin, dict(args), target.digest, allow_write))
+        page = "<style>" + "x" * 5_000 + "</style>The specified bucket does not exist"
+        private_response_sink(type("Private", (), {"body": lambda self: page.encode()})())
+        return {"ok": True, "response": {"status": 404, "body_sample": page[:2_000]}}
+
+    doh_asked = []
+
+    async def independent_nxdomain(name):
+        doh_asked.append(name)
+        return name == "gone.azurewebsites.net"
+
+    monkeypatch.setattr(takeover_module, "dnspython_query", query)
+    monkeypatch.setattr(takeover_module, "doh_nxdomain", independent_nxdomain)
+    monkeypatch.setattr(action_adapter_module, "execute_bound_http_request", bound_request)
+    receipt = asyncio.run(_dispatcher(plan, backend)(check, _lease(plan, check), _noop))
+
+    assert requests == [(
+        "https://app.example.test", {"method": "GET", "path": "/", "follow_redirects": False},
+        TARGET.digest, False,
+    )]
+    assert "notexample.test" not in asked
+    rows = {row["host"]: row for row in receipt.observations if row.get("kind") == "takeover_check"}
+    assert rows["app.example.test"]["outcome"] == "verified"
+    assert rows["docs.example.test"]["outcome"] == "inconclusive_dns_only"
+    # The binding is a .test name on a TEST-NET address, which dns.doh_permitted refuses: no
+    # name of it goes to a third-party resolver, so the dangling Azure CNAME stays suspected.
+    assert doh_asked == []
+    assert rows["old.example.test"]["outcome"] == "suspected"
+    assert rows["old.example.test"]["service"] == "Microsoft Azure"
+    assert receipt.budget_consumed["http_requests"] == 1
+
+
+def test_web_identify_names_components_behind_the_origin_without_response_text(monkeypatch):
+    scan_id = str(uuid.uuid4())
+
+    class Transport:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            assert follow_redirects is False and request.method == "GET" and not request.headers
+            path = urllib.parse.urlsplit(request.url).path
+            self.sent.append(request.url)
+            if path.startswith("/jenkins/"):
+                headers = {"X-Jenkins": "2.426.3", "Content-Type": "text/html"}
+                body = b'<input name="j_username"> secret-session-text' if path == "/jenkins/login" else b"no"
+                return ReplayTransportResult(status_code=200 if path == "/jenkins/login" else 404,
+                                             connected_address="192.0.2.10", final_url=request.url,
+                                             response_headers=headers, response_body=body, elapsed_ms=1)
+            return ReplayTransportResult(status_code=404, connected_address="192.0.2.10",
+                                         final_url=request.url,
+                                         response_headers={"Server": "nginx/1.24.0", "Content-Type": "text/html"},
+                                         response_body=f"<center>nginx/1.24.0</center>{path}".encode(), elapsed_ms=1)
+
+    transport = Transport()
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: transport)
+    action = _action("discover.identify", "web.identify", 0)
+    plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
+                          target_binding_digest=TARGET.digest, actions=(action,))
+    receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+    assert receipt.status == "success"
+    components = {(item["product"], item["base_path"]): item for item in receipt.observations}
+    jenkins = components[("Jenkins", "/jenkins/")]
+    assert (jenkins["kind"], jenkins["version"], jenkins["connected_address"]) == ("http_component", "2.426.3", "192.0.2.10")
+    assert jenkins["url"] == "https://app.example.test/jenkins/" and jenkins["sni"] == "app.example.test"
+    assert "secret-session-text" not in json.dumps(receipt.observations)
+    assert all(url.startswith("https://app.example.test/") for url in transport.sent)
+    assert len(transport.sent) <= CAPABILITY_REGISTRY.require("web.identify").budget_cost["http_requests"]

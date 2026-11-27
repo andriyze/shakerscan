@@ -1,0 +1,220 @@
+"""Worker-only HTTP workflow operation; the canonical worker owns its ledger.
+
+Keep supplied/captured credential values out of the worker's public input and
+receipt construction. Normal HTTP observations retain their existing shape.
+"""
+from __future__ import annotations
+
+from typing import Any, Callable, Mapping
+
+from runtime.hunt_http_contract import require_http_request_authority, uses_http_workflow
+from runtime.hunt_http_exchange import HttpWorkflowExchange, prepare_http_exchange
+from .http import execute_bound_http_request
+
+try:
+    from runtime.archive_body_masking import active_withheld_values, mask_cookie_names
+except ModuleNotFoundError:  # package import layout
+    from api.runtime.archive_body_masking import active_withheld_values, mask_cookie_names
+
+
+_BOUND_VALUE_MARKER = "[withheld:bound]"
+
+
+# The answer of a request that captures values (a sign-in page's Set-Cookie) shows only its status
+# and cookie names: a value it set may appear anywhere in its body. The page itself is read with
+# a second request that sends the capture back (request_bindings) and captures nothing.
+CAPTURE_BODY_HINT = (
+    "This response's body is hidden because the request captured values. To read the page as this "
+    "session (for a sign-in form's CSRF token), send another http.request that binds this capture "
+    "(request_bindings: source_action_id, capture_name, and header Cookie for a cookie capture, or "
+    "header Authorization with prefix \"Bearer \" for a token) with no capture: its body is "
+    "shown, with secret-looking values as [withheld:N] references (withheld://hunt/<that action>/N) "
+    "a later request can send. A captured cookie shorter than 8 characters (a security level) hides "
+    "that page too: capture only the session cookie (capture cookies: [<session cookie name>])."
+)
+SHORT_COOKIE_HINT = (
+    "This response's body is hidden because the session sent with it includes a cookie value shorter "
+    "than 8 characters, which cannot be withheld reliably wherever the page echoes it. Capture only "
+    "the session cookie: capture [{name, header: Set-Cookie, cookies: [<session cookie name>]}] on "
+    "the request that sets it, and bind that capture instead."
+)
+
+
+def _scrub_bound_values(value: Any, bound: list[str]) -> Any:
+    """Withhold every echo of a bound value in every string of a public response: the body
+    sample, ``location``, ``final_url``, redirect locations and selected headers, in any case,
+    HTML/JSON/URL encoding or base64 (see ``KnownValueScrubber``). The body sample was already
+    masked whole before it was cut, so no value is split by its end."""
+    from runtime.archive_body_masking import KnownValueScrubber
+    scrubber = KnownValueScrubber(sorted({str(item) for item in bound if item}))
+    if not scrubber.values:
+        return value
+
+    def scrub(item: Any) -> Any:
+        if isinstance(item, str):
+            return scrubber.scrub(item, lambda _value: _BOUND_VALUE_MARKER)
+        if isinstance(item, Mapping):
+            return {scrub(key): scrub(nested) for key, nested in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [scrub(nested) for nested in item]
+        return item
+
+    return scrub(value)
+
+
+async def _note_secret_outcome(pool: Any, exchange: HttpWorkflowExchange, response: Any) -> None:
+    """What the destination answered to a request that sent discovered secrets, on their use
+    rows (the audit of a try on another target's login). Status class only, never content."""
+    if not exchange.secret_use_ids:
+        return
+    summary = response.get('response') if isinstance(response, Mapping) else None
+    status = summary.get('status') if isinstance(summary, Mapping) else None
+    outcome = f"http_{int(status)}" if isinstance(status, int) and not isinstance(status, bool) else "no_response"
+    try:
+        from hunt.discovered_secrets import record_use_outcome
+    except ModuleNotFoundError:  # package import layout
+        from api.hunt.discovered_secrets import record_use_outcome
+    try:
+        async with pool.acquire() as conn:
+            await record_use_outcome(conn, exchange.secret_use_ids, outcome)
+    except Exception:  # noqa: BLE001 - the attempt and its use row stand; only the answer is missing
+        pass
+
+
+async def prepare_http_operation(
+    *, pool: Any, run: Mapping[str, Any], context: Mapping[str, Any], policy: Mapping[str, Any],
+    action_id: Any, target: Any, target_url: str, inputs: Mapping[str, Any],
+    trusted_headers: Mapping[str, str], principal_slot: str, requested_budget: Mapping[str, int],
+    timeout_seconds: int, recorder: Callable[..., Any], revalidate: Callable[..., Any],
+) -> tuple[Callable[..., Any], HttpWorkflowExchange, bool]:
+    workflow = uses_http_workflow(inputs)
+    require_http_request_authority(inputs, policy, requested_budget=requested_budget)
+    exchange = HttpWorkflowExchange(str(run['id']), str(action_id), target, tuple(inputs.get('capture') or ()))
+    injects_headers = bool(trusted_headers) or any('header' in item for item in inputs.get('request_bindings') or ())
+    bindings = tuple(inputs.get('request_bindings') or ())
+    # A discovered secret goes to exactly one login: no redirect is followed with it, even on the
+    # same origin, where it would reach another path (a denied login among them) unchecked.
+    carries_secret = any('secret_ref' in item for item in bindings)
+    # A default-credential attempt (hunt/default_credentials.py): its answer is classified here, in
+    # the worker, from the private response; the verdict (never the answer) settles its ledger row.
+    default_pair = next((str(item['default_credential']) for item in bindings if 'default_credential' in item), None)
+    verdicts: list[str] = []
+
+    def record(captured: Mapping[str, Any]) -> None:
+        recorder({**captured, "workflow_values_private": True} if workflow else captured)
+
+    async def execute() -> dict[str, Any]:
+        from runtime.credential_resolver import CredentialResolutionError
+        from runtime.credential_refs import CredentialReferenceError
+        wire_input, headers = {}, {}
+        # The values this request sends by reference, for the reduced answer's cookie names (the
+        # capture sink clears ``known_secrets`` once it has sealed them).
+        sent: list[str] = []
+        try:
+            async with pool.acquire() as conn:
+                owner = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", run['id'])
+                if not owner or owner['status'] not in {'active', 'awaiting_planner', 'budget_exhausted'} or owner.get('completed_at'):
+                    return {"ok": False, "error": "scope:Hunt stopped before HTTP dispatch"}
+                try:
+                    await revalidate(conn)
+                    wire_input, headers, _ = await prepare_http_exchange(
+                        conn, run=owner, action_id=action_id, target=target, context=context,
+                        policy=policy, values=inputs, trusted_headers=trusted_headers, capture_state=exchange,
+                        destination=target_url,
+                    )
+                except (ValueError, CredentialResolutionError, CredentialReferenceError) as exc:
+                    return {"ok": False, "error": "http_workflow_preflight:" + str(exc)[:240]}
+            sent.extend([*exchange.known_secrets, *exchange.bound_values])
+            # Every value this request sends by reference is known exactly (a withheld value, a
+            # discovered secret, a long session cookie this Hunt's login set): the planner keeps
+            # the response, with each of them withheld wherever the target echoes it.
+            scrubbed = bool(bindings) and not inputs.get('capture') and not exchange.opaque_binding
+            collector = active_withheld_values()
+            if collector is not None and scrubbed:
+                # Every echo of a value sent by reference is withheld before any sample is cut.
+                collector.bind_known(exchange.bound_values)
+            sink = exchange.capture_response
+            private_headers = exchange.response_headers
+            if carries_secret or default_pair:
+                wire_input['follow_redirects'] = False
+            if default_pair:
+                from hunt.default_credentials import classify_response, is_basic_request
+                private_headers = (*private_headers, 'retry-after')
+                basic_attempt = is_basic_request(inputs)
+
+                def sink(private: Any) -> None:
+                    try:
+                        verdicts.append(classify_response(
+                            status=private.status_code, headers=private.headers(),
+                            cookie_names=sorted(private.cookies()), body=private.body(),
+                            location=private.headers().get('location'),
+                            login_path=str(inputs.get('path') or '/'), basic=basic_attempt))
+                    except Exception:  # noqa: BLE001 - target content never fails the attempt
+                        verdicts.append('unclear')
+                    exchange.capture_response(private)
+            response = await execute_bound_http_request(
+                target_url, wire_input, target=target,
+                allow_write=inputs['method'] in {'POST', 'PUT', 'PATCH', 'DELETE'},
+                transaction_recorder=record, trusted_headers=headers,
+                allow_identity_headers=bool(policy.get('allow_identity_headers')),
+                direct_origin_addresses=tuple(policy.get('direct_origin_addresses') or ()),
+                principal_slot="workflow_binding" if inputs.get("request_bindings") else principal_slot,
+                timeout_seconds=timeout_seconds,
+                allow_bound_origin_redirects=not (carries_secret or default_pair), private_response_sink=sink,
+                private_response_headers=private_headers,
+            )
+
+            if workflow and scrubbed:
+                response = _scrub_bound_values(response, exchange.bound_values)
+            elif workflow:
+                # Pairing values may be short PINs, arbitrary field names, or echoed
+                # back under innocent keys. A heuristic scrubber is insufficient.
+                summary = response.get('response')
+                if isinstance(summary, Mapping):
+                    response['response'] = {key: summary[key] for key in (
+                        'status', 'content_length', 'bytes_observed', 'elapsed_ms',
+                        'truncated', 'http_version',
+                    ) if key in summary}
+                    response['response']['workflow_values_visible'] = False
+                    if exchange.short_cookie_binding:
+                        # A captured session with a short cookie (a security level) hid every
+                        # signed-in page; name the way out (capture only the session cookie).
+                        response['response']['workflow_values_hint'] = SHORT_COOKIE_HINT
+                    elif inputs.get('capture') and not bindings:
+                        # Agents read a hidden body as "nothing to see" and guessed withheld
+                        # references into it (a sign-in page's CSRF token). Say how to read it.
+                        response['response']['workflow_values_hint'] = CAPTURE_BODY_HINT
+                    # Cookie names and security attributes only, never values: a login's answer.
+                    if summary.get('set_cookie_metadata'):
+                        # A target names its cookies: a name may echo what this login sent.
+                        response['response']['set_cookie_metadata'] = mask_cookie_names(
+                            summary['set_cookie_metadata'], sent)
+                response.pop('redirect_chain', None)
+            if default_pair:
+                # After the answer was reduced for the planner, so the verdict is never cut from it.
+                from hunt.default_credentials import public_verdict, settle_attempt
+                verdict = verdicts[0] if verdicts else 'not_sent'
+                try:
+                    await settle_attempt(pool, hunt_id=run['id'], action_id=action_id, verdict=verdict)
+                except Exception:  # noqa: BLE001 - the attempt stands; its row stays pending (counted)
+                    pass
+                if isinstance(response, dict):
+                    public = public_verdict(default_pair, verdict)
+                    # Not under a "credential" key: the shared redactor masks those whole.
+                    response['login_attempt'] = public
+                    if isinstance(response.get('response'), dict):
+                        response['response']['login_attempt'] = public
+            if exchange.missing_names and isinstance(response.get('response'), dict):
+                # The request itself stands (a failed login is a result); the capture it asked for
+                # is reported missing rather than failing the action.
+                response['response']['captures_missing'] = list(exchange.missing_names)
+            await _note_secret_outcome(pool, exchange, response)
+            return response
+        finally:
+            headers.clear()
+            wire_input.clear()
+            exchange.bound_values.clear()
+            exchange.known_secrets.clear()
+            sent.clear()
+
+    return execute, exchange, injects_headers

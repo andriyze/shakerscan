@@ -1,0 +1,1 @@
+"""Typed capability adapter implementations."""

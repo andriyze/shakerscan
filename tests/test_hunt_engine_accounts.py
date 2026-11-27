@@ -92,9 +92,10 @@ class _Shop:
         return True
 
 
-def _run(allowed, writes=True):
+def _run(allowed, writes=True, accounts=True):
     return {"id": "h1", "target_id": "t1", "target_kind": "web", "status": "active", "completed_at": None,
             "policy_json": json.dumps({"allowed_capabilities": allowed, "allow_state_changing_http": writes,
+                                       "allow_account_creation": accounts,
                                        "active_testing": True, "approval_receipt_id": "r1"}),
             "context_pack": "{}"}
 
@@ -129,6 +130,11 @@ def test_the_engine_signs_up_twice_signs_in_uses_the_app_as_each_and_compares_th
     assert authz[0]["primary_bindings"] != authz[0]["secondary_bindings"]
     assert all(b[0]["header"] == "Authorization" and b[0]["prefix"] == "Bearer "
                for b in (authz[0]["primary_bindings"], authz[0]["secondary_bindings"]))
+    # The operator's clean-up list: each account (never its password) and each write it sent.
+    made = state["engine_accounts"]
+    assert [entry["signup_route"] for entry in made] == ["POST /api/Users"] * 2
+    assert {entry["email"] for entry in made} == set(shop.users) and all("password" not in entry for entry in made)
+    assert {entry["request"] for entry in state["engine_writes"]} == {"POST /api/BasketItems"}
 
 
 def test_without_the_state_changing_permission_no_account_is_made():
@@ -198,3 +204,23 @@ def test_a_default_credential_login_reads_but_never_writes():
     as_admin = [v for _, v, _ in admin.calls if v.get("request_bindings") and
                 v["request_bindings"][0].get("withheld_ref") == "withheld://hunt/acc/1"]
     assert as_admin and all(v["method"] == "GET" for v in as_admin)
+
+
+def test_accounts_are_made_only_with_the_operators_explicit_account_creation_permission():
+    shop = _Shop()
+    state = {}
+    asyncio.run(Sweep(call=shop.call, create_candidate=shop.create, state=state, live=shop.live)
+                .run(_run(["http.request", "authz.verify"], accounts=False), REPORT))
+    assert not shop.users and "engine_accounts" not in state and "engine_writes" not in state
+
+
+def test_the_debrief_lists_what_the_engine_made_on_the_target():
+    from api.hunt.coverage_map import build_coverage, debrief_coverage
+    discovery = {"engine_accounts": [{"label": "account a (/api/Users)", "signup_route": "POST /api/Users",
+                                      "email": "shakerscan-x@example.invalid", "username": "shakerscanx"}],
+                 "engine_writes": [{"login": "account a (/api/Users)", "request": "POST /api/BasketItems",
+                                    "fields": ["ProductId"]}]}
+    report = build_coverage(actions=[], endpoints=[], discovery=discovery)
+    debrief = debrief_coverage(report, forced=False, reason=None)
+    assert debrief["discovery"]["engine_accounts"] == discovery["engine_accounts"]
+    assert debrief["discovery"]["engine_writes"] == discovery["engine_writes"]

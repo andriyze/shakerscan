@@ -1,0 +1,749 @@
+"""Bounded, append-only Scan continuation rounds.
+
+The root plan is admitted on worst-case reservations. Once its actions settle, each
+continuation round re-plans the discovered work from every lane's first unplanned index,
+admits it against the cumulatively reconciled residual, and appends it as one immutable,
+digest-bound revision. Rounds stop when the residual can no longer fund a fast-tier batch
+or the round bound is reached; the finalizer is then appended as its own terminal
+revision, so a Scan that spent all of its rounds still produces a report.
+
+Everything here is worker-neutral: the worker supplies the pool, the dispatcher, the
+manifest loader, and the round runner, and keeps its own process-level concerns.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from dataclasses import dataclass, replace
+from typing import Any, Awaitable, Callable, Iterable, Mapping
+
+from .action_plan import (
+    ScanAction,
+    ScanActionPlan,
+    ScanActionPlanCompiler,
+    body_candidate_positions,
+    credential_profile_action_refs,
+    interactive_auth_input_action_ids,
+    request_collection_action_refs,
+)
+from .action_store import PostgresScanActionStore
+from .budget_allocator import allocate_scan_action_plan
+from .capability_execution import ScanCapabilityContractError
+from .capability_result import CapabilityResultReference
+from .contracts import budget_sufficiency
+from .continuation import (
+    MAX_SCAN_CONTINUATION_ROUNDS,
+    ContinuationBudgetCeiling,
+    ScanContinuationAllocation,
+    ScanContinuationError,
+    ScanPlanRevision,
+    amended_scan_plan_revision,
+    build_discovery_continuation_manifests,
+    continuation_manifest_offsets,
+    merge_scan_action_continuation,
+    reconciled_continuation_ceiling,
+)
+from .external_process import batch_attempt_floor
+from .manifest_store import PostgresScanManifestStore
+from .verification_extension import (
+    budget_concluded_slices,
+    plan_verification_extensions,
+    resume_observation_action_ids,
+    stage_last_chance_walls,
+    stage_remaining_walls,
+    stage_resume_walls,
+)
+from .work_manifests import (
+    ScanWorkManifest,
+    ScanWorkManifestKind,
+    ScanWorkManifestReference,
+    build_request_candidate_manifest,
+    unique_work_manifest_reference_dicts,
+)
+
+# One graph slot is always retained for the finalizer, including during work-only rounds.
+_PLAN_ACTION_BOUND = 511
+_INPUT_ACTION_PREFIXES = ("inputs.auth_", "inputs.collection_", "origin.select")
+_CANCELLED_MESSAGE = "Cancelled by user"
+
+
+@dataclass(frozen=True)
+class ContinuationRuntime:
+    """What one worker lends the round machinery: storage, the dispatcher, and event sinks."""
+
+    db_pool: Any
+    dispatcher: Any
+    execution_plan: Any
+    load_request_manifests: Callable[..., Awaitable[tuple[ScanWorkManifest, ...]]]
+    record_event: Callable[[str], None]
+    # Store constructors are injected so the worker's own names stay the seam its
+    # tests and fault harnesses replace.
+    manifest_store_factory: Callable[[], Any] = PostgresScanManifestStore
+    action_store_factory: Callable[[], Any] = PostgresScanActionStore
+
+
+async def load_continuation_request_manifests(
+    *,
+    db_pool: Any,
+    scan_id: str,
+    target_binding_digest: str,
+    options: Mapping[str, Any],
+    on_missing: Callable[[], None],
+    manifest_store_factory: Callable[[], Any] = PostgresScanManifestStore,
+) -> tuple[ScanWorkManifest, ...]:
+    raw_refs = options.get("request_manifest_refs")
+    if not isinstance(raw_refs, Mapping):
+        return ()
+    references: list[ScanWorkManifestReference] = []
+    for raw in raw_refs.values():
+        if not isinstance(raw, Mapping):
+            continue
+        reference = ScanWorkManifestReference.from_dict(raw)
+        if reference.kind is not ScanWorkManifestKind.REQUEST:
+            raise ScanCapabilityContractError(
+                "continuation request manifest has the wrong kind"
+            )
+        references.append(reference)
+    manifests: list[ScanWorkManifest] = []
+    async with db_pool.acquire() as conn:
+        store = manifest_store_factory()
+        for reference in references:
+            manifest = await store.load(
+                conn,
+                manifest_id=reference.manifest_id,
+                scan_id=scan_id,
+                expected_kind=reference.kind,
+                expected_digest=reference.manifest_digest,
+                expected_target_binding_digest=target_binding_digest,
+            )
+            if manifest is None or manifest.reference() != reference:
+                on_missing()
+                raise ScanCapabilityContractError(
+                    "continuation request manifest is unavailable"
+                )
+            manifests.append(manifest)
+    return tuple(manifests)
+
+
+#: Scan option naming the capabilities a continuation compiled but left out because the Scan's
+#: frozen allocation does not grant them; the report's coverage states each one
+#: (``capability_not_in_allocation:<capability>``, finalizer.finalize_scan_report).
+OMITTED_CAPABILITIES_OPTION = "continuation_omitted_capabilities"
+
+
+def without_unallocated_optional_actions(
+    plan: ScanActionPlan, allowed_capabilities: Iterable[str] | None,
+) -> tuple[ScanActionPlan, frozenset[str]]:
+    """``plan`` without optional actions of capabilities the allocation does not grant.
+
+    Filtered before the residual is allocated, so a slice that can never be appended does not
+    hold budget the round's other work could have used. An action depending on one left out goes
+    too, as ``select_continuation_actions`` would drop it; a required action of an ungranted
+    capability is kept and still meets the merge's "outside its allocation" guard. The finalizer
+    only loses those dependencies. Returns the plan (``plan`` itself when nothing was left out)
+    and the capabilities left out.
+    """
+    if allowed_capabilities is None:
+        return plan, frozenset()
+    allowed = frozenset(allowed_capabilities)
+    dropped: set[str] = set()
+    omitted: set[str] = set()
+    kept: list[ScanAction] = []
+    for action in plan.actions:
+        if action.action_id == "finalize.report" or action.action_id.startswith(_INPUT_ACTION_PREFIXES):
+            kept.append(action)
+        elif (not action.required and action.capability_name not in allowed) or dropped.intersection(
+            action.dependencies,
+        ):
+            dropped.add(action.action_id)
+            omitted.add(action.capability_name)
+        else:
+            kept.append(action)
+    if not dropped:
+        return plan, frozenset()
+    actions = tuple(
+        replace(
+            action, ordinal=index, action_digest=None,
+            dependencies=tuple(item for item in action.dependencies if item not in dropped),
+        )
+        for index, action in enumerate(kept)
+    )
+    filtered = ScanActionPlan(
+        scan_id=plan.scan_id, execution_plan_digest=plan.execution_plan_digest,
+        target_binding_digest=plan.target_binding_digest, actions=actions,
+    )
+    return filtered, frozenset(omitted)
+
+
+def select_continuation_actions(
+    allocated_plan: ScanActionPlan,
+    *,
+    parent_action_count: int,
+    include_finalizer: bool,
+    finalize_only: bool,
+    allowed_capabilities: Iterable[str] | None = None,
+) -> ScanActionPlan | None:
+    """Keep only the admitted work of one round as an independently valid plan.
+
+    Optional actions whose dependencies were skipped are omitted rather than appended as
+    terminal noise. Returns ``None`` when a work round admitted nothing, which is the
+    round loop's stop signal.
+
+    ``allowed_capabilities`` is the scan's continuation allocation. An optional action of a
+    capability it does not grant -- one a newer release added to a family after this Scan's
+    allocation was frozen, such as ``redirect.verify_batch`` on a Scan admitted before 2.11 --
+    is omitted rather than appended, so an in-flight Scan keeps running after an upgrade. A
+    required action is kept and still meets the merge's "outside its allocation" guard.
+    """
+    allowed = None if allowed_capabilities is None else frozenset(allowed_capabilities)
+    selected: list[ScanAction] = []
+    selected_ids: set[str] = set()
+    append_slots = max(0, _PLAN_ACTION_BOUND - parent_action_count)
+    appended_work = 0
+    # The next round resumes a lane after the furthest slice this one appended
+    # (continuation_manifest_offsets), so a lane's appended slices must be a contiguous
+    # prefix. A small trailing slice the residual could fund behind larger skipped ones
+    # moved the offset past them, and those manifest entries were never scheduled.
+    interrupted_lanes: set[str] = set()
+    for action in allocated_plan.actions:
+        if action.action_id.startswith(_INPUT_ACTION_PREFIXES):
+            selected.append(action)
+            selected_ids.add(action.action_id)
+            continue
+        if action.action_id == "finalize.report":
+            continue
+        lane = str(action.capability_args.get("continuation_work_key") or "")
+        if allowed is not None and not action.required and action.capability_name not in allowed:
+            continue
+        if (
+            finalize_only or action.admission_status != "planned"
+            or lane in interrupted_lanes
+            or any(dependency not in selected_ids for dependency in action.dependencies)
+            or appended_work >= append_slots
+        ):
+            if lane:
+                interrupted_lanes.add(lane)
+            continue
+        selected.append(action)
+        selected_ids.add(action.action_id)
+        appended_work += 1
+    if not finalize_only and appended_work == 0:
+        return None
+    if include_finalizer:
+        finalizer = next(
+            action for action in allocated_plan.actions
+            if action.action_id == "finalize.report"
+        )
+        selected.append(replace(
+            finalizer,
+            dependencies=tuple(action.action_id for action in selected),
+            action_digest=None,
+        ))
+    return ScanActionPlan(
+        scan_id=allocated_plan.scan_id,
+        execution_plan_digest=allocated_plan.execution_plan_digest,
+        target_binding_digest=allocated_plan.target_binding_digest,
+        actions=tuple(
+            replace(action, ordinal=index, action_digest=None)
+            for index, action in enumerate(selected)
+        ),
+    )
+
+
+def _manifest_reference_values(
+    endpoints: ScanWorkManifest,
+    candidates: ScanWorkManifest,
+    request_manifests: tuple[ScanWorkManifest, ...],
+    request_candidates: ScanWorkManifest | None,
+    template_ref: Any,
+) -> list[Mapping[str, Any]]:
+    values: list[Mapping[str, Any]] = [
+        endpoints.reference().canonical_dict(),
+        candidates.reference().canonical_dict(),
+        *(manifest.reference().canonical_dict() for manifest in request_manifests),
+    ]
+    if request_candidates is not None:
+        values.append(request_candidates.reference().canonical_dict())
+    if isinstance(template_ref, Mapping):
+        values.append(dict(template_ref))
+    return values
+
+
+def _continuation_option_patch(
+    endpoints: ScanWorkManifest,
+    candidates: ScanWorkManifest,
+    request_candidates: ScanWorkManifest | None,
+    amended: ScanActionPlan,
+    revision: ScanPlanRevision,
+    omitted_capabilities: Iterable[str] = (),
+) -> dict[str, Any]:
+    omitted = sorted(set(omitted_capabilities))
+    return {
+        # Only when a round left something out, so an ordinary Scan's options are unchanged.
+        **({OMITTED_CAPABILITIES_OPTION: omitted} if omitted else {}),
+        "endpoint_manifest_id": str(endpoints.manifest_id),
+        "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
+        "candidate_manifest_ref": candidates.reference().canonical_dict(),
+        "request_candidate_manifest_ref": (
+            request_candidates.reference().canonical_dict()
+            if request_candidates is not None and request_candidates.entries
+            else None
+        ),
+        "scan_continuation_plan_digest": amended.plan_digest,
+        "scan_plan_revision": revision.canonical_dict(),
+    }
+
+
+@dataclass(frozen=True)
+class PreparedContinuation:
+    plan: ScanActionPlan
+    revision: ScanPlanRevision
+    manifests: tuple[ScanWorkManifest, ...]
+    options: dict[str, Any]
+
+
+def new_work_reserve(parent_plan: ScanActionPlan, candidates: Any) -> list[tuple[str, int]]:
+    """The first verifier slices this round's compile may add, as ``(lane, wall floor)``.
+
+    Candidates beyond a verifier lane's manifest offset get their first slice in this or a
+    later round's compile, after the extensions are planned. Only lanes the Scan's families
+    selected (a verifier of that capability is in the plan) count, and each candidate holds its
+    own attempt floor: a request body's, or a query's much smaller one. The planner reserves
+    only those that can really be admitted (``plan_verification_extensions``), and funds probes
+    and continuations of candidates that cannot reach a full negative from what is left.
+    """
+    offsets = continuation_manifest_offsets(parent_plan)
+    selected = {action.capability_name for action in parent_plan.actions}
+    entries = list(getattr(candidates, "entries", ()) or ())
+    floors: list[tuple[str, int]] = []
+    for lane, capability, family in (
+        ("verify.sqli", "sqli.verify_batch", "sqli"), ("verify.xss", "xss.verify_batch", "xss"),
+    ):
+        if capability not in selected:
+            continue
+        for entry in entries[int(offsets.get(lane, 0)):]:
+            hints = entry.get("family_hints") if isinstance(entry, Mapping) else None
+            if hints and family not in hints:
+                continue
+            body = bool(isinstance(entry, Mapping) and entry.get("body_field_names"))
+            floors.append((lane, int(batch_attempt_floor(capability, body_candidate=body).get(
+                "tool_wall_seconds", 0,
+            ))))
+    return floors
+
+
+def compile_continuation_round(
+    *, parent_plan: ScanActionPlan, allocation: ScanContinuationAllocation,
+    parent_results: Mapping[str, CapabilityResultReference], execution_plan: Any,
+    target: Any, target_url: str, options: Mapping[str, Any],
+    observations: Mapping[str, Any], request_manifests: tuple[ScanWorkManifest, ...],
+    revision_number: int, include_finalizer: bool, finalize_only: bool,
+) -> PreparedContinuation | None:
+    """The one pure round compiler used by both local and broker persistence paths.
+
+    Only root discovery observations define the immutable worklists. Every settled
+    action contributes to cumulative consumption; later rounds never get a new budget.
+    """
+    if not 1 <= revision_number <= MAX_SCAN_CONTINUATION_ROUNDS + 1:
+        raise ScanContinuationError("continuation revision is outside its bound")
+    if finalize_only and not include_finalizer:
+        raise ScanContinuationError("a finalizer-only revision must include the finalizer")
+    if any(action.action_id == "finalize.report" for action in parent_plan.actions):
+        raise ScanContinuationError("cannot append work after the finalizer")
+    if not set(action.action_id for action in parent_plan.actions) <= set(parent_results):
+        raise ScanContinuationError("continuation is missing a terminal parent action receipt")
+    # A cancelled Scan gets no more work; a finalize-only revision adds none (it only lets the
+    # report of what already settled be built, see scan.cancelled_report).
+    if not finalize_only and any(
+        result.status.value == "cancelled" for result in parent_results.values()
+    ):
+        raise ScanContinuationError("cancelled Scan cannot continue")
+    root_results = {key: parent_results[key] for key in allocation.parent_action_ids}
+    # The receipts of resumable slices name the least wall their unfinished candidates need;
+    # extensions are sized from those checkpoints. Only root observations define worklists.
+    resume_observations = {
+        key: observations.get(key, ())
+        for key in resume_observation_action_ids(parent_plan, parent_results)
+    }
+    resume_walls = stage_resume_walls(resume_observations)
+    concluded = budget_concluded_slices(resume_observations)
+    remaining_walls = stage_remaining_walls(resume_observations)
+    remaining_requests = stage_remaining_walls(resume_observations, key="remaining_requests")
+    last_chance_walls = stage_last_chance_walls(resume_observations)
+    observations = {key: observations.get(key, ()) for key in allocation.parent_action_ids}
+    endpoints, candidates = build_discovery_continuation_manifests(
+        allocation=allocation,
+        target_url=target_url,
+        target=target,
+        options=options,
+        action_results=root_results,
+        observations=observations,
+        request_manifests=request_manifests,
+    )
+    request_candidates = (
+        build_request_candidate_manifest(
+            request_manifests,
+            source_action_ids=tuple(dict.fromkeys(
+                action_id
+                for manifest in request_manifests
+                for action_id in manifest.source_action_ids
+            )),
+            maximum=max(
+                1,
+                min(2_000, allocation.budget_ceiling.get(
+                    "state_changing_requests", 0,
+                )),
+            ),
+        )
+        if request_manifests else None
+    )
+    credential_refs = [
+        dict(item)
+        for item in options.get("credential_profile_refs") or ()
+        if isinstance(item, Mapping)
+    ]
+    collection_refs = [
+        dict(item)
+        for item in options.get("request_collections") or ()
+        if isinstance(item, Mapping)
+    ]
+    request_refs = options.get("request_manifest_refs")
+    template_ref = options.get("template_manifest_ref")
+    # Derived from the compiler's own rule: only an interactive credential gets
+    # an inputs.auth_* action, so allocating one per credential named actions
+    # that were never created and the plan was rejected outright.
+    zero_cost_existing_inputs = {
+        action_id: {}
+        for action_id in interactive_auth_input_action_ids(credential_refs)
+    }
+    # Admit against what the settled actions actually left, not the worst-case
+    # residual frozen at submission (see reconciled_continuation_ceiling).
+    residual = reconciled_continuation_ceiling(allocation, parent_results)
+    # The round's candidates are materialized, so each verifier slice holds the mutation
+    # allowance of the body candidates it actually holds, and none for a query slice.
+    body_positions = body_candidate_positions(candidates)
+    sufficient = budget_sufficiency(execution_plan.budget_profile)
+    # A verifier slice that a slow target wall-killed with most of its requests unsent
+    # is carried into this round, its holds scaled by the latency it measured.
+    extensions = (
+        plan_verification_extensions(
+            parent_plan=parent_plan,
+            parent_results=parent_results,
+            profile_limits=execution_plan.budget.ledger_limits(),
+            residual=residual,
+            stage_resume_walls=resume_walls,
+            budget_concluded=concluded,
+            stage_remaining_walls=remaining_walls,
+            stage_remaining_requests=remaining_requests,
+            stage_last_chance_walls=last_chance_walls,
+            reserved_for_new_work=new_work_reserve(parent_plan, candidates),
+            final_round=revision_number >= MAX_SCAN_CONTINUATION_ROUNDS,
+            budget_profile=execution_plan.budget_profile,
+            body_positions=body_positions,
+        )
+        if revision_number >= 2 and not finalize_only else ()
+    )
+    # One per collection the compiler gives a replay action: a saved selection that replays. A
+    # collection named by its id seeds discovery only (``discovery_only``) and has none, so naming
+    # it here asked for an action the compiler never creates and the round was refused.
+    zero_cost_existing_inputs.update({
+        f"inputs.collection_{index:02d}": {}
+        for index, _item in enumerate(request_collection_action_refs(collection_refs))
+    })
+    if target.inferred_origins:
+        zero_cost_existing_inputs["origin.select"] = {}
+    continuation_raw = ScanActionPlanCompiler().compile(
+        scan_id=parent_plan.scan_id,
+        execution_plan=execution_plan,
+        target_binding=target,
+        credential_profile_refs=credential_profile_action_refs(credential_refs),
+        request_collection_refs=request_collection_action_refs(collection_refs),
+        request_manifest_refs=(
+            {
+                str(key): dict(value)
+                for key, value in request_refs.items()
+                if isinstance(value, Mapping)
+            }
+            if isinstance(request_refs, Mapping) else None
+        ),
+        endpoint_manifest_ref=endpoints.reference().canonical_dict(),
+        candidate_manifest_ref=candidates.reference().canonical_dict(),
+        request_candidate_manifest_ref=(
+            request_candidates.reference().canonical_dict()
+            if request_candidates is not None and request_candidates.entries
+            else None
+        ),
+        template_manifest_ref=(
+            dict(template_ref) if isinstance(template_ref, Mapping) else None
+        ),
+        action_scope="endpoint",
+        action_budgets=zero_cost_existing_inputs,
+        # A thorough or deep round chooses each lane's tier against what the settled actions
+        # left, so a lane whose full-ceiling tier the residual cannot fund steps down to one it
+        # can instead of being skipped: active templates reserve a mutation per request, and
+        # no second-round sweep was compiled on any large 2.11 target (3,960 needed, 3,833 left).
+        ledger_limits=(
+            {
+                name: min(int(limit), int(residual.get(name, limit)))
+                for name, limit in execution_plan.budget.ledger_limits().items()
+            }
+            if sufficient else None
+        ),
+        # Every active-template window, unless the Scan verifies named templates only.
+        active_template_windows=not options.get("verify_templates"),
+        # Every work revision receives a unique action namespace. The terminal
+        # revision reuses the last round's namespace only while compiling the
+        # finalizer reservation; no round's work is appended twice.
+        continuation_round=min(revision_number, MAX_SCAN_CONTINUATION_ROUNDS),
+        manifest_offsets=continuation_manifest_offsets(parent_plan),
+        # The first continuation satisfies explicit family floors. Later rounds
+        # are opportunistic breadth and must stop cleanly when the residual can
+        # no longer fund a fast-tier batch.
+        # A passive Scan already holds the pack's required baseline in its admission
+        # plan; its continuation is breadth over the discovered surface, admitted when the
+        # residual funds it and never a reason to fail the Scan.
+        require_family_minimums=revision_number == 1 and not any(
+            action.required and action.capability_name == "templates.passive_batch"
+            for action in parent_plan.actions[:len(allocation.parent_action_ids)]
+        ),
+        verification_extensions=extensions,
+        body_positions=body_positions,
+    )
+    # Optional work the frozen allocation does not grant is left out before admission, so it
+    # never holds residual budget; the Scan's report states each capability left out.
+    continuation_raw, omitted = without_unallocated_optional_actions(
+        continuation_raw, allocation.allowed_capabilities,
+    )
+    allocated_plan = allocate_scan_action_plan(
+        continuation_raw, ContinuationBudgetCeiling(residual),
+        # A lane's slices are admitted first slice first, so a residual that funds one of
+        # them funds the one the round can append.
+        lane_order=sufficient,
+    ).plan
+    continuation_plan = select_continuation_actions(
+        allocated_plan,
+        parent_action_count=len(parent_plan.actions),
+        include_finalizer=include_finalizer,
+        finalize_only=finalize_only,
+        allowed_capabilities=allocation.allowed_capabilities,
+    )
+    if continuation_plan is None:
+        return None
+    amended = merge_scan_action_continuation(
+        parent_plan=parent_plan,
+        continuation_plan=continuation_plan,
+        allocation=allocation,
+        parent_results=parent_results,
+        include_finalizer=include_finalizer,
+    )
+    revision = amended_scan_plan_revision(
+        parent_plan=parent_plan,
+        continuation_plan=continuation_plan,
+        amended_plan=amended,
+        allocation=allocation,
+        discovery_results=parent_results,
+        work_manifest_references=unique_work_manifest_reference_dicts(
+            _manifest_reference_values(
+                endpoints, candidates, request_manifests, request_candidates, template_ref,
+            )
+        ),
+        revision=revision_number,
+    )
+    previously_omitted = options.get(OMITTED_CAPABILITIES_OPTION)
+    option_patch = _continuation_option_patch(
+        endpoints, candidates, request_candidates, amended, revision,
+        omitted_capabilities={
+            *omitted,
+            *(str(item) for item in previously_omitted if str(item).strip()),
+        } if isinstance(previously_omitted, (list, tuple)) else omitted,
+    )
+    return PreparedContinuation(
+        plan=amended, revision=revision,
+        manifests=(endpoints, candidates, *((request_candidates,) if request_candidates is not None else ())),
+        options=option_patch,
+    )
+
+
+def compile_next_continuation(**kwargs: Any) -> PreparedContinuation:
+    """Admit one work round or exactly one terminal revision at exhaustion/the bound."""
+    prepared = None
+    if kwargs["revision_number"] <= MAX_SCAN_CONTINUATION_ROUNDS:
+        prepared = compile_continuation_round(**kwargs, include_finalizer=False, finalize_only=False)
+    if prepared is None:
+        prepared = compile_continuation_round(**kwargs, include_finalizer=True, finalize_only=True)
+    if prepared is None:
+        raise ScanContinuationError("terminal Scan continuation produced no finalizer")
+    return prepared
+
+
+async def materialize_local_scan_continuation(
+    runtime: ContinuationRuntime, *, parent_plan: ScanActionPlan,
+    allocation: ScanContinuationAllocation,
+    parent_results: Mapping[str, CapabilityResultReference],
+    revision_number: int = 1, include_finalizer: bool = True, finalize_only: bool = False,
+) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
+    """Compile with the shared planner and persist one local continuation transaction."""
+    prepared = await prepare_local_scan_continuation(
+        runtime, parent_plan=parent_plan, allocation=allocation, parent_results=parent_results,
+        revision_number=revision_number, include_finalizer=include_finalizer,
+        finalize_only=finalize_only,
+    )
+    if prepared is None:
+        return None
+    dispatcher = runtime.dispatcher
+    async with runtime.db_pool.acquire() as conn:
+        async with conn.transaction():
+            store = runtime.manifest_store_factory()
+            for manifest in prepared.manifests:
+                await store.persist(conn, manifest=manifest)
+            await runtime.action_store_factory().amend_plan(
+                conn, parent_plan=parent_plan, amended_plan=prepared.plan,
+                allocation=allocation, revision=prepared.revision,
+            )
+            await conn.execute(
+                """
+                UPDATE scans SET options=options || $2::jsonb
+                WHERE id=$1 AND status NOT IN ('cancelled','cancelling')
+                """,
+                uuid.UUID(dispatcher.scan_id), json.dumps(prepared.options),
+            )
+    dispatcher.options.update(prepared.options)
+    runtime.record_event("continuation_compiled")
+    return prepared.plan, prepared.revision
+
+
+async def prepare_local_scan_continuation(
+    runtime: ContinuationRuntime, *, parent_plan: ScanActionPlan,
+    allocation: ScanContinuationAllocation,
+    parent_results: Mapping[str, CapabilityResultReference],
+    revision_number: int = 1, include_finalizer: bool = True, finalize_only: bool = False,
+) -> PreparedContinuation | None:
+    """Compile one continuation revision with the shared planner; nothing is persisted.
+
+    A cancelled Scan's plan is frozen, so its report is built over a finalize-only revision
+    compiled here and never stored.
+    """
+    dispatcher = runtime.dispatcher
+    observations = {
+        action_id: await dispatcher._observations(action_id)
+        for action_id in dict.fromkeys((
+            *allocation.parent_action_ids,
+            *resume_observation_action_ids(parent_plan, parent_results),
+        ))
+    }
+    request_manifests = await runtime.load_request_manifests(
+        scan_id=dispatcher.scan_id, target_binding_digest=dispatcher.target.digest,
+        options=dispatcher.options,
+    )
+    prepared = compile_continuation_round(
+        parent_plan=parent_plan, allocation=allocation, parent_results=parent_results,
+        execution_plan=runtime.execution_plan, target=dispatcher.target,
+        target_url=dispatcher.target_url, options=dispatcher.options,
+        observations=observations, request_manifests=request_manifests,
+        revision_number=revision_number, include_finalizer=include_finalizer,
+        finalize_only=finalize_only,
+    )
+    return prepared
+
+
+def _cancelled(orchestration: Any) -> bool:
+    return any(
+        result.status.value == "cancelled"
+        for result in orchestration.action_results.values()
+    )
+
+
+def round_progress_window(
+    revision_number: int,
+    *,
+    floor: int = 40,
+    ceiling: int = 90,
+    max_rounds: int = MAX_SCAN_CONTINUATION_ROUNDS,
+) -> tuple[int, int]:
+    """The progress span one work round reports, so eight rounds fill floor..ceiling evenly."""
+    span = ceiling - floor
+    return (
+        floor + ((revision_number - 1) * span // max_rounds),
+        floor + (revision_number * span // max_rounds),
+    )
+
+
+async def run_continuation_rounds(
+    *,
+    plan: ScanActionPlan,
+    plan_revision: ScanPlanRevision | None,
+    initial_results: Mapping[str, CapabilityResultReference],
+    materialize: Callable[..., Awaitable[tuple[ScanActionPlan, ScanPlanRevision] | None]],
+    run_round: Callable[..., Awaitable[Any]],
+    max_rounds: int = MAX_SCAN_CONTINUATION_ROUNDS,
+) -> tuple[ScanActionPlan, ScanPlanRevision, Any]:
+    """Append and run work revisions until the residual is spent, then the terminal finalizer.
+
+    ``materialize(parent_plan=, parent_results=, revision_number=, include_finalizer=,
+    finalize_only=)`` compiles and persists one revision or returns ``None`` when nothing
+    was admitted. ``run_round(plan, revision, progress_start=, progress_end=)`` executes an
+    amended plan and returns the orchestration whose ``action_results`` settle it. A
+    cancelled action in any round stops the Scan with the worker's cancellation signal.
+    """
+    all_results: dict[str, CapabilityResultReference] = dict(initial_results)
+    next_revision = int(plan_revision.revision) + 1 if plan_revision is not None else 1
+    orchestration: Any = None
+    # Append one digest-bound work revision at a time. Recompilation starts each manifest
+    # lane at its first unplanned index and admits only what the cumulatively reconciled
+    # residual can still fund.
+    while next_revision <= max_rounds:
+        materialized = await materialize(
+            parent_plan=plan,
+            parent_results=all_results,
+            revision_number=next_revision,
+            include_finalizer=False,
+            finalize_only=False,
+        )
+        if materialized is None:
+            break
+        plan, plan_revision = materialized
+        progress_start, progress_end = round_progress_window(
+            next_revision, max_rounds=max_rounds,
+        )
+        orchestration = await run_round(
+            plan, plan_revision,
+            progress_start=progress_start, progress_end=progress_end,
+        )
+        all_results.update(orchestration.action_results)
+        if _cancelled(orchestration):
+            raise ValueError(_CANCELLED_MESSAGE)
+        next_revision += 1
+    # Finalization is its own immutable revision: a terminal report survives even when
+    # every work round was consumed, and an early finalizer can never invalidate a
+    # later amendment.
+    finalized = await materialize(
+        parent_plan=plan,
+        parent_results=all_results,
+        revision_number=next_revision,
+        include_finalizer=True,
+        finalize_only=True,
+    )
+    if finalized is None:
+        raise ScanContinuationError("terminal Scan continuation produced no finalizer")
+    plan, plan_revision = finalized
+    orchestration = await run_round(
+        plan, plan_revision, progress_start=90, progress_end=95,
+    )
+    return plan, plan_revision, orchestration
+
+
+__all__ = [
+    "OMITTED_CAPABILITIES_OPTION",
+    "ContinuationRuntime",
+    "PreparedContinuation",
+    "compile_continuation_round",
+    "compile_next_continuation",
+    "load_continuation_request_manifests",
+    "materialize_local_scan_continuation",
+    "prepare_local_scan_continuation",
+    "round_progress_window",
+    "run_continuation_rounds",
+    "select_continuation_actions",
+    "without_unallocated_optional_actions",
+]

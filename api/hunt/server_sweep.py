@@ -579,9 +579,11 @@ class Sweep(EngineLogins):
                     found += await self._javascript(items)
                 if "http.request" in allowed and writes:
                     await self._default_credentials(request_checks="request.verify" in allowed)
-                    # Accounts the engine makes itself, then the application used as each of its
-                    # logins (engine_accounts): what that maps is tested as the login next round.
-                    await self._make_accounts(items)
+                    # Accounts the engine makes itself (only with the operator's explicit
+                    # allow_account_creation), then the application used as each of its logins
+                    # (engine_accounts): what that maps is tested as the login next round.
+                    if policy.get("allow_account_creation"):
+                        await self._make_accounts(items)
                     await self._use_as_logins(items, writes=writes, allowed=allowed)
                 if "request.verify" in allowed:
                     self._request_checks(fresh, writes=writes, slots=slots, first=rounds == 1)

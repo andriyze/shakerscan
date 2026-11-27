@@ -1,0 +1,1177 @@
+"""Fail-closed, secret-free Hunt V2 start authority.
+
+The coding agent owns investigation strategy. This contract owns everything the model must never
+infer or smuggle through prose: target kind, active/network/mutation authority, authorization
+attestation, bounded budgets, capability allowlists, credential references, and imported request
+collections.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, fields, replace
+import ipaddress
+import os
+import re
+from typing import Any, Mapping, Sequence
+import uuid
+
+
+HUNT_START_SCHEMA = "hunt-start/v2"
+HUNT_BUDGET_SCHEMA = "hunt-budget/v3"
+MAX_HUNT_BODY_BYTES = 1_048_576
+MAX_GOAL_CHARS = 20_000
+MAX_CAPABILITIES = 128
+MAX_COLLECTIONS = 32
+# Kept equal to MAX_SKILLS_PER_HUNT in hunt/skills.py; asserted by the skill tests so the
+# request boundary and the library cannot drift into disagreeing about the same limit.
+MAX_SKILLS = 12
+# Enough to cover an origin's addresses across both families plus a failover pool. This is a
+# context bound, not an authority: each address is still one the operator named, and every
+# destination is still checked against scope and the deployment's address policy.
+MAX_DIRECT_ORIGIN_ADDRESSES = 32
+MAX_CREDENTIAL_REFS = 16
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
+_CAPABILITY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
+_SKILL_RE = re.compile(r"^skill\.[a-z0-9][a-z0-9_.-]{0,127}$")
+_ALLOWED_TARGET_KINDS = frozenset({"web", "api", "device", "network"})
+_ALLOWED_TOP_LEVEL_KEYS = frozenset({
+    "target_id", "target_kind", "goal", "objective", "budget_profile", "policy_profile",
+    "budgets", "policy", "credential_refs", "capabilities", "request_collection_ids",
+    "approval_receipt_id", "scope_receipt_id", "schema_version", "skill_ids",
+    "direct_origin_addresses", "allow", "proposed_allow", "allow_asserted_by", "secret_visibility",
+    "handoff_id", "saved_logins", "seed_finding_ids",
+})
+# A start's handoff id: chosen by whoever sends the start (an agent, the CLI), kept with the Hunt,
+# and listed by (``GET /hunts?handoff_id=``). When a person's decision is needed for the start and
+# the person's own terminal sends it, the agent finds that exact Hunt by this id, never by
+# "the newest Hunt of this target", which another start could be.
+HANDOFF_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# Whether the planner may read the values of the target's discovered secrets (``secrets.inspect``).
+# A person's choice at start, off by default, accepted only with ``allow_asserted_by`` and recorded
+# as theirs; the MCP start tool drops it, the Enterprise gateway strips it, and nothing after start
+# changes it (hunt/discovered_secrets.py, values_for_agent). On a loopback-only local install the
+# local operator is the boundary: a local agent with API access can assert it too.
+SECRET_VISIBILITIES = ("withheld", "agent_may_see")
+# Who set ``allow`` bounds. The Enterprise gateway sets this after the person's step-up (PR G1)
+# and must strip any value a client sent; on local OSS the bounds are the operator's own.
+ALLOW_ASSERTION_PROOFS = frozenset({"stepup", "launch_stepup", "local"})
+_ALLOWED_BUDGET_KEYS = frozenset({
+    "max_duration_seconds",
+    "max_capability_calls",
+    "max_http_requests",
+    "max_active_actions",
+    "max_candidates",
+    "max_verifications",
+    "max_tcp_ports",
+    "max_browser_actions",
+    "max_state_changing_requests",
+    "max_verifier_write_requests",
+    "max_device_fragility_points",
+    "max_hosts",
+    "max_udp_ports",
+    "max_oob_interactions",
+})
+_ALLOWED_CREDENTIAL_REF_KEYS = frozenset({
+    "web_credential_profile_id",
+    "ssh_credential_profile_id",
+    "primary_credential_profile_id",
+    "secondary_credential_profile_id",
+    "service_credential_profile_id",
+    "authorization_header_credential_id",
+    "cookie_credential_id",
+    "oauth_credential_profile_id",
+})
+_ALLOWED_POLICY_KEYS = frozenset({
+    "active_testing",
+    "allow_state_changing_http",
+    "network_discovery",
+    "allow_oob_interactions",
+    "allow_account_creation",
+    "allow_identity_headers",
+    "allow_direct_origin",
+    "authorization_confirmed",
+    "approval_receipt_id",
+    "scope_receipt_id",
+})
+
+
+@dataclass(frozen=True)
+class HuntBudget:
+    max_duration_seconds: int
+    max_capability_calls: int
+    max_http_requests: int
+    max_active_actions: int
+    max_candidates: int
+    max_verifications: int
+    max_tcp_ports: int
+    max_browser_actions: int
+    max_state_changing_requests: int
+    max_device_fragility_points: int
+    max_hosts: int
+    max_udp_ports: int
+    max_oob_interactions: int
+    # Written after the fields every stored budget has: a Hunt started before it reads zero.
+    max_verifier_write_requests: int = 0
+
+    def ledger_limits(self) -> dict[str, int]:
+        return {
+            "agent_actions": self.max_capability_calls,
+            "active_actions": self.max_active_actions,
+            "http_requests": self.max_http_requests,
+            "tcp_ports_attempted": self.max_tcp_ports,
+            "browser_actions": self.max_browser_actions,
+            "state_changing_requests": self.max_state_changing_requests,
+            "verifier_write_requests": self.max_verifier_write_requests,
+            "tool_wall_seconds": self.max_duration_seconds,
+            "device_fragility_points": self.max_device_fragility_points,
+            "hosts_attempted": self.max_hosts,
+            "udp_ports_attempted": self.max_udp_ports,
+            "oob_interactions": self.max_oob_interactions,
+            "candidates": self.max_candidates,
+        }
+
+
+# Call, traffic and verification limits cover the whole duration at the most one call can be
+# charged per second of the wall it settles (hunt/budget_pace.py): every call that runs settles at
+# least one second, so one call, one approval-gated call and one verification per second, a login
+# check's 32 browser actions and 128 requests per second. No paced limit runs out before the clock.
+# Approval-gated calls may use the whole call allowance; each one still checks its approval
+# receipt. Records cost no traffic and no wall and get one per call.
+#
+# The remaining ceilings (state-changing requests, TCP and UDP ports, device fragility, hosts,
+# out-of-band interactions) are not paced. Each is an authority a person grants separately, and
+# once granted it has to fund the work it was granted for: every capability several times over
+# on fast, and none of them the first limit a Hunt meets. The earlier values (4, 20 and 80
+# writes; 100 TCP ports on fast; 20 fragility points) refused whole capabilities outright: a
+# workflow or a 25-request replay on fast, a mass-assignment proof (12 writes), a top-1000 port
+# scan, and on a device target, where every held request is charged as fragility, the crawls and
+# both verifiers.
+#
+# Verifier writes are the POST/PUT/PATCH requests a verifier (sqli.verify, xss.verify) sends to
+# test a request body, and its proof's: a ceiling of their own beside the state-changing ceiling,
+# which bounds the planner's own writes. Admission reserves a body test's whole request hold here
+# (1,800, HUNT_THOROUGH_SCANNER_HOLDS) and the action settles its measured requests. Measured: a
+# body test sends 103-286 requests over two fields with sqlmap and up to about 1,300 per field with
+# Dalfox. The profiles fund 16, 64 and 256 body-test holds: every measured body test settles
+# well under its hold, so the ceiling is never the first limit a planned test meets.
+VERIFIER_WRITE_HOLD = 1_800
+HUNT_BUDGET_PROFILES: Mapping[str, HuntBudget] = {
+    "fast": HuntBudget(
+        max_duration_seconds=3_600, max_capability_calls=3_600, max_http_requests=460_800,
+        max_active_actions=3_600, max_candidates=3_600, max_verifications=3_600, max_tcp_ports=2_000,
+        max_browser_actions=115_200, max_state_changing_requests=200, max_device_fragility_points=2_000,
+        max_hosts=100, max_udp_ports=1_000, max_oob_interactions=50,
+        max_verifier_write_requests=16 * VERIFIER_WRITE_HOLD,
+    ),
+    "balanced": HuntBudget(
+        max_duration_seconds=14_400, max_capability_calls=14_400, max_http_requests=1_843_200,
+        max_active_actions=14_400, max_candidates=14_400, max_verifications=14_400, max_tcp_ports=20_000,
+        max_browser_actions=460_800, max_state_changing_requests=1_000, max_device_fragility_points=8_000,
+        max_hosts=500, max_udp_ports=5_000, max_oob_interactions=200,
+        max_verifier_write_requests=64 * VERIFIER_WRITE_HOLD,
+    ),
+    "thorough": HuntBudget(
+        max_duration_seconds=86_400, max_capability_calls=86_400, max_http_requests=11_059_200,
+        max_active_actions=86_400, max_candidates=86_400, max_verifications=86_400, max_tcp_ports=200_000,
+        max_browser_actions=2_764_800, max_state_changing_requests=5_000, max_device_fragility_points=40_000,
+        max_hosts=5_000, max_udp_ports=20_000, max_oob_interactions=1_000,
+        max_verifier_write_requests=256 * VERIFIER_WRITE_HOLD,
+    ),
+}
+
+
+def hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
+    """One ledger projection for API admission, workers and partial historical budgets."""
+    return HuntBudget(**{field.name: int(budget.get(field.name) or 0)
+                         for field in fields(HuntBudget)}).ledger_limits()
+
+ZEROABLE_HUNT_BUDGET_DIMENSIONS = frozenset({
+    "max_active_actions",
+    "max_browser_actions",
+    "max_device_fragility_points",
+    "max_hosts",
+    "max_oob_interactions",
+    "max_state_changing_requests",
+    "max_tcp_ports",
+    "max_udp_ports",
+    "max_verifier_write_requests",
+})
+MANDATORY_HUNT_BUDGET_DIMENSIONS = _ALLOWED_BUDGET_KEYS - ZEROABLE_HUNT_BUDGET_DIMENSIONS
+HUNT_BUDGET_DIMENSION_LABELS: Mapping[str, str] = {
+    "max_duration_seconds": "Maximum duration (seconds)",
+    "max_capability_calls": "Maximum capability calls",
+    "max_http_requests": "Maximum HTTP requests",
+    "max_active_actions": "Maximum approval-gated actions",
+    "max_candidates": "Maximum candidate and finding records",
+    "max_verifications": "Maximum deterministic verifications",
+    "max_tcp_ports": "Maximum TCP ports",
+    "max_browser_actions": "Maximum browser actions",
+    "max_state_changing_requests": "Maximum state-changing requests",
+    "max_verifier_write_requests": "Maximum verifier write requests",
+    "max_device_fragility_points": "Maximum device fragility points",
+    "max_hosts": "Maximum hosts",
+    "max_udp_ports": "Maximum UDP ports",
+    "max_oob_interactions": "Maximum out-of-band interactions",
+}
+
+
+class HuntStartContractError(ValueError):
+    """The submitted Hunt request is outside the V2 authority contract.
+
+    ``code`` is the stable reason code (``permission_reasons.REASON_CODES``) when a person could
+    resolve the refusal; None for a malformed request.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _input_summary(schema: Any) -> dict[str, list[str]]:
+    """A capability's input fields by name: the required ones, then every one it accepts."""
+    schema = schema if isinstance(schema, dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+    return {"required": [str(name) for name in required], "fields": [str(name) for name in properties]}
+
+
+def hunt_start_public_contract() -> dict[str, Any]:
+    """Return the API/UI contract generated from the server's authority constants."""
+    try:
+        import investigation_candidates as candidates
+        from runtime.capability_registry import CAPABILITY_REGISTRY
+    except ModuleNotFoundError:
+        from .. import investigation_candidates as candidates
+        from ..runtime.capability_registry import CAPABILITY_REGISTRY
+    from .candidate_verification_preflight import (
+        IDENTITY_ONLY_LOCATION_KEYS, ROUTE_LOCUS_KEYS, public_verification_families,
+    )
+    from .permission_bounds import CAPABILITY_FLAGS, MAX_BOUNDS
+    from .permission_reasons import PERMISSION_KINDS, REASON_CODES
+    from .saved_logins import DEFAULT_LOGINS, MAX_LOGINS, MAX_SAVED_LOGINS
+    from .seed_findings import MAX_SEED_FINDINGS, REASON_CODE as SEED_REASON_CODE
+    from .coverage_ledger import (
+        COVERAGE_ANGLE_STATUSES, COVERAGE_LOCUS_KEYS, MAX_COVERAGE_BYTES_PER_HUNT,
+        MAX_COVERAGE_EVENT_BYTES, MAX_COVERAGE_EVENTS_PER_HUNT,
+    )
+    return {
+        "schema_version": HUNT_START_SCHEMA,
+        "budget_schema_version": HUNT_BUDGET_SCHEMA,
+        "target_kinds": sorted(_ALLOWED_TARGET_KINDS),
+        "policy_fields": sorted(_ALLOWED_POLICY_KEYS),
+        "credential_ref_fields": sorted(_ALLOWED_CREDENTIAL_REF_KEYS),
+        "limits": {
+            "goal_chars": MAX_GOAL_CHARS,
+            "capabilities": MAX_CAPABILITIES,
+            "request_collections": MAX_COLLECTIONS,
+            "credential_refs": MAX_CREDENTIAL_REFS,
+            "skill_ids": MAX_SKILLS,
+            "direct_origin_addresses": MAX_DIRECT_ORIGIN_ADDRESSES,
+            "allow": MAX_BOUNDS,
+            "saved_logins": MAX_SAVED_LOGINS,
+            "seed_finding_ids": MAX_SEED_FINDINGS,
+        },
+        # Pre-authorization bounds (docs/hunt-permission-requests.md). ``allow`` is a person's
+        # (Enterprise: set with allow_asserted_by after step-up); ``proposed_allow`` is the
+        # agent's proposal and becomes one pending request for the person to approve.
+        "allow_bounds": {
+            "fields": ["allow", "proposed_allow"],
+            "grammar": [
+                "budget.raise:<N>x", "budget.raise:<max_dimension>=<total>",
+                "credential.use:<target-id|host>,...", "target.authorize:<host[:port]|*.domain[:port]>,...",
+                "capability:" + "|".join(sorted(CAPABILITY_FLAGS)), "ssh.host_trust:first-contact",
+                "login.use:<saved-login-profile-id>,...",
+            ],
+            "assertion_proofs": sorted(ALLOW_ASSERTION_PROOFS),
+        },
+        "handoff": {
+            "field": "handoff_id", "pattern": HANDOFF_ID_RE.pattern, "list_filter": "handoff_id",
+            "purpose": ("an id the sender chooses for this start, kept with the Hunt: a start a "
+                        "person sends from their own terminal is found again by it"),
+        },
+        "secret_visibility": {
+            "field": "secret_visibility", "values": list(SECRET_VISIBILITIES), "default": "withheld",
+            "set_by": ("the person starting the Hunt, named in allow_asserted_by (step-up, or local "
+                       "on a loopback-only install, where anyone with API access can assert it); "
+                       "never changed after start"),
+        },
+        # A person attaches saved logins (form/JSON login profiles of the target) at start; the
+        # planner signs in with them by reference (hunt/saved_logins.py). The MCP start tool drops
+        # the field: an agent asks for a saved login by binding it (a login.use request).
+        "saved_logins": {
+            "field": "saved_logins", "max_items": MAX_SAVED_LOGINS,
+            "item": {"profile_id": "a form_login or json_login profile attached to the target",
+                     "max_logins": f"1-{MAX_LOGINS} (default {DEFAULT_LOGINS})"},
+            "requires": "policy.active_testing",
+        },
+        # Start from findings (hunt/seed_findings.py): the briefing opens with them.
+        "seed_findings": {
+            "field": "seed_finding_ids", "max_items": MAX_SEED_FINDINGS, "item": "finding id (UUID)",
+            "must_be": "a finding of the Hunt's target that the Hunt can read (its kind=findings scope)",
+            "refusal_code": SEED_REASON_CODE, "briefing_path": "seed_findings",
+            "grants_authority": False,
+        },
+        "permission_reason_codes": sorted(REASON_CODES),
+        "permission_kinds": list(PERMISSION_KINDS),
+        "patterns": {
+            "identifier": _ID_RE.pattern,
+            "capability": _CAPABILITY_RE.pattern,
+            "skill_id": _SKILL_RE.pattern,
+        },
+        "skill_catalog": "/hunt/skills",
+        "target_skill": {
+            "url_template": "/targets/{target_id}/skill", "one_per_target": True,
+            "auto_load_at_start": True, "snapshot_context_path": "target_skill",
+            "editing_affects": "future_hunts",
+            "max_characters": CAPABILITY_REGISTRY.require("targets.skill.create").input_schema["properties"]["methodology"]["maxLength"],
+            "grants_authority": False,
+        },
+        "target_actions": {
+            "url_template":"/targets/{target_id}/actions","max_actions":32,
+            "auto_load_at_start":True,"snapshot_context_path":"target_actions",
+            "auto_retain_at_finish":True,
+            "auto_retain_permission":"always proposes for operator review, never saves; one rolling proposal per target; metadata_changes opt-out skips",
+            "completion_result_path":"final_debrief.saved_action",
+            "execution":"Read a recipe, then invoke each canonical step through the saved Hunt manifest.",
+            "grants_authority":False,
+        },
+        "tool_calls": [
+            {"name": spec.name, "description": spec.description,
+             "tool": spec.planner_contract()["tool"],
+             "target_kinds": sorted(spec.target_kinds),
+             "required_approval": spec.required_approval,
+             # D50: the fields of the call's ``input``, so an MCP client can describe them
+             # before a Hunt exists; the Hunt manifest keeps the full input schema.
+             "input": _input_summary(spec.planner_contract()["input_schema"]),
+             "call": {"method":"POST", "url_template":f"/hunts/{{hunt_id}}/capabilities/{spec.name}"}}
+            for spec in CAPABILITY_REGISTRY.list() if spec.planner_visible
+        ],
+        "budget_amendments": {
+            "schema_version": "hunt-budget-amendment/v1",
+            "url_template": "/hunts/{hunt_id}/budget-amendments",
+            "operator_requested_only": True,
+            "limits_are_totals": True,
+            "preserves_usage_and_authority": True,
+        },
+        "coverage_ledger": {
+            "url_template": "/hunts/{hunt_id}/coverage-angles",
+            "checkpoint_url_template": "/hunts/{hunt_id}/checkpoint",
+            "statuses": sorted(COVERAGE_ANGLE_STATUSES),
+            "locus_keys": list(COVERAGE_LOCUS_KEYS),
+            "unknown_locus_keys": "refused",
+            "max_events_per_hunt": MAX_COVERAGE_EVENTS_PER_HUNT,
+            "max_event_bytes": MAX_COVERAGE_EVENT_BYTES,
+            "max_bytes_per_hunt": MAX_COVERAGE_BYTES_PER_HUNT,
+            "advisory_only": True,
+        },
+        "candidates": {
+            "url_template": "/hunts/{hunt_id}/candidates",
+            "locus_schema_version": "hunt-candidate-locus/v1",
+            "locus_keys": dict(candidates.LOCUS_KEYS),
+            "locus_set_keys": sorted(candidates.LOCUS_SET_KEYS),
+            "locus_other_keys": (
+                "Only locus_keys make up the candidate identity. Any other identifier key "
+                "(lower-cased, '-' read as '_') is accepted and kept with the sighting as "
+                "locus_metadata, outside the identity, and the response names it in "
+                "ignored_for_identity. Nothing in the locus is truncated or dropped: "
+                "a value over max_locus_value_chars, a list over max_locus_list_items distinct "
+                "items, a port outside 1-65535, or a locus over max_locus_keys or "
+                "max_locus_bytes is refused."
+            ),
+            "max_locus_keys": candidates.MAX_LOCUS_KEYS,
+            "max_locus_bytes": candidates.MAX_LOCUS_BYTES,
+            "max_locus_value_chars": candidates.MAX_LOCUS_VALUE_CHARS,
+            "max_locus_list_items": candidates.MAX_LOCUS_LIST_ITEMS,
+            "identity": "target + family + the locus_keys of the locus",
+            "verification_route_keys": list(ROUTE_LOCUS_KEYS),
+            # D27: which families candidate.verify can prove, before an agent spends a call on one.
+            "verification": public_verification_families(),
+            "identity_only_location_keys": list(IDENTITY_ONLY_LOCATION_KEYS),
+            "verification_route": (
+                "candidate.verify re-executes one concrete route, taken from the first of the "
+                "verification_route_keys present in the locus; identity_only_location_keys "
+                "distinguish candidates but never resolve a route "
+                "(otherwise 422 verification_route_unresolved, at no budget cost). On a network "
+                "target, which names a host and no HTTP service, the locus also names the service "
+                "the candidate was found on: origin (http(s)://host[:port] on the target's host) "
+                "or an absolute url; the proof runs there (otherwise 422 "
+                "verification_service_unresolved, at no budget cost)."
+            ),
+            "dedup": (
+                "A sighting with the same identity and the same title or claim merges its "
+                "evidence_refs into the existing candidate (outcome=merged). A different claim "
+                "with the same identity is stored as its own candidate (outcome=inserted, "
+                "distinct_from_candidate_id). A stored claim is never replaced: title, claim or "
+                "severity a sighting carried but did not write are listed in unapplied_fields; "
+                "use PATCH. A candidate under verification is not changed (409 "
+                "candidate_verification_in_flight), and evidence is never truncated (422 "
+                "candidate_evidence_limit beyond 100 references)."
+            ),
+            "evidence_ref_forms": [
+                "<uuid>", "action:<uuid>", "receipt:<uuid>", "transaction:<uuid>",
+                "finding:<uuid>", "devref_<n>",
+            ],
+            "evidence_ref_scope": (
+                "Each reference must resolve to an action, receipt or HTTP transaction of this "
+                "Hunt, a finding on its target, or a device evidence entry of this Hunt "
+                "(otherwise candidate_evidence_unresolved). An action or receipt counts only "
+                "when the action completed or ended partial; a failed, admission-refused, "
+                "blocked or unfinished action is refused as candidate_evidence_unsettled."
+            ),
+        },
+        "budget_profiles": {
+            name: asdict(value) for name, value in HUNT_BUDGET_PROFILES.items()
+        },
+        "budget_dimensions": [
+            {
+                "name": name,
+                "label": HUNT_BUDGET_DIMENSION_LABELS[name],
+                "minimum": 0 if name in ZEROABLE_HUNT_BUDGET_DIMENSIONS else 1,
+                "zeroable": name in ZEROABLE_HUNT_BUDGET_DIMENSIONS,
+            }
+            for name in sorted(_ALLOWED_BUDGET_KEYS)
+        ],
+        "policy_derived_zeros": {
+            "mutation_disabled": ["max_state_changing_requests", "max_verifier_write_requests"],
+            "network_disabled": ["max_udp_ports"],
+            "network_disabled_without_selected_ssh": ["max_hosts", "max_tcp_ports"],
+            "oob_disabled": ["max_oob_interactions"],
+            "non_device_target": ["max_device_fragility_points"],
+            "passive_without_credentials": ["max_active_actions"],
+        },
+    }
+
+
+def _object(value: Any, name: str, *, required: bool = False) -> dict[str, Any]:
+    if value is None:
+        if required:
+            raise HuntStartContractError(f"{name} is required")
+        return {}
+    if not isinstance(value, Mapping):
+        raise HuntStartContractError(f"{name} must be an object")
+    return dict(value)
+
+
+def _identifier(value: Any, name: str, *, required: bool = False) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        if required:
+            raise HuntStartContractError(f"{name} is required")
+        return None
+    if not _ID_RE.fullmatch(normalized):
+        raise HuntStartContractError(f"{name} is invalid")
+    return normalized
+
+
+def _boolean(value: Any, name: str, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise HuntStartContractError(f"{name} must be a boolean")
+    return value
+
+
+def _string_list(
+    value: Any,
+    name: str,
+    *,
+    maximum: int,
+    pattern: re.Pattern[str] = _ID_RE,
+) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)) or len(value) > maximum:
+        raise HuntStartContractError(f"{name} must be an array of at most {maximum} items")
+    result: list[str] = []
+    for raw in value:
+        item = str(raw or "").strip()
+        if not item or not pattern.fullmatch(item):
+            raise HuntStartContractError(f"{name} contains an invalid item")
+        if item in result:
+            raise HuntStartContractError(f"{name} contains duplicate items")
+        result.append(item)
+    return tuple(result)
+
+
+def _budget_overrides(value: Any, profile: str) -> dict[str, int]:
+    raw = _object(value, "budgets")
+    unknown = sorted(set(raw) - _ALLOWED_BUDGET_KEYS)
+    if unknown:
+        raise HuntStartContractError(f"unsupported budget fields: {', '.join(unknown)}")
+    defaults = asdict(HUNT_BUDGET_PROFILES[profile])
+    result: dict[str, int] = {}
+    for key, raw_amount in raw.items():
+        if isinstance(raw_amount, bool) or not isinstance(raw_amount, int):
+            qualifier = "a non-negative" if key in ZEROABLE_HUNT_BUDGET_DIMENSIONS else "a positive"
+            raise HuntStartContractError(f"{key} must be {qualifier} integer")
+        amount = int(raw_amount)
+        minimum = 0 if key in ZEROABLE_HUNT_BUDGET_DIMENSIONS else 1
+        if amount < minimum:
+            qualifier = "a non-negative" if minimum == 0 else "a positive"
+            raise HuntStartContractError(f"{key} must be {qualifier} integer")
+        if amount > int(defaults[key]):
+            raise HuntStartContractError(
+                f"{key} exceeds the {profile} Hunt profile ceiling ({defaults[key]})",
+                code="budget_above_profile_ceiling",
+            )
+        result[key] = amount
+    return result
+
+
+def _credential_refs(value: Any) -> dict[str, str]:
+    raw = _object(value, "credential_refs")
+    if len(raw) > MAX_CREDENTIAL_REFS:
+        raise HuntStartContractError("too many credential references")
+    unknown = sorted(set(raw) - _ALLOWED_CREDENTIAL_REF_KEYS)
+    if unknown:
+        raise HuntStartContractError(
+            f"unsupported credential reference fields: {', '.join(unknown)}"
+        )
+    result: dict[str, str] = {}
+    for key, value in raw.items():
+        item = _identifier(value, key)
+        if item:
+            result[key] = item
+    if len(result.values()) != len(set(result.values())):
+        raise HuntStartContractError(
+            "credential references must use distinct profile IDs", code="credentials_not_distinct",
+        )
+    return result
+
+
+@dataclass(frozen=True)
+class HuntStartPolicy:
+    active_testing: bool = False
+    allow_state_changing_http: bool = False
+    network_discovery: bool = False
+    allow_oob_interactions: bool = False
+    # The operator's explicit decision that the engine may register accounts on the target where
+    # anyone can sign up, and use the application as them (writes included). Off by default: an
+    # account on a real system is permanent until someone deletes it, and a sign-up can send mail.
+    # It implies state-changing HTTP. Every account and write is listed in the debrief.
+    allow_account_creation: bool = False
+    # The operator's explicit decision that forging a client-address header against this
+    # target is in scope. Needed to test whether an origin trusts a client-suppliable
+    # address, which is exploitable wherever that origin is reachable outside its edge.
+    allow_identity_headers: bool = False
+    # The operator's explicit decision that this hunt may connect to specific addresses it
+    # names, rather than only the target's resolved address. This is the difference between
+    # suspecting an origin is exposed behind a CDN and demonstrating it.
+    allow_direct_origin: bool = False
+    authorization_confirmed: bool = False
+    approval_receipt_id: str | None = None
+    scope_receipt_id: str | None = None
+
+    @property
+    def authorized(self) -> bool:
+        return bool(self.authorization_confirmed and self.approval_receipt_id)
+
+    def is_privileged(self, *, credentials_requested: bool) -> bool:
+        """Whether this policy needs confirmed authorization and an approval receipt.
+
+        One definition, because the same rule was previously restated at the start handler
+        and had to be edited in both places whenever a new authority was added.
+        """
+        return bool(
+            credentials_requested
+            or self.active_testing
+            or self.allow_state_changing_http
+            or self.network_discovery
+            or self.allow_oob_interactions
+            or self.allow_account_creation
+            or self.allow_identity_headers
+            or self.allow_direct_origin
+        )
+
+    def implied(self) -> tuple["HuntStartPolicy", tuple[str, ...]]:
+        """Turn a sub-authority asked for without ``active_testing`` into the policy it means.
+
+        Asking for state-changing HTTP, network discovery, OOB interactions, identity-header
+        forgery or direct-origin requests is asking for active testing; refusing the request to
+        make the caller write one more boolean told the operator nothing they had not already
+        decided. The implication is recorded so the response can say what the server resolved.
+        """
+        implying = [
+            name for name, requested in (
+                ("allow_state_changing_http", self.allow_state_changing_http),
+                ("network_discovery", self.network_discovery),
+                ("allow_oob_interactions", self.allow_oob_interactions),
+                ("allow_account_creation", self.allow_account_creation),
+                ("allow_identity_headers", self.allow_identity_headers),
+                ("allow_direct_origin", self.allow_direct_origin),
+            ) if requested
+        ]
+        if self.allow_account_creation and not self.allow_state_changing_http:
+            # A sign-up is a write: asking for account creation is asking for state-changing HTTP.
+            resolved, notes = replace(self, allow_state_changing_http=True).implied()
+            return resolved, ("allow_state_changing_http was enabled because the policy asked for "
+                              "allow_account_creation", *notes)
+        if self.active_testing or not implying:
+            return self, ()
+        return (
+            replace(self, active_testing=True),
+            (
+                "active_testing was enabled because the policy asked for "
+                + ", ".join(implying),
+            ),
+        )
+
+    def validate(self, *, credentials_requested: bool) -> None:
+        if self.scope_receipt_id and not self.approval_receipt_id:
+            raise HuntStartContractError(
+                "scope_receipt_id must come from a validated approval receipt"
+            )
+        privileged = self.is_privileged(credentials_requested=credentials_requested)
+        if privileged and not self.authorization_confirmed:
+            raise HuntStartContractError(
+                "active, network, mutation, OOB, and credential use require authorization_confirmed=true "
+                "in the policy: the caller states that the target is authorized for this testing"
+            )
+        if privileged and not self.approval_receipt_id:
+            # The refusal names the remedy: an agent that only sees "approval receipt" has no
+            # way to find the target's standing authorization on its own.
+            raise HuntStartContractError(
+                "active, network, mutation, OOB, and credential use require a target-bound approval "
+                "receipt, and this target has none: authorize it once with "
+                "POST /targets/{target_id}/authorization {\"approved_by\": \"<name>\", "
+                "\"risk_tier\": \"active\"} (its standing authorization is then resolved automatically "
+                "on every scan and Hunt), or name an approval_receipt_id in the policy"
+            )
+
+    def forbidden_budget_dimensions(
+        self, *, target_kind: str, credentials_requested: bool, ssh_selected: bool = False,
+    ) -> frozenset[str]:
+        forbidden: set[str] = set()
+        if not self.allow_state_changing_http:
+            forbidden.update({"max_state_changing_requests", "max_verifier_write_requests"})
+        if not self.network_discovery:
+            forbidden.add("max_udp_ports")
+            # Only a selected SSH slot may reserve a known service connection.
+            # Profile kind/grant/approval are validated before the Hunt is persisted.
+            # Discovery capabilities retain their independent network_discovery gate.
+            if not (self.active_testing and ssh_selected):
+                forbidden.update({"max_tcp_ports", "max_hosts"})
+        if not self.allow_oob_interactions:
+            forbidden.add("max_oob_interactions")
+        if target_kind != "device":
+            forbidden.add("max_device_fragility_points")
+        if not self.active_testing and not credentials_requested:
+            forbidden.add("max_active_actions")
+        return frozenset(forbidden)
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "active_testing": self.active_testing,
+            "allow_state_changing_http": self.allow_state_changing_http,
+            "network_discovery": self.network_discovery,
+            "allow_oob_interactions": self.allow_oob_interactions,
+            "allow_account_creation": self.allow_account_creation,
+            "allow_identity_headers": self.allow_identity_headers,
+            "allow_direct_origin": self.allow_direct_origin,
+            "authorization_confirmed": self.authorization_confirmed,
+            "approval_receipt_id": self.approval_receipt_id,
+            "scope_receipt_id": self.scope_receipt_id,
+        }
+
+
+def bind_validated_receipts(
+    policy: HuntStartPolicy,
+    approval_context: Mapping[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """Bind submitted receipt references to the server-validated approval result."""
+    if not policy.approval_receipt_id:
+        if approval_context:
+            raise HuntStartContractError(
+                "approval validation returned authority that was not requested"
+            )
+        return None, None
+    if not isinstance(approval_context, Mapping):
+        raise HuntStartContractError("approval receipt was not validated")
+    approval_id = str(approval_context.get("approval_receipt_id") or "").strip()
+    scope_id = str(approval_context.get("scope_receipt_id") or "").strip()
+    if not approval_id or approval_id != str(policy.approval_receipt_id):
+        raise HuntStartContractError(
+            "validated approval receipt does not match the Hunt contract"
+        )
+    if not scope_id:
+        raise HuntStartContractError(
+            "validated approval receipt has no target-bound scope receipt"
+        )
+    if policy.scope_receipt_id and scope_id != str(policy.scope_receipt_id):
+        raise HuntStartContractError(
+            "scope_receipt_id does not match the validated approval scope"
+        )
+    return approval_id, scope_id
+
+
+@dataclass(frozen=True)
+class HuntStartContract:
+    target_id: str
+    target_kind: str
+    goal: str
+    budget_profile: str
+    budgets: Mapping[str, int]
+    policy: HuntStartPolicy
+    credential_refs: Mapping[str, str]
+    capabilities: Sequence[str]
+    request_collection_ids: Sequence[str]
+    skill_ids: Sequence[str] = ()
+    direct_origin_addresses: Sequence[str] = ()
+    schema_version: str = HUNT_START_SCHEMA
+    # What the server resolved rather than refused: implied authority and zeroed budget
+    # dimensions. Reported on the start response so no adjustment is silent.
+    adjustments: Sequence[str] = ()
+    # Pre-authorization bounds (``--allow``), parsed by the server: the person's own (``allow``,
+    # recorded as theirs) or the agent's proposal (``proposed_allow``, one pending request).
+    allow: Sequence[str] = ()
+    proposed_allow: Sequence[str] = ()
+    allow_asserted_by: Mapping[str, str] | None = None
+    secret_visibility: str = "withheld"
+    handoff_id: str | None = None
+    # Saved logins a person attached at start: ({"profile_id", "max_logins"}, ...).
+    saved_logins: Sequence[Mapping[str, Any]] = ()
+    # Findings of the target the Hunt starts from (hunt/seed_findings.py), checked at start.
+    seed_finding_ids: Sequence[str] = ()
+
+    @property
+    def secret_values_visible(self) -> bool:
+        return self.secret_visibility == "agent_may_see"
+
+    def secret_visibility_record(self) -> dict[str, Any]:
+        """Who chose the setting, as the start bounds' owner is recorded (``allow_asserted_by``)."""
+        assertion = self.allow_asserted_by or {}
+        return {
+            "secret_values_visible": self.secret_values_visible,
+            # The asserted person and proof exactly (``_secret_visibility`` requires them).
+            "secret_visibility_set_by": str(assertion["person"]) if self.secret_values_visible else None,
+            "secret_visibility_proof": str(assertion["proof"]) if self.secret_values_visible else None,
+        }
+
+    @property
+    def resolved_budget(self) -> dict[str, int]:
+        result = asdict(HUNT_BUDGET_PROFILES[self.budget_profile])
+        result.update({key: int(value) for key, value in self.budgets.items()})
+        for key in self.policy.forbidden_budget_dimensions(
+            target_kind=self.target_kind,
+            credentials_requested=bool(self.credential_refs),
+            ssh_selected=bool(self.credential_refs.get("ssh_credential_profile_id")),
+        ):
+            result[key] = 0
+        return result
+
+    @property
+    def resolved_budget_object(self) -> HuntBudget:
+        return HuntBudget(**self.resolved_budget)
+
+    def resolution_adjustments(self, *, approval_validated: bool) -> list[str]:
+        """Report actual normalization; unauthorized work is never silently downgraded."""
+        if not approval_validated and self.policy.is_privileged(credentials_requested=bool(self.credential_refs)):
+            raise HuntStartContractError("privileged Hunt requires validated authorization; it cannot run passively")
+        return list(self.adjustments)
+
+    def persisted_policy(
+        self,
+        *,
+        approval_validated: bool,
+        credential_access: bool,
+        approval_receipt_id: str | None,
+        scope_receipt_id: str | None,
+        budget: Any,
+        allowed_capabilities: Sequence[str],
+    ) -> dict[str, Any]:
+        """Project the requested policy into the row a run is actually governed by.
+
+        Every privileged authority is ANDed with ``approval_validated`` here rather than at
+        each reader, so a request that asked for authority it did not earn is stored as not
+        having it. Workers read this row, not the request.
+        """
+        earned = bool(approval_validated)
+        return {
+            "schema_version": "hunt-policy/v2",
+            "target_kind": self.target_kind,
+            "active_testing": bool(self.policy.active_testing and earned),
+            "credential_access": credential_access,
+            "mutation_allowed": bool(self.policy.allow_state_changing_http and earned),
+            "allow_state_changing_http": bool(
+                self.policy.allow_state_changing_http and earned
+            ),
+            "network_discovery": bool(self.policy.network_discovery and earned),
+            "allow_oob_interactions": bool(self.policy.allow_oob_interactions and earned),
+            "allow_account_creation": bool(self.policy.allow_account_creation and earned),
+            "allow_identity_headers": bool(self.policy.allow_identity_headers and earned),
+            "allow_direct_origin": bool(self.policy.allow_direct_origin and earned),
+            "direct_origin_addresses": (
+                list(self.direct_origin_addresses) if earned else []
+            ),
+            "authorization_confirmed": self.policy.authorization_confirmed,
+            "approval_receipt_id": approval_receipt_id,
+            "scope_receipt_id": scope_receipt_id,
+            "device_fragility_profile": (
+                "authenticated_active"
+                if self.target_kind == "device" and credential_access
+                else "safe_remote" if self.target_kind == "device" else None
+            ),
+            "budget_profile": self.budget_profile,
+            "budget_schema_version": HUNT_BUDGET_SCHEMA,
+            "budget": asdict(budget),
+            "allowed_capabilities": list(allowed_capabilities),
+            # Read by secrets.inspect only; no grant, amendment or planner call rewrites it.
+            **self.secret_visibility_record(),
+        }
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "target_id": self.target_id,
+            "target_kind": self.target_kind,
+            "goal": self.goal,
+            "budget_profile": self.budget_profile,
+            "budget_schema_version": HUNT_BUDGET_SCHEMA,
+            "budgets": dict(self.budgets),
+            "resolved_budget": self.resolved_budget,
+            "policy": self.policy.public_dict(),
+            "credential_refs": dict(self.credential_refs),
+            "capabilities": list(self.capabilities),
+            "request_collection_ids": list(self.request_collection_ids),
+            "skill_ids": list(self.skill_ids),
+            "direct_origin_addresses": list(self.direct_origin_addresses),
+            "policy_adjustments": list(self.adjustments),
+            "allow": list(self.allow),
+            "proposed_allow": list(self.proposed_allow),
+            "secret_visibility": self.secret_visibility,
+            **self.secret_visibility_record(),
+            **({"handoff_id": self.handoff_id} if self.handoff_id else {}),
+            **({"saved_logins": [dict(item) for item in self.saved_logins]} if self.saved_logins else {}),
+            **({"seed_finding_ids": list(self.seed_finding_ids)} if self.seed_finding_ids else {}),
+        }
+
+
+def _private_networks_allowed() -> bool:
+    """Whether this deployment admits private/loopback destinations, as target admission does."""
+    try:
+        try:
+            import deployment_policy
+        except ModuleNotFoundError:
+            from .. import deployment_policy  # type: ignore[no-redef]
+        return bool(deployment_policy.private_network_targets_allowed())
+    except Exception:
+        # An unreadable policy keeps the stricter historical behaviour.
+        return False
+
+
+def _direct_origin_refusal(address: str) -> str | None:
+    try:
+        import action_scope
+    except ModuleNotFoundError:
+        from .. import action_scope  # type: ignore[no-redef]
+    return action_scope.direct_origin_refusal(
+        address, allow_private_networks=_private_networks_allowed(),
+    )
+
+
+def _ip_addresses(value: Any, field: str) -> tuple[str, ...]:
+    """Operator-confirmed literal addresses. Hostnames are refused on purpose.
+
+    A hostname would be resolved at connect time, which is exactly the indirection this
+    field exists to remove: the operator is naming the machine, not another name for it.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)) or len(value) > MAX_DIRECT_ORIGIN_ADDRESSES:
+        raise HuntStartContractError(
+            f"{field} must be an array of at most "
+            f"{MAX_DIRECT_ORIGIN_ADDRESSES} IP addresses"
+        )
+    addresses: list[str] = []
+    # Private and loopback ranges follow the deployment's own target policy, so a LAN install
+    # that admits 192.168.1.50 as a target can name it as a direct origin. The classification
+    # is the web scope guard's (``action_scope.direct_origin_refusal``): every embedded spelling
+    # (mapped, SIIT, NAT64, 6to4, Teredo) is judged as the IPv4 address it carries, reserved and
+    # special-purpose space (198.18.0.0/15, 192.0.0.0/24, documentation ranges) is private-class,
+    # and a cloud metadata or platform-service address is never an origin. A list of its own here
+    # used to admit 198.18.0.1, 192.0.0.8, 192.0.2.1 and 192.0.0.192 with private networks
+    # refused.
+    for item in value:
+        try:
+            parsed = ipaddress.ip_address(str(item).strip())
+        except ValueError as exc:
+            raise HuntStartContractError(
+                f"{field} must contain literal IP addresses"
+            ) from exc
+        if _direct_origin_refusal(str(parsed)) is not None:
+            raise HuntStartContractError(
+                f"{field} cannot contain private, local, or non-routable addresses"
+            )
+        address = str(parsed)
+        if address not in addresses:
+            addresses.append(address)
+    return tuple(addresses)
+
+
+def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
+    if not isinstance(value, Mapping):
+        raise HuntStartContractError("Hunt request body must be an object")
+    payload = dict(value)
+    unknown = sorted(set(payload) - _ALLOWED_TOP_LEVEL_KEYS)
+    if unknown:
+        raise HuntStartContractError(f"unsupported Hunt start fields: {', '.join(unknown)}")
+    schema = str(payload.get("schema_version") or HUNT_START_SCHEMA).strip()
+    if schema != HUNT_START_SCHEMA:
+        raise HuntStartContractError(f"schema_version must be {HUNT_START_SCHEMA}")
+
+    target_id = _identifier(payload.get("target_id"), "target_id", required=True)
+    target_kind = str(payload.get("target_kind") or "").strip().lower()
+    if target_kind not in _ALLOWED_TARGET_KINDS:
+        raise HuntStartContractError("target_kind must be web, api, device, or network")
+
+    raw_goal = payload.get("goal")
+    raw_objective = payload.get("objective")
+    if raw_goal not in (None, "") and raw_objective not in (None, ""):
+        if str(raw_goal).strip() != str(raw_objective).strip():
+            raise HuntStartContractError("goal and objective conflict")
+    seed_finding_ids = _seed_finding_ids(payload)
+    goal = str(raw_goal or raw_objective or (
+        SEEDED_DEFAULT_GOAL if seed_finding_ids else "Find exploitable vulnerabilities.")).strip()
+    if not goal or len(goal) > MAX_GOAL_CHARS:
+        raise HuntStartContractError(f"goal must contain 1 to {MAX_GOAL_CHARS} characters")
+
+    requested_profile = str(
+        payload.get("budget_profile") or payload.get("policy_profile") or "balanced"
+    ).strip().lower()
+    if requested_profile not in HUNT_BUDGET_PROFILES:
+        raise HuntStartContractError("budget profile must be fast, balanced, or thorough")
+
+    policy_raw = _object(payload.get("policy"), "policy", required=True)
+    unknown_policy = sorted(set(policy_raw) - _ALLOWED_POLICY_KEYS)
+    if unknown_policy:
+        raise HuntStartContractError(
+            f"unsupported Hunt policy fields: {', '.join(unknown_policy)}"
+        )
+    policy = HuntStartPolicy(
+        active_testing=_boolean(policy_raw.get("active_testing"), "active_testing"),
+        allow_state_changing_http=_boolean(
+            policy_raw.get("allow_state_changing_http"), "allow_state_changing_http"
+        ),
+        network_discovery=_boolean(
+            policy_raw.get("network_discovery"), "network_discovery"
+        ),
+        allow_oob_interactions=_boolean(
+            policy_raw.get("allow_oob_interactions"), "allow_oob_interactions"
+        ),
+        allow_account_creation=_boolean(
+            policy_raw.get("allow_account_creation"), "allow_account_creation"
+        ),
+        allow_identity_headers=_boolean(
+            policy_raw.get("allow_identity_headers"), "allow_identity_headers"
+        ),
+        allow_direct_origin=_boolean(
+            policy_raw.get("allow_direct_origin"), "allow_direct_origin"
+        ),
+        authorization_confirmed=_boolean(
+            policy_raw.get("authorization_confirmed"), "authorization_confirmed"
+        ),
+        approval_receipt_id=_identifier(
+            policy_raw.get("approval_receipt_id") or payload.get("approval_receipt_id"),
+            "approval_receipt_id",
+        ),
+        scope_receipt_id=_identifier(
+            policy_raw.get("scope_receipt_id") or payload.get("scope_receipt_id"),
+            "scope_receipt_id",
+        ),
+    )
+    credential_refs = _credential_refs(payload.get("credential_refs"))
+    policy, adjustments = policy.implied()
+    policy.validate(credentials_requested=bool(credential_refs))
+    budget_overrides = _budget_overrides(payload.get("budgets"), requested_profile)
+    # A budget dimension whose authority is off resolves to zero. It used to resolve to zero
+    # silently when the caller left it out and hard-refuse when the caller wrote it down: the
+    # same request, two outcomes, decided only by whether a number was explicit.
+    contradictions = sorted(
+        key
+        for key in policy.forbidden_budget_dimensions(
+            target_kind=target_kind,
+            credentials_requested=bool(credential_refs),
+            ssh_selected=bool(credential_refs.get("ssh_credential_profile_id")),
+        )
+        if int(budget_overrides.get(key, 0)) > 0
+    )
+    if contradictions:
+        for key in contradictions:
+            budget_overrides.pop(key, None)
+        adjustments = (
+            *adjustments,
+            "these budget dimensions resolved to 0 because their authority is not enabled: "
+            + ", ".join(contradictions),
+        )
+
+    direct_origin_addresses = _ip_addresses(
+        payload.get("direct_origin_addresses"), "direct_origin_addresses",
+    )
+    # The two halves have to agree. An address list without the authority would be silently
+    # ignored, and the authority without addresses grants something with nothing to use it
+    # on -- both read as "this was configured" while doing nothing.
+    if direct_origin_addresses and not policy.allow_direct_origin:
+        raise HuntStartContractError(
+            "direct_origin_addresses requires policy.allow_direct_origin"
+        )
+    if policy.allow_direct_origin and not direct_origin_addresses:
+        raise HuntStartContractError(
+            "policy.allow_direct_origin requires at least one direct origin address",
+            code="direct_origin_address_required",
+        )
+
+    return HuntStartContract(
+        target_id=target_id or "",
+        target_kind=target_kind,
+        goal=goal,
+        budget_profile=requested_profile,
+        budgets=budget_overrides,
+        policy=policy,
+        credential_refs=credential_refs,
+        capabilities=_string_list(
+            payload.get("capabilities"),
+            "capabilities",
+            maximum=MAX_CAPABILITIES,
+            pattern=_CAPABILITY_RE,
+        ),
+        request_collection_ids=_string_list(
+            payload.get("request_collection_ids"),
+            "request_collection_ids",
+            maximum=MAX_COLLECTIONS,
+        ),
+        skill_ids=_string_list(
+            payload.get("skill_ids"),
+            "skill_ids",
+            maximum=MAX_SKILLS,
+            pattern=_SKILL_RE,
+        ),
+        direct_origin_addresses=direct_origin_addresses,
+        adjustments=tuple(adjustments),
+        secret_visibility=_secret_visibility(payload),
+        handoff_id=_handoff_id(payload),
+        saved_logins=_saved_logins(payload, policy),
+        seed_finding_ids=seed_finding_ids,
+        **_allow_fields(payload),
+    )
+
+
+SEEDED_DEFAULT_GOAL = "Confirm or refute the seed findings with evidence, then deepen them."
+
+
+def _seed_finding_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    from .seed_findings import parse_seed_finding_ids
+
+    try:
+        return parse_seed_finding_ids(payload.get("seed_finding_ids"))
+    except ValueError as exc:
+        raise HuntStartContractError(str(exc)) from None
+
+
+def _saved_logins(payload: Mapping[str, Any], policy: HuntStartPolicy) -> tuple[dict[str, Any], ...]:
+    """``saved_logins``: distinct profile ids with a login count; they need active testing (a
+    login is an active request)."""
+    from .saved_logins import DEFAULT_LOGINS, MAX_LOGINS, MAX_SAVED_LOGINS
+
+    raw = payload.get("saved_logins")
+    if raw in (None, []):
+        return ()
+    if not isinstance(raw, (list, tuple)) or len(raw) > MAX_SAVED_LOGINS:
+        raise HuntStartContractError(f"saved_logins must be an array of at most {MAX_SAVED_LOGINS} items")
+    result: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) - {"profile_id", "max_logins"}:
+            raise HuntStartContractError("each saved login is {profile_id, max_logins}")
+        try:
+            profile_id = str(uuid.UUID(str(item.get("profile_id") or "")))
+        except ValueError:
+            raise HuntStartContractError("saved_logins.profile_id must be a credential profile id") from None
+        logins = item.get("max_logins", DEFAULT_LOGINS)
+        if isinstance(logins, bool) or not isinstance(logins, int) or not 1 <= logins <= MAX_LOGINS:
+            raise HuntStartContractError(f"saved_logins.max_logins must be 1 to {MAX_LOGINS}")
+        if any(entry["profile_id"] == profile_id for entry in result):
+            raise HuntStartContractError("saved_logins must name distinct profiles")
+        result.append({"profile_id": profile_id, "max_logins": logins})
+    if not policy.active_testing:
+        raise HuntStartContractError("saved_logins require policy.active_testing (a login is an active request)")
+    return tuple(result)
+
+
+def _handoff_id(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("handoff_id")
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower() if isinstance(value, str) else ""
+    if not HANDOFF_ID_RE.fullmatch(text):
+        raise HuntStartContractError("handoff_id must be a UUID")
+    return text
+
+
+def _local_operator_deployment() -> bool:
+    """Whether the API is published only on loopback (the open-source local install), where the
+    operator at the host is the trust boundary and ``proof: local`` names them."""
+    bind = os.environ.get("SHAKERSCAN_BIND_HOST", "127.0.0.1").strip()
+    public = os.environ.get("SHAKERSCAN_PUBLIC_HOST", "").strip()
+    try:
+        if not ipaddress.ip_address(bind).is_loopback:
+            return False
+        return not public or ipaddress.ip_address("127.0.0.1" if public == "localhost" else public).is_loopback
+    except ValueError:
+        return False
+
+
+def _secret_visibility(payload: Mapping[str, Any]) -> str:
+    """``agent_may_see`` only with the person who chose it (``allow_asserted_by``): a step-up
+    proof the Enterprise gateway sets after the person's step-up, or ``local`` on an install
+    published only on loopback. On such a local install anyone with API access, a local agent
+    included, can send that assertion: the operator's host is the boundary there."""
+    value = payload.get("secret_visibility")
+    if value is None:
+        return "withheld"
+    if value not in SECRET_VISIBILITIES:
+        raise HuntStartContractError("secret_visibility must be withheld or agent_may_see")
+    if value == "agent_may_see":
+        assertion = payload.get("allow_asserted_by")
+        proof = str(assertion.get("proof") or "") if isinstance(assertion, Mapping) else ""
+        person = str(assertion.get("person") or "").strip() if isinstance(assertion, Mapping) else ""
+        if not person or proof not in ALLOW_ASSERTION_PROOFS:
+            raise HuntStartContractError(
+                "secret_visibility agent_may_see needs the person who chose it (allow_asserted_by)",
+                code="secret_visibility_unasserted",
+            )
+        if proof == "local" and not _local_operator_deployment():
+            raise HuntStartContractError(
+                "secret_visibility agent_may_see needs the person's step-up on an instance that is "
+                "not published only on loopback", code="secret_visibility_unasserted",
+            )
+    return str(value)
+
+
+def _allow_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the start bounds through the one grammar; refuse a malformed bound by name."""
+    from .permission_bounds import BoundError, parse_bounds
+
+    fields: dict[str, Any] = {}
+    for name in ("allow", "proposed_allow"):
+        raw = payload.get(name)
+        if raw is None:
+            continue
+        if not isinstance(raw, (list, tuple)):
+            raise HuntStartContractError(f"{name} must be an array of bounds")
+        values = tuple(str(item or "").strip() for item in raw)
+        try:
+            parse_bounds(values, budget_fields=_ALLOWED_BUDGET_KEYS)
+        except BoundError as exc:
+            raise HuntStartContractError(str(exc), code="preauthorization_bound_invalid") from exc
+        fields[name] = values
+    assertion = payload.get("allow_asserted_by")
+    if assertion is not None:
+        if not isinstance(assertion, Mapping) or str(assertion.get("proof") or "") not in ALLOW_ASSERTION_PROOFS:
+            raise HuntStartContractError(
+                "allow_asserted_by must name the person and a proof (stepup, launch_stepup, local)",
+                code="preauthorization_bound_invalid",
+            )
+        person = str(assertion.get("person") or "").strip()
+        if not person or len(person) > 200:
+            raise HuntStartContractError("allow_asserted_by.person is required", code="preauthorization_bound_invalid")
+        fields["allow_asserted_by"] = {"person": person, "proof": str(assertion["proof"])}
+    return fields

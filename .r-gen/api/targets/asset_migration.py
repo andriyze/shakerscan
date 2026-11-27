@@ -1,0 +1,450 @@
+"""Atomic conversion of the 2.6 inventory into stable host targets and service members.
+
+Run under the startup migration lock after the frozen 2.6 baseline. Old device UUIDs
+are retained. Compatibility names are views, not another asset inventory. Downgrade
+requires restoring the pre-upgrade database backup; read-only aliases are not dual writes.
+"""
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+import ipaddress
+import json
+import re
+from typing import Any
+import urllib.parse
+
+try:
+    from scanner_tools.host_names import canonical_host
+except ModuleNotFoundError:  # package import
+    from scanner.scanner_tools.host_names import canonical_host
+
+from .asset_schema import ASSET_MIGRATION, ASSET_SCHEMA_SQL, ASSET_VIEW_SQL
+from .asset_invariants import _install_host_key
+
+
+def locator_from_url(value: str) -> str | None:
+    """Normalize a literal host, without resolving DNS or equating aliases."""
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme.lower() not in {"http", "https", "host"} or parsed.username or parsed.password:
+            return None
+        host = str(parsed.hostname or "").lower().rstrip(".")
+        if not host:
+            return None
+        try:
+            return str(ipaddress.ip_address(host))
+        except ValueError:
+            return canonical_host(host)  # HostNameError is a ValueError: no locator
+    except (ValueError, UnicodeError):
+        return None
+
+
+def host_url(locator: str) -> str:
+    return f"host://[{locator}]" if ":" in locator else f"host://{locator}"
+
+def canonical_origin_url(value: str) -> str:
+    """Use the same literal host spelling for SQL membership and Python binding."""
+    locator = locator_from_url(value)
+    if locator is None:
+        raise ValueError('invalid application origin')
+    parsed = urllib.parse.urlsplit(value)
+    authority = f'[{locator}]' if ':' in locator else locator
+    if parsed.port is not None:
+        authority += f':{parsed.port}'
+    return parsed._replace(netloc=authority).geturl()
+
+
+class BoundConnectionPool:
+    """Let the frozen baseline run inside the caller's connection and transaction."""
+    def __init__(self, conn: Any) -> None:
+        self.conn = conn
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self.conn
+
+
+async def migration_applied(conn: Any) -> bool:
+    if not await conn.fetchval("SELECT to_regclass('app_schema_migrations')"):
+        return False
+    return bool(await conn.fetchval(
+        "SELECT 1 FROM app_schema_migrations WHERE name=$1", ASSET_MIGRATION,
+    ))
+
+
+
+
+async def _canonical_device_references(conn: Any) -> None:
+    # These were exclusive references to two inventories. Both now identify the same
+    # target; the compatibility device column remains available for one release.
+    await conn.execute("""
+        ALTER TABLE request_collections DROP CONSTRAINT IF EXISTS request_collections_target_check;
+        ALTER TABLE hunt_runs DROP CONSTRAINT IF EXISTS hunt_runs_target_check;
+        ALTER TABLE IF EXISTS investigation_candidates DROP CONSTRAINT IF EXISTS investigation_candidates_target_check;
+    """)
+    tables = await conn.fetch("""
+        SELECT table_name FROM information_schema.columns
+        WHERE table_schema=current_schema() AND column_name='device_target_id'
+          AND table_name IN (SELECT tablename FROM pg_tables WHERE schemaname=current_schema())
+        ORDER BY table_name
+    """)
+    for row in tables:
+        table = str(row["table_name"])
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
+            raise RuntimeError("unexpected device-owned relation name")
+        await conn.execute(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS target_id UUID REFERENCES targets(id) ON DELETE CASCADE')
+        await conn.execute(f'UPDATE "{table}" SET target_id=device_target_id WHERE device_target_id IS NOT NULL AND target_id IS NULL')
+        await conn.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table}_unified_target" ON "{table}"(target_id)')
+        await conn.execute(f'''CREATE TRIGGER unified_target_reference BEFORE INSERT OR UPDATE OF target_id,device_target_id
+            ON "{table}" FOR EACH ROW EXECUTE FUNCTION enforce_device_target_alias()''')
+    await conn.execute("""
+        ALTER TABLE request_collections ADD CONSTRAINT request_collections_target_check
+            CHECK (target_id IS NOT NULL AND (device_target_id IS NULL OR device_target_id=target_id));
+        ALTER TABLE hunt_runs ADD CONSTRAINT hunt_runs_target_check CHECK (
+            (target_kind IN ('web','api','network') AND target_id IS NOT NULL AND device_target_id IS NULL) OR
+            (target_kind='device' AND target_id IS NOT NULL AND device_target_id=target_id)
+        );
+    """)
+
+
+async def migrate_target_assets(conn: Any) -> None:
+    """Apply once inside an existing transaction; failure leaves the old database intact."""
+    if await migration_applied(conn):
+        return
+    await conn.execute(ASSET_SCHEMA_SQL)
+    await _install_host_key(conn)
+    devices = await conn.fetch("SELECT * FROM device_targets ORDER BY created_at,id")
+    for device in devices:
+        locator = locator_from_url(host_url(str(device["primary_locator"])))
+        if locator is None:
+            raise RuntimeError(f"stored device locator is invalid for target {device['id']}; migration rolled back")
+        metadata = device["metadata_json"] or {}
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+        metadata = {**metadata, "environment": device["environment"],
+                    "cohort": metadata.get("cohort") or device["environment"]}
+        await conn.execute("""
+            INSERT INTO targets(id,url,name,discovery_source,metadata_json,is_active,created_at,updated_at)
+            VALUES($1,$2,$3,'host',$4,$5,$6,$7)
+        """, device["id"], host_url(locator), device["name"], json.dumps(metadata),
+            device["is_active"], device["created_at"], device["updated_at"])
+    await conn.execute("""
+        INSERT INTO target_device_profiles (
+            target_id,device_class,manufacturer,model,firmware_version,stable_identity,
+            identity_confidence,environment,policy_id,sensor_affinity,last_scanned_at,last_scan_id,
+            last_score,last_grade,active_findings_count,locator_generation,created_at,updated_at
+        ) SELECT id,device_class,manufacturer,model,firmware_version,stable_identity,
+            identity_confidence,environment,policy_id,sensor_affinity,last_scanned_at,last_scan_id,
+            last_score,last_grade,active_findings_count,locator_generation,created_at,updated_at
+        FROM device_targets;
+    """)
+    from .asset_fk import retarget_foreign_keys
+    await retarget_foreign_keys(conn, "device_targets", "targets")
+    await conn.execute("DROP TABLE device_targets")
+    await conn.execute(ASSET_VIEW_SQL)
+    origins = await conn.fetch("""
+        SELECT id,url,root_domain,metadata_json FROM targets
+        WHERE url ~* '^https?://' AND discovery_source IS DISTINCT FROM 'model-intake'
+        ORDER BY created_at,id
+    """)
+    for origin in origins:
+        locator = locator_from_url(str(origin["url"]))
+        if not locator:
+            raise RuntimeError(f"stored web origin is invalid for target {origin['id']}; migration rolled back")
+        try:
+            normalized = canonical_origin_url(str(origin['url']))
+            if normalized != origin['url']:
+                await conn.execute('UPDATE targets SET url=$2 WHERE id=$1',origin['id'],normalized)
+        except (ValueError, UnicodeError) as exc:
+            raise RuntimeError(f"stored web origin is invalid for target {origin['id']}; migration rolled back") from exc
+        owner = await conn.fetchval("""
+            INSERT INTO targets(url,name,discovery_source,root_domain,metadata_json)
+            VALUES($1,$2,'host',$3,$4)
+            ON CONFLICT(canonical_key) DO UPDATE SET url=targets.url RETURNING id
+        """, host_url(locator), locator, origin["root_domain"], origin["metadata_json"])
+        await conn.execute("UPDATE targets SET asset_owner_id=$2 WHERE id=$1", origin["id"], owner)
+    await _canonical_device_references(conn)
+    from .asset_compatibility import repair_candidate_target_constraint
+    await repair_candidate_target_constraint(conn)
+    await conn.execute("INSERT INTO app_schema_migrations(name) VALUES($1)", ASSET_MIGRATION)
+
+
+async def reconcile_active_finding_counts(conn: Any) -> None:
+    """Repair drifted finding badges from the authoritative finding rows.
+
+    The legacy baseline repaired them once, but the baseline never runs again on a converted
+    database, so a badge that drifted there survived every later upgrade. Only drifted rows are
+    rewritten, so a consistent database pays one read and no writes. It runs on every start under
+    the startup lock, so the active findings are counted in one grouped pass (not one count per
+    target: ~3 s per start at 500k findings).
+    """
+    await conn.execute("""
+        UPDATE targets t SET active_findings_count=counted.n
+        FROM (SELECT t2.id, COALESCE(c.n, 0) AS n
+              FROM targets t2
+              LEFT JOIN (SELECT f.target_id, COUNT(*) AS n FROM findings f
+                         WHERE f.status='active' AND f.target_id IS NOT NULL
+                         GROUP BY f.target_id) c ON c.target_id=t2.id) counted
+        WHERE t.id=counted.id AND t.active_findings_count IS DISTINCT FROM counted.n
+    """)
+    await conn.execute("""
+        UPDATE target_device_profiles p SET active_findings_count=counted.n
+        FROM (SELECT p2.target_id, COALESCE(c.n, 0) AS n
+              FROM target_device_profiles p2
+              LEFT JOIN (SELECT f.device_target_id, COUNT(*) AS n FROM findings f
+                         WHERE f.status='active' AND f.device_target_id IS NOT NULL
+                         GROUP BY f.device_target_id) c ON c.device_target_id=p2.target_id) counted
+        WHERE p.target_id=counted.target_id AND p.active_findings_count IS DISTINCT FROM counted.n
+    """)
+
+
+async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any = None) -> None:
+    """Serialize baseline and conversion atomically, including concurrent worker startup."""
+    async with pool.acquire() as conn:
+        await conn.execute("SELECT pg_advisory_lock(8675309)")
+        try:
+            async with conn.transaction():
+                if not await migration_applied(conn):
+                    # The baseline takes the same reentrant session lock on this connection.
+                    await baseline(BoundConnectionPool(conn))
+                    await migrate_target_assets(conn)
+                import importlib
+                migrate_asset_inputs = importlib.import_module(
+                    f"{__package__}.asset_inputs_migration"
+                ).migrate_asset_inputs
+                await migrate_asset_inputs(conn)
+                # The frozen baseline is skipped after conversion. New Hunt schema
+                # must also be installed on already-converted instances under this lock.
+                try:
+                    from hunt.coverage_ledger import COVERAGE_LEDGER_SCHEMA_STATEMENTS
+                except ModuleNotFoundError:
+                    from api.hunt.coverage_ledger import COVERAGE_LEDGER_SCHEMA_STATEMENTS
+                for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
+                    await conn.execute(statement)
+                try:
+                    from hunt.credential_uses import HUNT_CREDENTIAL_USES_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.credential_uses import HUNT_CREDENTIAL_USES_SCHEMA_SQL
+                await conn.execute(HUNT_CREDENTIAL_USES_SCHEMA_SQL)
+                try:
+                    from hunt.default_credentials import HUNT_DEFAULT_CREDENTIALS_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.default_credentials import HUNT_DEFAULT_CREDENTIALS_SCHEMA_SQL
+                await conn.execute(HUNT_DEFAULT_CREDENTIALS_SCHEMA_SQL)
+                try:
+                    from hunt.permission_store import HUNT_PERMISSION_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.permission_store import HUNT_PERMISSION_SCHEMA_SQL
+                await conn.execute(HUNT_PERMISSION_SCHEMA_SQL)
+                try:
+                    from hunt.finding_verifications import FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.finding_verifications import FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL
+                await conn.execute(FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL)
+                try:
+                    from investigation_candidates import CANDIDATE_SCHEMA_STATEMENTS
+                except ModuleNotFoundError:
+                    from api.investigation_candidates import CANDIDATE_SCHEMA_STATEMENTS
+                for statement in CANDIDATE_SCHEMA_STATEMENTS:
+                    await conn.execute(statement)
+                # Who requested a Targets-page discovery run (POST /discovery, 2.8.2).
+                await conn.execute(
+                    "ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS requested_by TEXT")
+                from .instruction_proposal_schema import INSTRUCTION_PROPOSAL_SCHEMA_SQL
+                await conn.execute(INSTRUCTION_PROPOSAL_SCHEMA_SQL)
+                # What a finding retest was admitted with, re-checked while it runs (2.9.0).
+                try:
+                    from scan.retest_authority import FINDING_VERIFICATION_AUTHORITY_SQL
+                except ModuleNotFoundError:
+                    from api.scan.retest_authority import FINDING_VERIFICATION_AUTHORITY_SQL
+                await conn.execute(FINDING_VERIFICATION_AUTHORITY_SQL)
+                try:
+                    from hunt.interpretation_schema import INTERPRETATION_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.interpretation_schema import INTERPRETATION_SCHEMA_SQL
+                await conn.execute(INTERPRETATION_SCHEMA_SQL)
+                # Secrets found on a target, usable later by reference (2.10).
+                try:
+                    from hunt.discovered_secrets import DISCOVERED_SECRETS_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.discovered_secrets import DISCOVERED_SECRETS_SCHEMA_SQL
+                await conn.execute(DISCOVERED_SECRETS_SCHEMA_SQL)
+                # The highest intelligence bundle ever in force (2.11): the loader refuses a lower one.
+                try:
+                    from scanner_tools import intel_bundle
+                except ModuleNotFoundError:
+                    from scanner.scanner_tools import intel_bundle
+                await conn.execute(intel_bundle.HIGH_WATER_SCHEMA_SQL)
+                await intel_bundle.sync_high_water_from_database(conn)
+                # Browser-capture batches (2.11), one encrypted row per applied batch.
+                try:
+                    from capture.schema import CAPTURE_BATCHES_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.capture.schema import CAPTURE_BATCHES_SCHEMA_SQL
+                await conn.execute(CAPTURE_BATCHES_SCHEMA_SQL)
+                # Stored severity rank behind the bounded findings list (2.11). Cheap DDL only;
+                # the backfill and the concurrent index builds run after this transaction.
+                try:
+                    from finding_routes.list_schema import FINDINGS_LIST_SCHEMA_STATEMENTS
+                except ModuleNotFoundError:
+                    from api.finding_routes.list_schema import FINDINGS_LIST_SCHEMA_STATEMENTS
+                for statement in FINDINGS_LIST_SCHEMA_STATEMENTS:
+                    await conn.execute(statement)
+                # The masked origin and path an archive search matches (2.11); calls archived
+                # before it existed match on capability, adapter and method only.
+                try:
+                    from runtime.http_archive_search import SEARCH_URL_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.runtime.http_archive_search import SEARCH_URL_SCHEMA_SQL
+                await conn.execute(SEARCH_URL_SCHEMA_SQL)
+                # The lead sources the server's own Hunt lead producers write.
+                try:
+                    from hunt.followup_leads import LEAD_SOURCE_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.followup_leads import LEAD_SOURCE_SCHEMA_SQL
+                await conn.execute(LEAD_SOURCE_SCHEMA_SQL)
+                # The legacy web and device Hunt engines are removed, and so are their tables. The
+                # frozen baseline still creates them on a fresh install; they are dropped here.
+                # Columns elsewhere that pointed at a legacy run keep their value without the link.
+                await conn.execute(
+                    "DROP TABLE IF EXISTS device_agent_actions, device_agent_runs, agent_hunt_runs CASCADE")
+                # Data migrations added after the conversion must run here: the baseline above
+                # never runs again on a converted database. Each is marker-gated.
+                try:
+                    from runtime.ai_header_secrets import encrypt_stored_secrets
+                except ModuleNotFoundError:
+                    from api.runtime.ai_header_secrets import encrypt_stored_secrets
+                await encrypt_stored_secrets(conn)
+                try:
+                    from runtime.ai_template_secrets import encrypt_stored_templates
+                except ModuleNotFoundError:
+                    from api.runtime.ai_template_secrets import encrypt_stored_templates
+                await encrypt_stored_templates(conn)
+                try:
+                    from runtime.archive_blob_secrets import encrypt_stored_blobs
+                except ModuleNotFoundError:
+                    from api.runtime.archive_blob_secrets import encrypt_stored_blobs
+                await encrypt_stored_blobs(conn)
+                # Marker-gated: a no-op once the baseline mirrored legacy web credentials, but a
+                # converted database whose marker is absent must still be mirrored.
+                try:
+                    from runtime.credential_migration import migrate_legacy_web_credentials
+                except ModuleNotFoundError:
+                    from api.runtime.credential_migration import migrate_legacy_web_credentials
+                await migrate_legacy_web_credentials(conn)
+                await reconcile_active_finding_counts(conn)
+                # Engines before 2.8.2 stored two-label roots (co.uk for shop.example.co.uk), which
+                # span registrants; recompute them from each URL under the Public Suffix List.
+                # Idempotent: a database with no spanning root reads one DISTINCT and changes nothing.
+                try:
+                    from scope.roots import recompute_spanning_target_roots
+                except ModuleNotFoundError:
+                    from api.scope.roots import recompute_spanning_target_roots
+                await recompute_spanning_target_roots(conn)
+                # Targets whose stored host the one canonicalizer now refuses: rewrite a numeric
+                # spelling with one reading, flag the rest (targets/host_canonical_repair.py).
+                # Marker-gated: runs once.
+                try:
+                    from targets.host_canonical_repair import repair_target_host_spellings
+                except ModuleNotFoundError:
+                    from api.targets.host_canonical_repair import repair_target_host_spellings
+                await repair_target_host_spellings(conn)
+                # Idempotent, on every startup: instructions and saved actions no operator wrote
+                # are marked agent-written and unconfirmed (advisory until an operator saves them).
+                from .instruction_origin_migration import mark_unconfirmed_agent_writes
+                await mark_unconfirmed_agent_writes(conn)
+                # Idempotent: a dismissal whose finding's status changed elsewhere (also by an
+                # earlier engine after a rollback) no longer counts as an active dismissal.
+                try:
+                    from hunt.dismissal_status import reconcile_dismissals
+                except ModuleNotFoundError:
+                    from api.hunt.dismissal_status import reconcile_dismissals
+                await reconcile_dismissals(conn)
+                # Trigger-maintained finding and scan counts (dashboard, inventory, grouped
+                # Targets); backfilled once, under the triggers' table lock (2.11).
+                from .scale_summary import install_summary_counts
+                await install_summary_counts(conn)
+                # Per-target liveness and the scans trigger that asks for a check before a Scan
+                # (2.12); the trigger is created only when missing.
+                from .liveness import install_target_liveness
+                await install_target_liveness(conn)
+                # Per-asset classification behind the SQL-ranked Exposure asset list (2.11).
+                try:
+                    from exposure.asset_rank import install_exposure_facts
+                except ModuleNotFoundError:
+                    from api.exposure.asset_rank import install_exposure_facts
+                await install_exposure_facts(conn)
+                # scans.updated_at and its trigger, for /scans since= deltas (2.11); a catalog
+                # check on every later start, so a restart takes no table lock.
+                try:
+                    from scan.list_v1 import install_scan_updated_at
+                except ModuleNotFoundError:
+                    from api.scan.list_v1 import install_scan_updated_at
+                await install_scan_updated_at(conn)
+                # The assessment fields of scans.result as columns (2.11), kept by a trigger; a
+                # catalog check on every later start. Existing rows are projected in the background.
+                try:
+                    from scan.assessment_columns import install_scan_assessment_columns
+                except ModuleNotFoundError:
+                    from api.scan.assessment_columns import install_scan_assessment_columns
+                await install_scan_assessment_columns(conn)
+                # Which findings each Scan observed, kept by a trigger; a Scan's own list reads it.
+                # Backfilled once from the scan columns of existing findings.
+                try:
+                    from scan.finding_observations import install_finding_scan_observations
+                except ModuleNotFoundError:
+                    from api.scan.finding_observations import install_finding_scan_observations
+                await install_finding_scan_observations(conn)
+                # A target's latest result and Scan count come from application Scans, not from
+                # discovery runs; stored results that came from one are repaired once.
+                try:
+                    from scan.discovery_runs import install_target_headline
+                except ModuleNotFoundError:
+                    from api.scan.discovery_runs import install_target_headline
+                await install_target_headline(conn)
+            # After the schema commits, still under the startup lock: Hunts granted something by
+            # 2.8.0 have no recorded baseline, so their authority is rebuilt from their live
+            # grants once (R1), each Hunt in its own short transaction. A Hunt that cannot be
+            # repaired is cancelled; it never stops startup.
+            try:
+                from hunt.grant_repair import (
+                    rebuild_or_cancel,
+                    signal_repair_cancellations,
+                )
+            except ModuleNotFoundError:
+                from api.hunt.grant_repair import (
+                    rebuild_or_cancel,
+                    signal_repair_cancellations,
+                )
+            _changed, cancelled = await rebuild_or_cancel(conn)
+            # Also after the schema commits, still under the lock: each target's advisory knowledge
+            # text is also one note among its interpretations (the slot itself is never rewritten).
+            # Committed in small batches, so a target row is locked for one batch at most, and
+            # resumable: an interrupted start leaves done targets done and the rest for the next one.
+            try:
+                from hunt.interpretations import import_knowledge_notes
+            except ModuleNotFoundError:
+                from api.hunt.interpretations import import_knowledge_notes
+            await import_knowledge_notes(conn)
+            # Outside any transaction, still under the lock: a catalog check, and on a database
+            # without findings the severity rank is recorded as complete. Existing findings are
+            # ranked after serving starts (list_schema.repair_severity_rank_in_background; the
+            # list orders identically meanwhile). Its indexes are built CONCURRENTLY by the
+            # background builder (runtime/loop_scale_indexes.py): a concurrent build here would
+            # wait for the snapshot of every process waiting for this lock.
+            try:
+                from finding_routes.list_schema import finish_findings_list_schema
+            except ModuleNotFoundError:
+                from api.finding_routes.list_schema import finish_findings_list_schema
+            await finish_findings_list_schema(conn)
+            # Same for the Scan assessment columns: complete at once only with no Scans.
+            try:
+                from scan.assessment_columns import finish_scan_assessment_columns
+            except ModuleNotFoundError:
+                from api.scan.assessment_columns import finish_scan_assessment_columns
+            await finish_scan_assessment_columns(conn)
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock(8675309)")
+        # Redis only after the lock is released, off the event loop and bounded: an unreachable
+        # Redis must never hold every other process's startup behind the lock.
+        await signal_repair_cancellations(conn, redis_provider, cancelled)

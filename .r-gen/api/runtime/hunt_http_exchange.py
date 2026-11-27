@@ -1,0 +1,932 @@
+"""Worker-only chaining for authorized HTTP pairing and login workflows.
+
+Uses the existing encrypted credential vault for supplied PINs and the existing
+Hunt action row for ephemeral encrypted captures. No parallel secret registry,
+plaintext planner result, arbitrary expression evaluator or new target authority.
+"""
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
+import json
+import urllib.parse
+from typing import Any, Awaitable, Callable, Mapping
+import uuid
+
+from .hunt_http_exchange_contract import pointer_get, pointer_set
+from .credential_refs import select_hunt_principal_reference
+from .credential_resolver import WorkerCredentialResolver, validate_worker_credential_authority
+from .models import TargetBinding
+from .archive_body_masking import is_credential_shaped
+try:
+    from secret_store import encrypt_secret, decrypt_secret
+except ModuleNotFoundError:
+    from api.secret_store import encrypt_secret, decrypt_secret
+
+SCHEMA = "hunt-http-private-capture/v1"
+MAX_VALUE_BYTES = 8_192
+# One budget for an action's serialized private result (captures, withheld values, dump column
+# knowledge), enforced before every write. Fernet expands 65,536 plaintext bytes to about 87,500
+# characters, inside the 131,072-character limit every reader enforces.
+MAX_PRIVATE_RESULT_BYTES = 65_536
+MAX_PRIVATE_RESULT_CHARS = 131_072
+MAX_CAPTURE_BYTES = MAX_PRIVATE_RESULT_BYTES
+CAPTURE_TTL_SECONDS = 3_600
+
+
+def _target_digest(target: TargetBinding) -> str:
+    # Services on the same admitted asset are not different authorization boundaries.
+    return replace(target, allowed_origins=()).digest
+
+
+def _scalar(value: Any) -> Any:
+    if not isinstance(value, (str, int, float, bool, type(None))):
+        raise ValueError("HTTP workflow binding value must be a scalar")
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
+    except (ValueError, UnicodeError):
+        raise ValueError("HTTP workflow binding value is invalid") from None
+    if len(encoded) > MAX_VALUE_BYTES:
+        raise ValueError("HTTP workflow binding value is too large")
+    return value
+
+
+COOKIE_CAPTURES_KEY = "cookie_captures"
+# A cookie value shorter than this could match ordinary response text: a request sending one is
+# reduced to its status rather than scrubbed.
+MIN_SCRUBBED_COOKIE_CHARS = 8
+# A captured header or JSON value (a bearer token from a login answer) at least this long is
+# known exactly and withheld wherever a response echoes it, as a withheld_ref value is; a shorter
+# one (a PIN, a pairing code, an id) may appear as ordinary text and keeps the answer status-only.
+MIN_SCRUBBED_CAPTURE_CHARS = 16
+
+
+def _cookie_pairs(response: Any, only: Any = None) -> str:
+    """The cookies a response set, as one ``Cookie`` header value (``a=1; b=2``); with ``only``,
+    just the cookies of those names (a capture's ``cookies``)."""
+    cookies = response.cookies() if callable(getattr(response, "cookies", None)) else {}
+    wanted = {str(name) for name in only} if only else None
+    pairs = [f"{name}={value}" for name, value in dict(cookies).items()
+             if str(name) and str(value) and (wanted is None or str(name) in wanted)]
+    if not pairs:
+        raise ValueError("response set no cookie")
+    return "; ".join(pairs)
+
+
+COOKIE_ORIGIN_KEY = "cookie_origin"
+# Values a request sent that are sealed only to be withheld (a saved login's secret).
+KNOWN_VALUES_KEY = "known_values"
+
+
+def origin_key(url: Any) -> str | None:
+    """``scheme://host:port`` of a URL (default ports explicit), or None when it names none."""
+    try:
+        parts = urllib.parse.urlsplit(str(url or ""))
+        port = parts.port
+    except ValueError:
+        return None
+    scheme, host = parts.scheme.lower(), (parts.hostname or "").lower().rstrip(".")
+    if scheme not in {"http", "https"} or not host:
+        return None
+    netloc = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{netloc}:{port or (443 if scheme == 'https' else 80)}"
+
+
+def cookie_values(header: str) -> list[str]:
+    """The values of a ``Cookie`` header value, without their names."""
+    return [part.split("=", 1)[1].strip() for part in str(header).split(";") if "=" in part]
+
+
+def _unique_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("HTTP workflow response has duplicate JSON fields")
+        result[key] = value
+    return result
+
+
+@dataclass(repr=False)
+class HttpWorkflowExchange:
+    run_id: str
+    action_id: str
+    target: TargetBinding = field(repr=False)
+    captures: tuple[Mapping[str, Any], ...] = field(default=(), repr=False)
+    encrypted_result: str | None = field(default=None, repr=False)
+    captured_names: tuple[str, ...] = ()
+    # The captured names that hold the cookies a response set (Set-Cookie captures).
+    cookie_names: tuple[str, ...] = ()
+    # Requested captures the response did not carry: reported, never a failed request.
+    missing_names: tuple[str, ...] = ()
+    capture_error: str | None = None
+    # A binding whose value may be short or echoed under any key (a credential field, a JSON
+    # capture, a short cookie): the response is reduced to its status. Otherwise every bound
+    # value is known exactly and is withheld wherever the target echoes it.
+    opaque_binding: bool = False
+    # The opaque binding is a captured session whose cookies include a value too short to withhold:
+    # the answer says to capture only the session cookie (capture ``cookies``).
+    short_cookie_binding: bool = False
+    # Withheld values this request sends (worker-private): scrubbed from the planner's view.
+    bound_values: list[str] = field(default_factory=list, repr=False)
+    # discovered_secret_uses rows this request recorded: their outcome is noted after the answer.
+    secret_use_ids: list[Any] = field(default_factory=list, repr=False)
+    # A saved login's secret this request sends (worker-private): sealed into the Hunt's known
+    # values with the action's result, so any later echo of it is withheld. Never referenceable.
+    known_secrets: list[str] = field(default_factory=list, repr=False)
+
+    def __repr__(self) -> str:
+        return f"HttpWorkflowExchange(action_id={self.action_id!r}, secret_values_visible=False)"
+
+    @property
+    def response_headers(self) -> tuple[str, ...]:
+        return tuple(str(item["header"]).lower() for item in self.captures if "header" in item)
+
+    def capture_response(self, response: Any) -> None:
+        """Capture only requested fields. Failure never erases the attempted write.
+
+        A header capture reads any response that carries the header, a redirect included: a
+        form login answers 302/303 with its cookie. A JSON capture reads a 2xx body only. A
+        ``Set-Cookie`` capture is the cookies the response set, as ``name=value`` pairs joined
+        by ``; `` (every Set-Cookie header, without attributes, deletions dropped): what a
+        later request sends in its ``Cookie`` header. A capture the response does not carry is
+        recorded as missing (``missing_names``); the others are still kept, and the request's
+        own outcome does not depend on them."""
+        if not self.captures and not self.known_secrets:
+            return
+        extracted: dict[str, Any] = {}
+        cookie_names: list[str] = []
+        missing: list[str] = []
+        try:
+            success = 200 <= response.status_code < 300
+            document = None
+            if success and any("json_pointer" in item for item in self.captures):
+                try:
+                    document = json.loads(response.body(), object_pairs_hook=_unique_json_pairs)
+                except ValueError:
+                    document = None
+            headers = {str(key).lower(): value for key, value in response.headers().items()}
+            for item in self.captures:
+                try:
+                    if "json_pointer" in item:
+                        if not success or document is None:
+                            raise ValueError("no JSON body")
+                        value = pointer_get(document, item["json_pointer"])
+                    elif str(item["header"]).lower() == "set-cookie":
+                        value = _cookie_pairs(response, item.get("cookies"))
+                        cookie_names.append(item["name"])
+                    else:
+                        value = headers[str(item["header"]).lower()]
+                    extracted[item["name"]] = _scalar(value)
+                except (KeyError, ValueError):
+                    missing.append(item["name"])
+            if self.known_secrets and extracted:
+                # A capture carrying a saved login's secret (in any encoding) would let a later
+                # request send it anywhere the Hunt reaches: it is not kept.
+                from .archive_body_masking import KnownValueScrubber
+                scrubber = KnownValueScrubber(list(self.known_secrets))
+                for name in [name for name, value in extracted.items()
+                             if scrubber.scrub(str(value), lambda _value: "") != str(value)]:
+                    extracted.pop(name)
+                    cookie_names = [item for item in cookie_names if item != name]
+                    missing.append(name)
+            if extracted or self.known_secrets:
+                payload_values = {"schema_version": SCHEMA, "hunt_id": self.run_id,
+                    "source_action_id": self.action_id, "target_digest": _target_digest(self.target),
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=CAPTURE_TTL_SECONDS)).isoformat(),
+                    "values": extracted}
+                if self.known_secrets:
+                    # Withheld wherever the target echoes them for the rest of the Hunt
+                    # (``sealed_hunt_knowledge``); no reference resolves to them.
+                    payload_values[KNOWN_VALUES_KEY] = list(self.known_secrets)
+                    payload_values[WITHHELD_EXPIRES_KEY] = (
+                        datetime.now(timezone.utc) + timedelta(seconds=WITHHELD_TTL_SECONDS)).isoformat()
+                kept_cookies = [name for name in cookie_names if name in extracted]
+                if kept_cookies:
+                    payload_values[COOKIE_CAPTURES_KEY] = kept_cookies
+                    # The origin that set the cookies: they are sent back only there (never over
+                    # plain http for a login answered over https, never to another port).
+                    payload_values[COOKIE_ORIGIN_KEY] = origin_key(getattr(response, "final_url", ""))
+                payload = json.dumps(payload_values, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+                payload_values.clear()
+                if len(payload.encode()) > MAX_CAPTURE_BYTES:
+                    raise ValueError("capture too large")
+                self.encrypted_result = encrypt_secret(payload)
+                self.captured_names = tuple(extracted)
+                self.cookie_names = tuple(kept_cookies)
+            self.missing_names = tuple(missing)
+        except Exception:
+            # Target content and decrypt/encrypt errors must never enter public errors.
+            self.encrypted_result = None
+            self.captured_names = ()
+            self.cookie_names = ()
+            self.missing_names = tuple(item["name"] for item in self.captures)
+        finally:
+            extracted.clear()
+            self.known_secrets.clear()
+        if self.missing_names:
+            self.capture_error = "http_workflow_capture_incomplete"
+
+    def public_result(self) -> list[dict[str, str]]:
+        """The references a later call binds. A session cookie capture is shown as the exact
+        ``request_bindings`` entry that sends it back (``header: Cookie``)."""
+        return [{"source_action_id": self.action_id, "capture_name": name,
+                 **({"header": "Cookie"} if name in self.cookie_names else {})}
+                for name in self.captured_names]
+
+    async def persist(self, conn: Any, *, run: Mapping[str, Any], status: str) -> None:
+        if self.encrypted_result and status == "success" and run["status"] in {"active", "awaiting_planner", "budget_exhausted"} and not run.get("completed_at"):
+            await conn.execute("""UPDATE hunt_actions SET private_http_result=$3
+                WHERE id=$1 AND hunt_run_id=$2 AND capability_name='http.request'""",
+                uuid.UUID(self.action_id), uuid.UUID(self.run_id), self.encrypted_result)
+        else:
+            self.captured_names = ()
+        self.encrypted_result = None
+
+
+async def _captured_value(conn: Any, *, run_id: str, target: TargetBinding, binding: Mapping[str, Any]) -> Any:
+    return (await captured_binding(conn, run_id=run_id, target=target, binding=binding))[0]
+
+
+async def captured_binding(
+    conn: Any, *, run_id: str, target: TargetBinding, binding: Mapping[str, Any],
+    destination: str | None = None,
+) -> tuple[Any, bool]:
+    """``(value, is_cookie)`` of a response capture this Hunt made: worker-private.
+
+    A Set-Cookie capture is bound to the origin that set it: with ``destination`` (the URL the
+    value is about to be sent to) it is refused for any other scheme, host or port."""
+    source_id = str(uuid.UUID(str(binding["source_action_id"])))
+    row = await conn.fetchrow("""SELECT private_http_result FROM hunt_actions
+        WHERE id=$1 AND hunt_run_id=$2 AND capability_name='http.request'
+          AND status='completed'""", uuid.UUID(source_id), uuid.UUID(run_id))
+    ciphertext = str(row["private_http_result"] or "") if row else ""
+    if len(ciphertext) > MAX_PRIVATE_RESULT_CHARS or not ciphertext.startswith("enc:fernet:"):
+        raise ValueError("HTTP workflow response reference is unavailable")
+    try:
+        private = json.loads(decrypt_secret(ciphertext))
+        expires_at = datetime.fromisoformat(private["expires_at"])
+        if (private["schema_version"] != SCHEMA or private["hunt_id"] != run_id
+                or private["source_action_id"] != source_id
+                or private["target_digest"] != _target_digest(target)
+                or expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc)):
+            raise ValueError("binding changed or expired")
+        name = binding["capture_name"]
+        value = _scalar(private["values"][name])
+        is_cookie = name in (private.get(COOKIE_CAPTURES_KEY) or ())
+        cookie_origin = private.get(COOKIE_ORIGIN_KEY)
+    except Exception:
+        raise ValueError("HTTP workflow response reference is expired or no longer bound to this Hunt") from None
+    if is_cookie and destination is not None and (
+            not cookie_origin or origin_key(destination) != cookie_origin):
+        raise ValueError(
+            f"a captured login cookie is sent only to the origin that set it ({cookie_origin or 'unknown'}); "
+            "name that origin, or log in on this one")
+    return value, is_cookie
+
+
+# --- Withheld values -------------------------------------------------------------------------
+# A capability output (an artifact window, an HTTP body sample) withholds credential-shaped values
+# behind ``[withheld:n]`` markers (archive_body_masking). The raw values are sealed here, on the
+# same encrypted, Hunt- and target-bound, expiring action row a response capture uses, and cleared
+# with it when the Hunt ends. A later ``http.request`` binds one by ``withheld_ref`` under the same
+# active-testing authority, budget and scope as any other workflow binding (N56).
+
+WITHHELD_SCHEMA_KEY = "withheld"
+WITHHELD_EXPIRES_KEY = "withheld_expires_at"
+# A withheld value lives as long as its Hunt does (finish and cancel clear it, a Hunt that is no
+# longer live refuses it), and never longer than this: a leaked credential found early in a long
+# Hunt must still be usable late in it.
+WITHHELD_TTL_SECONDS = 24 * 3_600
+_LIVE_HUNT_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
+
+
+def _hunt_is_live(run: Mapping[str, Any]) -> bool:
+    return run.get("status") in _LIVE_HUNT_STATUSES and not run.get("completed_at")
+
+
+def _private_payload(run_id: str, action_id: str, target: TargetBinding) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    return {"schema_version": SCHEMA, "hunt_id": run_id, "source_action_id": action_id,
+        "target_digest": _target_digest(target),
+        "expires_at": (now + timedelta(seconds=CAPTURE_TTL_SECONDS)).isoformat(), "values": {}}
+
+
+# Capabilities whose planner-facing output carries target response content.
+WITHHOLDING_CAPABILITIES = frozenset({"artifact.inspect", "javascript.analyze", "http.request"})
+
+
+# Seeding is bounded by the text it scans for, most recent first: a long Hunt's oldest values
+# stop being searched before the scan gets slow.
+_MAX_SEEDED_CHARS = 65_536
+# Shorter values (a pairing PIN) would match ordinary text everywhere; their outputs are reduced.
+_MIN_SEEDED_CHARS = 6
+SQL_TABLES_KEY = "sql_tables"
+CONTEXT_BYTES_KEY = "context_bytes"
+_MAX_SQL_PATHS = 64
+_MAX_SQL_TABLES = 256
+_MAX_SQL_COLUMNS = 256
+
+
+def _sql_entries(tables: Any) -> list[tuple[str, str, list[str]]]:
+    """``(path, table, columns)`` of carried knowledge, names bounded, in its order."""
+    entries: list[tuple[str, str, list[str]]] = []
+    if not isinstance(tables, Mapping):
+        return entries
+    for path, by_table in tables.items():
+        if not isinstance(by_table, Mapping):
+            continue
+        for table, columns in by_table.items():
+            if isinstance(columns, (list, tuple)) and columns:
+                entries.append((str(path)[:2048], str(table)[:128],
+                                [str(column)[:128] for column in columns[:_MAX_SQL_COLUMNS]]))
+    return entries
+
+
+def _knowledge_entries(
+    tables: Any, seeded: Any, prior: Any,
+) -> list[tuple[str, str, list[str]]]:
+    """The knowledge to seal, most worth keeping first, within the path and table bounds.
+
+    Resource verdicts and COPY block positions (keys starting with ``\0``) come first: they are
+    a few names each, and they decide whether rows fail closed. Then the column knowledge this
+    action learned (``tables`` less what it was ``seeded`` with), then the rest: knowledge
+    seeded from earlier actions (already sealed in their own results) and this action's
+    ``prior`` private result. Earlier entries win a duplicate."""
+    current, earlier = _sql_entries(tables), _sql_entries(prior)
+    seeded_tables = seeded if isinstance(seeded, Mapping) else {}
+
+    def learned(entry: tuple[str, str, list[str]]) -> bool:
+        path, table, columns = entry
+        by_table = seeded_tables.get(path)
+        return not isinstance(by_table, Mapping) or by_table.get(table) != columns
+
+    ordered = (
+        [entry for entry in current + earlier if entry[1].startswith("\0")]
+        + [entry for entry in current if learned(entry)]
+        + current + earlier
+    )
+    result: list[tuple[str, str, list[str]]] = []
+    seen: set[tuple[str, str]] = set()
+    per_path: dict[str, int] = {}
+    for path, table, columns in ordered:
+        if (path, table) in seen:
+            continue
+        if path not in per_path and len(per_path) >= _MAX_SQL_PATHS:
+            continue
+        if per_path.get(path, 0) >= _MAX_SQL_TABLES:
+            continue
+        seen.add((path, table))
+        per_path[path] = per_path.get(path, 0) + 1
+        result.append((path, table, columns))
+    return result
+
+
+def _bounded_sql_tables(tables: Any) -> dict[str, dict[str, list[str]]]:
+    """Column names per resource path and table: names only, never values, bounded."""
+    result: dict[str, dict[str, list[str]]] = {}
+    if not isinstance(tables, Mapping):
+        return result
+    for path, by_table in list(tables.items())[:_MAX_SQL_PATHS]:
+        if not isinstance(by_table, Mapping):
+            continue
+        kept = {
+            str(table)[:128]: [str(column)[:128] for column in columns[:_MAX_SQL_COLUMNS]]
+            for table, columns in list(by_table.items())[:_MAX_SQL_TABLES]
+            if isinstance(columns, (list, tuple)) and columns
+        }
+        if kept:
+            result[str(path)[:2048]] = kept
+    return result
+
+
+async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding) -> dict[str, Any]:
+    """What this Hunt already knows about the target, from its sealed private results:
+    ``values`` (withheld values and response captures, most recent first, bounded) and
+    ``sql_tables`` (dump column names per resource path). Worker-private."""
+    rows = await conn.fetch("""SELECT private_http_result FROM hunt_actions
+        WHERE hunt_run_id=$1 AND private_http_result IS NOT NULL
+        ORDER BY completed_at DESC NULLS LAST, id""", uuid.UUID(str(run_id)))
+    digest, now = _target_digest(target), datetime.now(timezone.utc)
+    values: list[str] = []
+    # Saved-login secrets this Hunt sent: masked wherever echoed, never referenceable.
+    unreferenced: list[str] = []
+    tables: dict[str, dict[str, list[str]]] = {}
+    context_bytes = 0
+    budget = _MAX_SEEDED_CHARS
+    for row in rows or ():
+        try:
+            ciphertext = str(row["private_http_result"])
+            if len(ciphertext) > MAX_PRIVATE_RESULT_CHARS:
+                continue
+            private = json.loads(decrypt_secret(ciphertext))
+            expires_at = datetime.fromisoformat(private.get(WITHHELD_EXPIRES_KEY) or private["expires_at"])
+            if private.get("hunt_id") != str(run_id) or private.get("target_digest") != digest or expires_at <= now:
+                continue
+            captured = private.get("values") or {}
+            cookie_names = set(private.get(COOKIE_CAPTURES_KEY) or ())
+            # The target chooses its cookies' values: only one shaped like a session secret is
+            # withheld for the rest of the Hunt, so a target cannot hide ordinary text from the
+            # planner by setting a cookie to it. Every value is still withheld in a request that
+            # sends it (``bound_values``).
+            unreferenced.extend(str(item) for item in private.get(KNOWN_VALUES_KEY) or ()
+                                if isinstance(item, str) and item not in unreferenced)
+            found = [*(private.get(WITHHELD_SCHEMA_KEY) or {}).values(),
+                     *(value for name, value in captured.items() if name not in cookie_names),
+                     *(item for name in cookie_names
+                       for item in cookie_values(str(captured.get(name) or ""))
+                       if is_credential_shaped(item))]
+            learned = _bounded_sql_tables(private.get(SQL_TABLES_KEY))
+            context_bytes += max(0, int(private.get(CONTEXT_BYTES_KEY) or 0))
+        except Exception:
+            continue  # an unreadable row seeds nothing; its own references refuse
+        for path, by_table in learned.items():
+            tables.setdefault(path, {})
+            for table, columns in by_table.items():
+                tables[path].setdefault(table, columns)  # most recent first wins
+        for value in found:
+            if isinstance(value, str) and len(value) >= _MIN_SEEDED_CHARS and len(value) <= budget and value not in values:
+                values.append(value)
+                budget -= len(value)
+    # Values this Hunt sent by secret:// reference were never sealed in it: they are seeded too,
+    # first, so a later response that echoes one withholds it.
+    try:
+        from hunt.discovered_secrets import values_used_by_hunt
+    except ModuleNotFoundError:  # package import layout
+        from ..hunt.discovered_secrets import values_used_by_hunt
+    try:
+        used = await values_used_by_hunt(conn, run_id)
+    except Exception:
+        used = []
+    for value in reversed(used):
+        if len(value) >= _MIN_SEEDED_CHARS and value not in values:
+            values.insert(0, value)
+    return {"values": [value for value in values if value not in unreferenced], "unreferenced": unreferenced,
+            "sql_tables": tables, "context_bytes": context_bytes}
+
+
+async def hunt_saved_login_secrets(conn: Any, run_id: Any) -> list[str]:
+    """Every saved-login secret this Hunt sent, for the Hunt's records (its masked HTTP archive):
+    unlike ``sealed_hunt_knowledge`` it ignores the in-Hunt expiry and the target binding, since
+    a record is read after the Hunt. Six characters or more. API- and worker-private."""
+    rows = await conn.fetch("""SELECT private_http_result FROM hunt_actions
+        WHERE hunt_run_id=$1 AND private_http_result IS NOT NULL
+        ORDER BY completed_at DESC NULLS LAST, id""", uuid.UUID(str(run_id)))
+    found: list[str] = []
+    for row in rows or ():
+        try:
+            ciphertext = str(row["private_http_result"])
+            if len(ciphertext) > MAX_PRIVATE_RESULT_CHARS:
+                continue
+            private = json.loads(decrypt_secret(ciphertext))
+            if private.get("hunt_id") != str(run_id):
+                continue
+            found.extend(str(item) for item in private.get(KNOWN_VALUES_KEY) or ()
+                         if isinstance(item, str) and len(item) >= _MIN_SEEDED_CHARS and item not in found)
+        except Exception:  # noqa: BLE001 - an unreadable row adds nothing
+            continue
+    return found
+
+
+async def saved_login_known_values(pool: Any, run_id: Any, target: TargetBinding) -> list[str]:
+    """The saved-login secrets this Hunt sent (worker-private), for the public secrecy boundary of
+    actions that do not withhold by reference (scanners). Six characters or more: a shorter one
+    would match ordinary text."""
+    try:
+        async with pool.acquire() as conn:
+            found = (await sealed_hunt_knowledge(conn, run_id=run_id, target=target))["unreferenced"]
+    except Exception:  # noqa: BLE001 - an unreadable seal adds nothing; the login answer was reduced
+        return []
+    return [value for value in found if len(value) >= _MIN_SEEDED_CHARS]
+
+
+async def sealed_hunt_values(conn: Any, *, run_id: Any, target: TargetBinding) -> list[str]:
+    return (await sealed_hunt_knowledge(conn, run_id=run_id, target=target))["values"]
+
+
+def known_values_seed(pool: Any, run_id: Any, target: TargetBinding) -> Callable[[], Awaitable[dict[str, Any]]]:
+    async def seed() -> dict[str, Any]:
+        async with pool.acquire() as conn:
+            return await sealed_hunt_knowledge(conn, run_id=run_id, target=target)
+    return seed
+
+
+def withholding_operation(
+    capability_name: str, action_id: Any, operation: Callable[[], Awaitable[Any]],
+    seed: Callable[[], Awaitable[list[str]]] | None = None,
+):
+    """``(operation, collector)``: run a body-sampling capability with a withheld-value collector.
+
+    Inside it, every value the body masking withholds becomes a ``[withheld:n]`` marker and stays
+    in the collector; other capabilities run unchanged with no collector. ``seed`` gives the
+    values this Hunt already sealed for the target: a re-read, a window split elsewhere, or a
+    later echo of any of them is withheld too, whatever surrounds it.
+    """
+    if capability_name not in WITHHOLDING_CAPABILITIES:
+        return operation, None
+    from .archive_body_masking import WithheldValues, collecting_withheld_values
+    collector = WithheldValues(str(action_id))
+
+    async def collecting() -> Any:
+        if seed is not None:
+            knowledge = await seed()
+            if isinstance(knowledge, Mapping):
+                collector.bind_unreferenced(knowledge.get("unreferenced") or ())
+                collector.bind_known(knowledge.get("values") or (), found=True)
+                for path, by_table in (knowledge.get("sql_tables") or {}).items():
+                    collector.sql_tables.setdefault(path, {}).update(by_table)
+                collector.sql_seeded = copy.deepcopy(collector.sql_tables)
+                collector.context_bytes_used = int(knowledge.get("context_bytes") or 0)
+            else:
+                collector.bind_known(knowledge, found=True)
+        with collecting_withheld_values(collector):
+            return await operation()
+
+    return collecting, collector
+
+
+def _serialized(payload: Mapping[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+
+
+def _byte_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode())
+
+
+def _resolvable(value: str) -> bool:
+    try:
+        _scalar(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _fit_private_payload(
+    base: dict[str, Any], values: list[tuple[str, str]], tables: list[tuple[str, str, list[str]]],
+) -> tuple[dict[str, Any], int, int]:
+    """``(payload, values kept, table entries kept)`` within ``MAX_PRIVATE_RESULT_BYTES``.
+
+    The base (captures, expiry, accounting) is kept whole. Secret references come next, in order,
+    because a reference the planner was shown must resolve; dump knowledge fills what is left,
+    in the order given (``_knowledge_entries``: verdicts, then the newest columns), and is the
+    first to be evicted, last entry first."""
+    payload = dict(base)
+    budget = MAX_PRIVATE_RESULT_BYTES - _byte_size(payload) - 64  # the two keys and their braces
+    kept_values: dict[str, str] = {}
+    for key, value in values:
+        cost = _byte_size(key) + _byte_size(value) + 2
+        if cost > budget:
+            break
+        kept_values[key] = value
+        budget -= cost
+    kept: list[tuple[str, str, list[str]]] = []
+    paths: set[str] = set()
+    for path, table, columns in tables:
+        cost = _byte_size(table) + _byte_size(columns) + 2 + (0 if path in paths else _byte_size(path) + 4)
+        if cost > budget:
+            continue
+        kept.append((path, table, columns))
+        paths.add(path)
+        budget -= cost
+
+    def place() -> None:
+        nested: dict[str, dict[str, list[str]]] = {}
+        for path, table, columns in kept:
+            nested.setdefault(path, {})[table] = columns
+        payload.pop(SQL_TABLES_KEY, None)
+        payload.pop(WITHHELD_SCHEMA_KEY, None)
+        if kept_values:
+            payload[WITHHELD_SCHEMA_KEY] = kept_values
+        if nested:
+            payload[SQL_TABLES_KEY] = nested
+
+    place()
+    # The estimate is conservative; the exact serialized size is what is checked.
+    while _byte_size(payload) > MAX_PRIVATE_RESULT_BYTES and (kept or kept_values):
+        if kept:
+            kept.pop()
+        else:
+            kept_values.popitem()
+        place()
+    return payload, len(kept_values), len(kept)
+
+
+async def persist_withheld_values(
+    conn: Any, *, run: Mapping[str, Any], action_id: Any, target: TargetBinding,
+    values: Any, status: str, observations: Any = None,
+) -> dict[str, Any]:
+    """Seal the values an action's output withheld: ``{"sealed": n, "status": ...}``.
+
+    ``values`` is ``{number: value}`` or the action's collector, of which only the values whose
+    markers reached ``observations`` (the planner's view) are sealed: a workflow response reduced
+    to its status shows none. Merged into the action's private result, beside any response
+    capture, within one serialized-byte budget (``MAX_PRIVATE_RESULT_BYTES``): references first,
+    dump column knowledge with what is left. What does not fit is reported in ``not_retained``
+    and its references refuse rather than send something else. A prior private result that
+    cannot be read is kept, never overwritten, and the status says so.
+
+    A value's number is its identity: when this action's prior private result already holds a
+    value under a number, the prior value is kept and the new one under that number is not
+    sealed, so a reference the planner was shown never starts resolving to something else.
+    """
+    if values is None:
+        return {"sealed": 0, "status": "none"}
+    tables: dict[str, dict[str, list[str]]] = {}
+    seeded: Any = {}
+    context_bytes = 0
+    already_held: set[str] = set()
+    if not isinstance(values, Mapping):
+        collector = values
+        # Values this action sent, or that the Hunt already held, are not new sightings.
+        already_held = {str(v) for v in (*getattr(collector, "known", ()), *getattr(collector, "found", ()))}
+        values = collector.shown_values(json.dumps(observations, default=str))
+        tables = collector.sql_tables if _sql_entries(collector.sql_tables) else {}
+        seeded = getattr(collector, "sql_seeded", {}) or {}
+        context_bytes = int(getattr(collector, "context_bytes", 0) or 0)
+        collector.values.clear()
+    if not values and not tables and not context_bytes:
+        return {"sealed": 0, "status": "none"}
+    if status != "success" or not _hunt_is_live(run):
+        return {"sealed": 0, "status": "action_or_hunt_not_live"}
+    run_id, source_id = str(run["id"]), str(uuid.UUID(str(action_id)))
+    row = await conn.fetchrow("SELECT private_http_result FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2",
+        uuid.UUID(source_id), uuid.UUID(run_id))
+    base = _private_payload(run_id, source_id, target)
+    existing = str(row["private_http_result"] or "") if row else ""
+    if existing:
+        try:
+            prior = (json.loads(decrypt_secret(existing))
+                     if existing.startswith("enc:fernet:") and len(existing) <= MAX_PRIVATE_RESULT_CHARS else None)
+        except Exception:
+            prior = None
+        if not (isinstance(prior, dict) and prior.get("hunt_id") == run_id
+                and prior.get("source_action_id") == source_id):
+            # Keep the response capture this action already sealed; its withheld values stay
+            # withheld (shown, unreferenceable), and the planner is told why.
+            return {"sealed": 0, "status": "prior_private_result_unreadable"}
+        base = prior
+    prior_values = base.pop(WITHHELD_SCHEMA_KEY, None) or {}
+    prior_tables = base.pop(SQL_TABLES_KEY, None)
+    base[WITHHELD_EXPIRES_KEY] = (
+        datetime.now(timezone.utc) + timedelta(seconds=WITHHELD_TTL_SECONDS)).isoformat()
+    if context_bytes:
+        base[CONTEXT_BYTES_KEY] = int(base.get(CONTEXT_BYTES_KEY) or 0) + context_bytes
+    if _byte_size(base) > MAX_PRIVATE_RESULT_BYTES:
+        return {"sealed": 0, "status": "no_room", "not_retained": {"values": len(values)}}
+    candidates = [(str(key), str(value)) for key, value in prior_values.items()
+                  if isinstance(value, str)]
+    # A value the resolver would refuse (``MAX_VALUE_BYTES``) is not sealed: it is reported as not
+    # retained instead of handing out a reference that cannot send.
+    candidates += [(str(int(number)), str(value)) for number, value in sorted(values.items())
+                   if str(int(number)) not in prior_values and _resolvable(str(value))]
+    entries = _knowledge_entries(tables, seeded, prior_tables)
+    payload, kept_count, table_count = _fit_private_payload(base, candidates, entries)
+    kept_numbers = set(payload.get(WITHHELD_SCHEMA_KEY) or {})
+    sealed_new = sum(1 for number in values if str(int(number)) in kept_numbers)
+    serialized = _serialized(payload)
+    payload.clear()
+    try:
+        sealed = encrypt_secret(serialized)
+    except Exception:
+        sealed = None  # no encryption key: the values stay withheld and unreferenceable
+    finally:
+        serialized = ""
+    if not str(sealed or "").startswith("enc:fernet:"):
+        return {"sealed": 0, "status": "encryption_unavailable"}  # never stored in clear
+    if len(sealed) > MAX_PRIVATE_RESULT_CHARS:
+        return {"sealed": 0, "status": "no_room", "not_retained": {"values": len(values)}}
+    await conn.execute("UPDATE hunt_actions SET private_http_result=$3 WHERE id=$1 AND hunt_run_id=$2",
+        uuid.UUID(source_id), uuid.UUID(run_id), sealed)
+    result: dict[str, Any] = {
+        "sealed": sealed_new,
+        "status": ("sealed" if sealed_new == len(values) else "partially_sealed") if values else "knowledge_only",
+    }
+    # The target's discovered-secrets store keeps what this action sealed, for later Hunts of the
+    # same target (secret://<id>); its own savepoint, so a failure there never undoes the seal.
+    found = [(str(value), "") for number, value in sorted(values.items())
+             if str(int(number)) in kept_numbers and str(value) not in already_held]
+    if found:
+        try:
+            from hunt.discovered_secrets import record_discovered
+        except ModuleNotFoundError:  # package import layout
+            from api.hunt.discovered_secrets import record_discovered
+        stored = await record_discovered(conn, target_id=target.target_id, values=found,
+            source={"kind": "hunt_action", "id": source_id, "hunt_id": run_id})
+        if stored["stored"] or stored["refreshed"]:
+            result["discovered_secrets"] = stored
+    unresolvable = sum(1 for value in values.values() if not _resolvable(str(value)))
+    dropped_values, dropped_tables = len(candidates) - kept_count + unresolvable, len(entries) - table_count
+    if dropped_values or dropped_tables:
+        result["not_retained"] = {"values": dropped_values, "sql_tables": dropped_tables}
+    return result
+
+
+async def settle_private_results(
+    conn: Any, *, run: Mapping[str, Any], status: str, exchange: HttpWorkflowExchange | None,
+    withheld: Any, action_id: Any, target: TargetBinding, observations: Any,
+    receipt_result: dict[str, Any],
+) -> None:
+    """Inside the action's settlement: persist its response captures and seal its withheld values."""
+    if exchange is not None:
+        await exchange.persist(conn, run=run, status=status)
+        receipt_result["captures"] = exchange.public_result()
+    sealing = await persist_withheld_values(conn, run=run, action_id=action_id, target=target,
+        values=withheld, status=status, observations=observations)
+    if sealing["status"] != "none":
+        receipt_result["withheld_values_sealing"] = sealing
+
+
+async def _withheld_value(
+    conn: Any, *, run: Mapping[str, Any], target: TargetBinding, reference: str,
+) -> str:
+    from .archive_body_masking import WITHHELD_REF_RE
+    match = WITHHELD_REF_RE.fullmatch(str(reference))
+    if match is None:
+        raise ValueError("withheld value reference is invalid")
+    if not _hunt_is_live(run):
+        raise ValueError("withheld value reference belongs to a Hunt that is no longer live")
+    run_id = str(run["id"])
+    source_id, number = match.group(1), int(match.group(2))
+    row = await conn.fetchrow("""SELECT private_http_result FROM hunt_actions
+        WHERE id=$1 AND hunt_run_id=$2 AND status='completed'""", uuid.UUID(source_id), uuid.UUID(run_id))
+    ciphertext = str(row["private_http_result"] or "") if row else ""
+    if len(ciphertext) > MAX_PRIVATE_RESULT_CHARS or not ciphertext.startswith("enc:fernet:"):
+        raise ValueError("withheld value reference is unavailable in this Hunt")
+    try:
+        private = json.loads(decrypt_secret(ciphertext))
+        expires_at = datetime.fromisoformat(private.get(WITHHELD_EXPIRES_KEY) or private["expires_at"])
+        if (private["schema_version"] != SCHEMA or private["hunt_id"] != run_id
+                or private["source_action_id"] != source_id
+                or private["target_digest"] != _target_digest(target)
+                or expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc)):
+            raise ValueError("binding changed or expired")
+        recorded = private.get(WITHHELD_SCHEMA_KEY)
+        if not isinstance(recorded, dict) or str(number) not in recorded:
+            # The Hunt's own action, live and bound, simply recorded no such value: say so, rather
+            # than "expired" (an agent guessed /1 into a captured response whose body was hidden).
+            raise _NoSuchWithheldValue
+        return str(_scalar(recorded[str(number)]))
+    except _NoSuchWithheldValue:
+        raise ValueError(
+            f"withheld value reference names no value of action {source_id}: cite only a "
+            "[withheld:N] that action's response showed (a response that captured values shows "
+            "no body and records none)") from None
+    except Exception:
+        raise ValueError("withheld value reference is expired or no longer bound to this Hunt") from None
+
+
+class _NoSuchWithheldValue(Exception):
+    """A live, bound action of this Hunt recorded no withheld value under that number."""
+
+
+async def _saved_login_value(
+    conn: Any, *, run: Mapping[str, Any], target: TargetBinding, policy: Mapping[str, Any],
+    context: Mapping[str, Any], values: Mapping[str, Any], binding: Mapping[str, Any], destination: str | None,
+) -> str:
+    """A saved login's field, worker-private: only under this Hunt's live ``login.use`` grant for
+    the profile's current version, only in the login's own POST to the profile's login URL."""
+    try:
+        from hunt.saved_logins import (
+            live_login_grants, profile_login_url, request_login_url, validate_login_request_shape,
+        )
+    except ModuleNotFoundError:  # package import layout
+        from ..hunt.saved_logins import (
+            live_login_grants, profile_login_url, request_login_url, validate_login_request_shape,
+        )
+    if not _hunt_is_live(run):
+        raise ValueError("saved login belongs to a Hunt that is no longer live")
+    profile_id = validate_login_request_shape(values)
+    if str(binding["saved_login"]) != profile_id:
+        raise ValueError("a login request binds one saved login")
+    grants = await live_login_grants(conn, run["id"], profile_id)
+    if not grants:
+        raise ValueError("saved_login_not_attached: no live login.use grant for this saved login")
+    authority = await validate_worker_credential_authority(conn, owner_kind="hunt", owner_id=str(run["id"]),
+        target=target, approval_receipt_id=policy.get("approval_receipt_id"),
+        scope_receipt_id=target.scope_receipt_id, action_name="hunt.capability:http.request")
+    async with WorkerCredentialResolver().resolve(conn, profile_id=profile_id, target=target,
+            capability="http.request", authority=authority) as resolved:
+        version = resolved.profile.current_version
+        if resolved.profile.auth_kind not in {"form_login", "json_login"} or not any(
+                grant["profile_version"] == version for grant in grants):
+            raise ValueError("saved login changed after it was attached; a person attaches it again")
+        # The Hunt's own registered host, never the host this request was bound to (a destination
+        # granted for this Hunt is another host, and no saved login goes there).
+        target_context = context.get("target") if isinstance(context.get("target"), Mapping) else {}
+        hunt_url = str(target_context.get("url") or "")
+        url = profile_login_url(resolved.interactive_http().endpoint_url, hunt_url,
+                                urllib.parse.urlsplit(hunt_url).hostname)
+        if url is None or request_login_url(values, destination) != url:
+            raise ValueError("saved_login_destination: a saved login is sent only to its own login URL")
+        return str(_scalar(resolved.http_workflow_value(binding["credential_field"])))
+
+
+async def prepare_http_exchange(
+    conn: Any, *, run: Mapping[str, Any], action_id: Any, target: TargetBinding,
+    context: Mapping[str, Any], policy: Mapping[str, Any], values: Mapping[str, Any],
+    trusted_headers: Mapping[str, str], capture_state: HttpWorkflowExchange | None = None,
+    destination: str | None = None,
+) -> tuple[dict[str, Any], dict[str, str], HttpWorkflowExchange]:
+    """Resolve values only after the caller holds a revalidated action reservation."""
+    from .hunt_http_contract import require_http_request_authority
+    from .capability_registry import CAPABILITY_REGISTRY
+    CAPABILITY_REGISTRY.validate_hunt_input("http.request", values)
+    require_http_request_authority(values, policy)
+    run_id = str(run["id"])
+    exchange = capture_state or HttpWorkflowExchange(run_id, str(action_id), target, tuple(values.get("capture") or ()))
+    inputs = copy.deepcopy(dict(values))
+    inputs.pop("capture", None)
+    inputs.pop("request_bindings", None)
+    headers = dict(trusted_headers)
+    for binding in values.get("request_bindings") or ():
+        if "withheld_ref" in binding:
+            value = await _withheld_value(conn, run=run, target=target, reference=binding["withheld_ref"])
+            exchange.bound_values.append(str(value))
+        elif "secret_ref" in binding:
+            try:
+                from hunt.discovered_secrets import DiscoveredSecretError, resolve_for_hunt
+                from hunt.secret_try import denied_destination_resolved, destination_of
+            except ModuleNotFoundError:  # package import layout
+                from api.hunt.discovered_secrets import DiscoveredSecretError, resolve_for_hunt
+                from api.hunt.secret_try import denied_destination_resolved, destination_of
+            if not _hunt_is_live(run):
+                raise ValueError("secret reference belongs to a Hunt that is no longer live")
+            # Where this request goes (the origin it names; a secret never goes to a default
+            # origin): a secret of another target is sent only to the login a person allowed, and
+            # no secret goes where the destination cannot be named exactly or to a denied login
+            # (by name or by the address the request is pinned to).
+            destination = destination_of(values)
+            if destination is None:
+                raise ValueError("secret_reference_invalid: a request carrying a secret must name its origin and one exact path")
+            if await denied_destination_resolved(destination["host"], destination["path"], target.allowed_addresses):
+                raise ValueError("secret_try_destination_denied: this login never receives a discovered secret")
+            try:
+                value = await resolve_for_hunt(conn, reference=binding["secret_ref"],
+                    target_id=target.target_id, hunt_run_id=run_id, action_id=action_id,
+                    destination_host=str((destination or {}).get("host") or target.canonical_host or ""),
+                    destination=destination, use_ids=exchange.secret_use_ids)
+            except DiscoveredSecretError as exc:
+                raise ValueError(f"{exc.reason}: {exc}") from None
+            exchange.bound_values.append(str(value))
+        elif "default_credential" in binding:
+            try:
+                from hunt.default_credentials import require_admitted, validate_request_shape, value_of
+            except ModuleNotFoundError:  # package import layout
+                from ..hunt.default_credentials import require_admitted, validate_request_shape, value_of
+            if not _hunt_is_live(run):
+                raise ValueError("default credential belongs to a Hunt that is no longer live")
+            pair_id = validate_request_shape(values)
+            await require_admitted(conn, hunt_id=run_id, action_id=action_id, pair_id=pair_id)
+            # A public, built-in pair: not a secret, so the answer stays readable.
+            value = value_of(binding["default_credential"], binding["credential_field"])
+        elif "saved_login" in binding:
+            value = await _saved_login_value(
+                conn, run=run, target=target, policy=policy, context=context, values=values, binding=binding,
+                destination=destination,
+            )
+            exchange.opaque_binding = True
+            if binding["credential_field"] == "secret":
+                exchange.known_secrets.append(str(value))
+        elif "source_action_id" in binding:
+            value, is_cookie = await captured_binding(
+                conn, run_id=run_id, target=target, binding=binding,
+                destination=str(values.get("origin") or destination or "") or None)
+            secrets = cookie_values(str(value)) if is_cookie and "header" in binding else []
+            if secrets and all(len(item) >= MIN_SCRUBBED_COOKIE_CHARS for item in secrets):
+                # A session cookie this Hunt's own login set: long, random and known exactly, so
+                # the response keeps its content with every echo of it withheld.
+                exchange.bound_values.extend([str(value), *secrets])
+            elif not is_cookie and isinstance(value, str) and len(value) >= MIN_SCRUBBED_CAPTURE_CHARS:
+                # A token the Hunt captured (a JWT from a login's JSON answer): the same value sent
+                # as a withheld_ref kept its answers readable, captured it made every one opaque.
+                exchange.bound_values.append(value)
+            else:
+                exchange.opaque_binding = True
+                exchange.short_cookie_binding = exchange.short_cookie_binding or bool(secrets)
+        else:
+            exchange.opaque_binding = True
+            selected = ({"profile_id": binding["profile_id"], "profile_version": binding["profile_version"]}
+                if "profile_id" in binding else select_hunt_principal_reference(
+                    context, binding["principal"], capability="http.request"))
+            authority = await validate_worker_credential_authority(conn, owner_kind="hunt", owner_id=run_id,
+                target=target, approval_receipt_id=policy.get("approval_receipt_id"),
+                scope_receipt_id=target.scope_receipt_id, action_name="hunt.capability:http.request")
+            async with WorkerCredentialResolver().resolve(conn, profile_id=selected["profile_id"], target=target,
+                    capability="http.request", authority=authority, expected_version=selected["profile_version"],
+                    expected_principal_slot=selected.get("principal_slot")) as resolved:
+                value = _scalar(resolved.http_workflow_value(binding["credential_field"]))
+        if "body_pointer" in binding:
+            body_name = "json_body" if "json_body" in inputs else "form_body"
+            pointer_set(inputs[body_name], binding["body_pointer"], value)
+        else:
+            name = binding["header"]
+            if any(str(key).lower() == name.lower() for key in (*headers, *(inputs.get("headers") or {}))):
+                raise ValueError("HTTP workflow header conflicts with another selected header")
+            text = str(value) if isinstance(value, (str, int, float)) and not isinstance(value, bool) else None
+            if text is None or any(ord(char) < 32 or ord(char) == 127 for char in text):
+                raise ValueError("HTTP workflow header value is invalid")
+            headers[name] = str(binding.get("prefix") or "") + text
+    CAPABILITY_REGISTRY.validate_hunt_input("http.request", inputs)
+    if sum(len(str(key).encode()) + len(str(value).encode()) for key, value in headers.items()) > 65_536:
+        raise ValueError("HTTP workflow headers exceed the request limit")
+    return inputs, headers, exchange

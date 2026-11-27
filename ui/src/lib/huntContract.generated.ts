@@ -16,7 +16,7 @@ export const HUNT_START_CONTRACT = {
       "budget.raise:<max_dimension>=<total>",
       "credential.use:<target-id|host>,...",
       "target.authorize:<host[:port]|*.domain[:port]>,...",
-      "capability:active-replay|active-testing|oob|state-changing|tcp-discovery",
+      "capability:account-creation|active-replay|active-testing|oob|state-changing|tcp-discovery",
       "ssh.host_trust:first-contact",
       "login.use:<saved-login-profile-id>,..."
     ]
@@ -467,6 +467,7 @@ export const HUNT_START_CONTRACT = {
   },
   "policy_fields": [
     "active_testing",
+    "allow_account_creation",
     "allow_direct_origin",
     "allow_identity_headers",
     "allow_oob_interactions",

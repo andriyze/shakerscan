@@ -1,0 +1,55 @@
+# ShakerScan parameter-name list (params-corporate/v1).
+# Authored by the ShakerScan project for this repository; no third-party wordlist content.
+# Each name is sent once per tested GET route with a random marker value by the opt-in
+# recon_active family. No name here selects an operation by itself; values are never meaningful.
+q
+query
+search
+s
+keyword
+id
+page
+debug
+test
+lang
+locale
+format
+view
+mode
+preview
+redirect
+url
+next
+return
+returnUrl
+callback
+file
+path
+template
+include
+dir
+source
+ref
+data
+name
+user
+username
+email
+category
+type
+sort
+order
+filter
+limit
+offset
+from
+to
+date
+year
+month
+region
+theme
+output
+show
+verbose
+trace

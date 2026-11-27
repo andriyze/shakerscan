@@ -1,0 +1,115 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import test from 'node:test'
+
+const root = path.resolve(import.meta.dirname, '..')
+const page = fs.readFileSync(path.join(root, 'src/app/credentials/page.tsx'), 'utf8')
+const api = fs.readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
+const credentialApi = fs.readFileSync(path.join(root, 'src/lib/credentialApi.ts'), 'utf8')
+const sidebar = fs.readFileSync(path.join(root, 'src/components/Sidebar.tsx'), 'utf8')
+
+test('shared Credentials UI binds profiles to an exact supported target kind', () => {
+  assert.match(sidebar, /href: '\/credentials'/)
+  // A credential belongs to one target; sharing it is an explicit operator choice.
+  assert.match(page, /Each belongs to one target and can be shared with others/)
+  for (const kind of ['web', 'api', 'network', 'device']) {
+    assert.match(page, new RegExp(`<option value="${kind}">`))
+  }
+  assert.match(credentialApi, /target_kind: params\.target_kind/)
+  assert.match(credentialApi, /target_id: params\.target_id/)
+})
+
+test('changing the view kind preserves the canonical asset ID and reloads profiles', () => {
+  const changeKind = page.match(/function changeTargetKind[\s\S]*?\n  }/)?.[0] || ''
+  // Kind selects a view of the same canonical target, not another inventory.
+  assert.match(changeKind, /setFilters\(\{ target_kind: kind === 'web' \? undefined : kind/)
+  assert.doesNotMatch(changeKind, /target_id: undefined/)
+  assert.match(changeKind, /setProfiles\(\[\]\)/)
+  assert.match(page, /onChange=\{\(event\) => changeTargetKind\(event\.target\.value as CredentialTargetKind\)\}/)
+})
+
+test('shared Credentials UI supports every canonical credential kind and lifecycle action', () => {
+  for (const kind of [
+    'authorization_header',
+    'bearer_token',
+    'api_key_header',
+    'cookie',
+    'basic_auth',
+    'form_login',
+    'oauth_client_credentials',
+    'oauth_password',
+    'custom_headers',
+    'ssh_password',
+    'ssh_private_key',
+    'ssh_private_key_with_passphrase',
+  ]) {
+    assert.match(page, new RegExp(`value: '${kind}'`))
+  }
+  assert.match(credentialApi, /fetch\(`\$\{API_URL\}\/credential-profiles`/)
+  assert.match(credentialApi, /credential-profiles\/\$\{pathSegment\(profileId\)\}\/rotate/)
+  assert.match(credentialApi, /method: 'DELETE'/)
+  assert.doesNotMatch(api, /export async function listCredentialProfiles/)
+})
+
+test('credential responses and presentation stay metadata-only', () => {
+  assert.match(credentialApi, /secret_values_visible: false/)
+  assert.match(credentialApi, /storage_encrypted: true/)
+  assert.match(page, /secret values hidden/)
+  assert.match(page, /never shown again/)
+  assert.doesNotMatch(page, /profile\.(secret|encrypted_secret|encrypted_metadata)/)
+})
+
+test('a credential is shared with other targets explicitly, and a shared copy is managed by its owner', () => {
+  const dialog = fs.readFileSync(path.join(root, 'src/components/credentials/ShareCredentialDialog.tsx'), 'utf8')
+  const client = fs.readFileSync(path.join(root, 'src/lib/credentialApi.ts'), 'utf8')
+  // The library lists every credential when no target is selected.
+  assert.match(page, /: await listCredentialLibrary\(\{ include_inactive: includeInactive, limit: 500 \}\)/)
+  // A copy shared to this target says where it is from and can only stop being shared here.
+  assert.match(page, /shared from \{profile\.home_target_name \|\| 'another target'\}/)
+  assert.match(page, /\{profile\.shared \? \(/)
+  assert.match(page, /Stop sharing here/)
+  // The dialog shares within one asset kind, and active capabilities need the receiving
+  // target's own approval, asked for explicitly.
+  assert.match(dialog, /sharesAsset\(profile\.target_kind, target\.kind\)/)
+  assert.match(dialog, /riskTier: 'credential'/)
+  assert.match(dialog, /disabled=\{!chosen \|\| busy \|\| \(needsApproval && !approveActive\)\}/)
+  assert.match(dialog, /Each still needs\s+its own authorization/)
+  assert.match(client, /\/credential-profiles\/\$\{pathSegment\(profileId\)\}\/grants/)
+})
+
+test('a share names the target as it is and only offers targets the credential can authenticate to', () => {
+  const dialog = fs.readFileSync(path.join(root, 'src/components/credentials/ShareCredentialDialog.tsx'), 'utf8')
+  // Soak N6: every share was sent as `network`, and a web basic-auth profile was offered and
+  // granted to an SSH-only device. The kind comes from the asset, and the protocol must fit.
+  assert.doesNotMatch(dialog, /id: asset\.id, kind: 'network'/)
+  assert.match(dialog, /kind: httpOrigin \? 'web' : asset\.connected_device \? 'device' : 'network'/)
+  assert.match(dialog, /servesHttp: httpOrigin \|\| \(asset\.origin_count \?\? 0\) > 0\s*\|\| \(\(asset\.service_count \?\? 0\) > 0 \? false : undefined\)/)
+  assert.match(dialog, /if \(authKind\.startsWith\('ssh_'\)\) return target\.kind === 'network' \|\| target\.kind === 'device'/)
+  assert.match(dialog, /return target\.servesHttp !== false/)
+  assert.match(dialog, /protocolFits\(profile\.auth_kind, target\)/)
+})
+
+test('credential target pickers search the server instead of loading every target', () => {
+  const dialog = fs.readFileSync(path.join(root, 'src/components/credentials/ShareCredentialDialog.tsx'), 'utf8')
+  // 2.11: the page loaded the whole inventory (500 per request, every page) before rendering.
+  assert.doesNotMatch(page, /getAllTargetAssets/)
+  // Web and API credentials search web apps only; the other kinds search every target.
+  assert.match(page, /useTargetSearch\(\{ includeServices: true, webOnly: targetKind === 'web' \|\| targetKind === 'api' \}\)/)
+  assert.match(page, /onQueryChange=\{targetSearch\.setQuery\}/)
+  // A link by URL is resolved by a host search read page by page (bounded) for its origin
+  // (behaviour: resolveTargetByOrigin in targetSearchModel.test.mjs); a link by id is read directly.
+  assert.match(page, /resolveTargetByOrigin\(\{\s*url: requested\.href,\s*signal: controller\.signal,/)
+  assert.match(page, /search: requested\.host, limit: LIST_V1_MAX_LIMIT, includeServices: true, webOnly: true, position,/)
+  assert.match(page, /else if \(result\.status === 'unconfirmed'\) setUnconfirmedTarget\(/)
+  // A failed read is shown as one, never as a target that does not exist.
+  assert.match(page, /else if \(result\.status === 'failed'\) setUnconfirmedTarget\(\{url: requestedUrl, scanned: result\.scanned, failure:/)
+  assert.doesNotMatch(page, /\.catch\(\(\) => \{ if \(!controller\.signal\.aborted\) setMissingTarget\(requestedUrl\)/)
+  assert.match(page, /getTargetAsset\(targetId\)/)
+  // A selection still being read keeps the profiles loading instead of showing none.
+  assert.match(page, /if \(resolvingTarget\) setProfilesLoading\(true\)/)
+  // The share dialog searches inside itself, and still offers only fitting targets.
+  assert.match(dialog, /useTargetSearch\(\{ includeServices: true, enabled: Boolean\(profile\)/)
+  assert.match(dialog, /onQueryChange=\{targetSearch\.setQuery\}/)
+  assert.doesNotMatch(dialog, /targets: ShareTargetChoice\[\]/)
+})

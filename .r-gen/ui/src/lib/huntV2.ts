@@ -1,0 +1,408 @@
+import { pathSegment, queryString } from './apiPath.mjs'
+import type { DeviceAgentShellPlan } from './api'
+import { API_URL, getApiErrorMessage } from './apiConfig'
+import {
+  HUNT_START_CONTRACT,
+  type HuntBudgetProfile,
+  type HuntTargetKind,
+} from './huntContract.generated'
+import type { StartHuntHuntsPostRequest } from './publicApi.generated'
+
+export type { HuntBudgetProfile, HuntTargetKind } from './huntContract.generated'
+
+export interface HuntActionV2 {
+  action_id: string
+  capability_name: string
+  status: 'reserved' | 'running' | 'completed' | 'blocked' | 'cancelled' | 'failed' | 'partial'
+  input_digest?: string | null
+  idempotency_key_sha256?: string | null
+  receipt_id?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  result: {
+    ok: boolean
+    partial: boolean
+    timed_out: boolean
+    observation_count: number
+    budget_consumed: Record<string, number>
+    budget_accounting: {
+      schema_version: 'hunt-budget-settlement/v1'
+      basis: 'exact_settlement' | 'conservative_settlement' | 'refused_at_admission' | 'refused_before_execution' | 'settlement_failed' | 'no_reservation' | 'legacy_reported_charge'
+      settlement_status: string
+      reservation_id?: string | null
+      charge_basis: 'capability_reported_settlement' | 'conservative_full_reservation' | 'not_charged' | 'legacy_unknown' | string
+      reserved: Record<string, number>
+      actual: Record<string, number>
+      released: Record<string, number>
+      overspent: Record<string, number>
+      used_after_reconciliation: Record<string, number>
+    }
+    reference_ids: {
+      scan_ids: string[]
+      finding_ids: string[]
+      candidate_ids: string[]
+      evidence_ids: string[]
+    }
+  }
+}
+
+export interface HuntSavedLogin {
+  saved_login: string
+  profile_version: number
+  principal_label: string | null
+  auth_kind: string | null
+  login_url: string
+  logins_allowed: number
+  logins_used: number
+  logins_left: number
+  usable: boolean
+  attached_by: string
+}
+
+export interface HuntV2 {
+  hunt_id: string
+  target_kind: 'web' | 'api' | 'device' | 'network'
+  target_id: string
+  objective: string
+  status: 'created' | 'active' | 'awaiting_planner' | 'completed' | 'cancelled' | 'failed' | 'budget_exhausted'
+  budget_profile: 'fast' | 'balanced' | 'thorough'
+  policy: Record<string, unknown>
+  policy_adjustments?: string[]
+  budget: Record<string, number>
+  budget_revision?: number
+  budget_amendable_dimensions?: string[]
+  budget_amendments_url?: string
+  budget_used: Record<string, number>
+  /** Saved logins a person attached: reference, label and login URL, never a value. */
+  saved_logins?: {
+    attached: HuntSavedLogin[]
+    available: Array<{saved_login: string; profile_version: number; principal_label: string | null; auth_kind: string}>
+    how_to_use?: string | null
+  }
+  context_pack?: Record<string, unknown>
+  target_skill?: import('./targetSkillApi').TargetSkillSnapshot | null
+  capabilities?: Array<{
+    name: string
+    description: string
+    tool?: {name: string; binary: string | null; adapter: string; alternate_adapters: string[]}
+    risk_tier: string
+    input_schema: Record<string, unknown>
+    budget_cost: Record<string, number>
+  }>
+  actions?: HuntActionV2[]
+  outcome_summary?: {
+    schema_version: 'hunt-outcome-summary/v2' | 'hunt-outcome-summary/v3'
+    capability_calls: number
+    total_capability_calls: number
+    attempted_calls?: number
+    executed_calls?: number
+    rejected_calls?: number
+    other_calls?: number
+    successful_calls?: number
+    unsuccessful_calls?: number
+    indeterminate_calls?: number
+    partial_calls?: number
+    action_statuses: Record<string, number>
+    observation_count: number
+    finding_ids: string[]
+    finding_count?: number
+    finding_ids_truncated?: boolean
+    candidate_ids: string[]
+    evidence_ids: string[]
+  }
+  final_debrief?: {
+    summary?: string
+    next_actions?: string[]
+    saved_action?: {
+      // 'saved' appears only on debriefs written before finishing became proposal-only.
+      status: 'proposed' | 'updated' | 'unchanged' | 'skipped' | 'not_saved' | 'saved'
+      action_id?: string
+      proposal_id?: string
+      step_count?: number
+      added_steps?: number
+      reason?: string
+    }
+  }
+  stop_reason?: string | null
+  queued_scan?: { scan_id: string; job_id?: string; status: string; ui_url?: string }
+  created_at?: string
+  updated_at?: string
+  completed_at?: string | null
+  // Resolved by the list query's join; absent on a single-run read, where the caller
+  // already knows which target it asked about.
+  target_url?: string | null
+  target_name?: string | null
+  root_domain?: string | null
+  skills?: Array<{
+    skill_id: string
+    title: string
+    version?: string
+    body_sha256?: string
+    phase?: string
+    requested: boolean
+  }>
+  skill_activity?: HuntSkillActivity[]
+}
+
+export interface HuntSkillSuggestion {
+  skill_id: string
+  title: string
+  reason: string
+  methodology_url: string
+  bind_url: string
+  auto_bound: false
+}
+
+export interface HuntSkillSuggestions {
+  hunt_id: string
+  catalog_url: string
+  suggestions: HuntSkillSuggestion[]
+  count: number
+  signals_considered: number
+  methodology_bodies_loaded: 0
+  advisory_only: true
+}
+
+export interface HuntSkillActivity {
+  event_id: string
+  skill_id: string
+  event_type: 'read' | 'bound' | 'selection_removed' | 'unbound' | 'used' | 'completed' | 'deferred'
+  skill_version: string
+  body_sha256: string
+  reason?: string | null
+  evidence_refs: string[]
+  action_id?: string | null
+  created_at?: string
+}
+
+export interface HuntStartV2Request {
+  targetId: string
+  targetKind: HuntTargetKind
+  goal: string
+  budgetProfile: HuntBudgetProfile
+  budgets?: Record<string, number>
+  policy: {
+    activeTesting: boolean
+    allowStateChangingHttp: boolean
+    networkDiscovery: boolean
+    allowOobInteractions: boolean
+    authorizationConfirmed: boolean
+    approvalReceiptId?: string
+    scopeReceiptId?: string
+  }
+  credentialRefs?: Record<string, string>
+  capabilities?: string[]
+  requestCollectionIds?: string[]
+  /** Findings of this target the Hunt starts from: its briefing opens with them. */
+  seedFindingIds?: string[]
+}
+
+export async function startHuntV2Native(request: HuntStartV2Request): Promise<HuntV2> {
+  const payload: StartHuntHuntsPostRequest = {
+    schema_version: HUNT_START_CONTRACT.schema_version,
+    target_id: request.targetId,
+    target_kind: request.targetKind,
+    goal: request.goal,
+    budget_profile: request.budgetProfile,
+    budgets: request.budgets || {},
+    policy: {
+      active_testing: request.policy.activeTesting,
+      allow_state_changing_http: request.policy.allowStateChangingHttp,
+      network_discovery: request.policy.networkDiscovery,
+      allow_oob_interactions: request.policy.allowOobInteractions,
+      authorization_confirmed: request.policy.authorizationConfirmed,
+      approval_receipt_id: request.policy.approvalReceiptId || undefined,
+      scope_receipt_id: request.policy.scopeReceiptId || undefined,
+    },
+    credential_refs: request.credentialRefs || {},
+    capabilities: request.capabilities || [],
+    request_collection_ids: request.requestCollectionIds || [],
+    ...(request.seedFindingIds?.length ? { seed_finding_ids: request.seedFindingIds } : {}),
+  }
+  const response = await fetch(`${API_URL}/hunts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Hunt start failed (${response.status})`))
+  const contract = response.headers.get('x-shakerscan-hunt-contract')
+  if (contract !== 'v2') {
+    throw new Error(`Server did not admit the Hunt through the V2 contract (${contract || 'missing'})`)
+  }
+  return response.json()
+}
+
+export async function getHuntV2(huntId: string): Promise<HuntV2> {
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}`)
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to load Hunt (${response.status})`))
+  return response.json()
+}
+
+export interface HuntPermissionRequestRow {
+  id: string
+  kind?: string
+  title?: string
+  status?: string
+  decided_by?: string | null
+  decision_via?: string | null
+  decided_at?: string | null
+}
+
+/** Every permission request of this Hunt, pending and decided (the run record lists only pending). */
+export async function listHuntPermissionRequests(huntId: string): Promise<HuntPermissionRequestRow[]> {
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}/permission-requests`)
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to load permission requests (${response.status})`))
+  const body = await response.json()
+  return Array.isArray(body?.requests) ? body.requests : []
+}
+
+export async function suggestHuntSkills(
+  huntId: string,
+  signals: string[] = [],
+): Promise<HuntSkillSuggestions> {
+  const response = await fetch(
+    `${API_URL}/hunts/${pathSegment(huntId)}/skills/suggestions`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signals }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to suggest Hunt methodologies (${response.status})`))
+  }
+  return response.json()
+}
+
+export async function bindHuntSkill(
+  huntId: string,
+  skillId: string,
+  reason: string,
+): Promise<HuntV2> {
+  const response = await fetch(
+    `${API_URL}/hunts/${pathSegment(huntId)}/skills/${pathSegment(skillId)}/bind`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason, evidence_refs: [] }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to apply Hunt methodology (${response.status})`))
+  }
+  return response.json()
+}
+
+export async function unbindHuntSkill(huntId: string, skillId: string): Promise<HuntV2> {
+  const response = await fetch(
+    `${API_URL}/hunts/${pathSegment(huntId)}/skills/${pathSegment(skillId)}`,
+    { method: 'DELETE' },
+  )
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to remove Hunt methodology (${response.status})`))
+  }
+  return response.json()
+}
+
+export type HuntSortField =
+  | 'created_at' | 'updated_at' | 'completed_at' | 'status' | 'objective' | 'target_url'
+
+export interface HuntListParams {
+  targetId?: string
+  status?: HuntV2['status']
+  targetKind?: HuntTargetKind
+  budgetProfile?: HuntBudgetProfile
+  rootDomain?: string
+  search?: string
+  sortBy?: HuntSortField
+  sortOrder?: 'asc' | 'desc'
+  limit?: number
+  offset?: number
+}
+
+export interface HuntListResult {
+  hunts: HuntV2[]
+  count: number
+  // Rows matching the filter before paging, so a view can say "51-100 of 240".
+  total: number
+  limit: number
+  offset: number
+}
+
+export async function listHuntsV2(params: HuntListParams = {}): Promise<HuntListResult> {
+  const search = new URLSearchParams()
+  if (params.targetId) search.set('target_id', params.targetId)
+  if (params.status) search.set('status', params.status)
+  if (params.targetKind) search.set('target_kind', params.targetKind)
+  if (params.budgetProfile) search.set('budget_profile', params.budgetProfile)
+  if (params.rootDomain) search.set('root_domain', params.rootDomain)
+  if (params.search) search.set('search', params.search)
+  if (params.sortBy) search.set('sort_by', params.sortBy)
+  if (params.sortOrder) search.set('sort_order', params.sortOrder)
+  if (params.limit) search.set('limit', String(params.limit))
+  if (params.offset) search.set('offset', String(params.offset))
+  const response = await fetch(`${API_URL}/hunts${queryString(search)}`, { cache: 'no-store' })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to list Hunts (${response.status})`))
+  const payload = await response.json()
+  // Older servers returned neither total nor offset; fall back to what was returned so a
+  // page renders rather than showing "undefined of undefined".
+  return {
+    hunts: payload.hunts || [],
+    count: payload.count ?? (payload.hunts || []).length,
+    total: payload.total ?? payload.count ?? (payload.hunts || []).length,
+    limit: payload.limit ?? params.limit ?? 50,
+    offset: payload.offset ?? params.offset ?? 0,
+  }
+}
+
+export async function cancelHuntV2(huntId: string): Promise<HuntV2> {
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}/cancel`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to cancel Hunt (${response.status})`))
+  return response.json()
+}
+
+export async function resumeHuntV2(huntId: string): Promise<HuntV2> {
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}/resume`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to resume Hunt (${response.status})`))
+  return response.json()
+}
+
+export interface HuntBudgetAmendmentInput {
+  limits: Record<string, number>
+  expected_revision: number
+  idempotency_key: string
+  operator_confirmed: true
+  resume?: boolean
+  reason?: string
+}
+
+export async function amendHuntBudget(huntId: string, request: HuntBudgetAmendmentInput): Promise<{
+  budget_revision: number; status: HuntV2['status']; replayed: boolean; device_traffic_frozen: boolean
+}> {
+  const response = await fetch(`${API_URL}/hunts/${pathSegment(huntId)}/budget-amendments`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ schema_version: 'hunt-budget-amendment/v1', ...request }),
+  })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to extend Hunt budget (${response.status})`))
+  return response.json()
+}
+
+export async function confirmHuntShellPlan(huntId: string, plan: DeviceAgentShellPlan): Promise<HuntV2> {
+  const response = await fetch(
+    `${API_URL}/hunts/${pathSegment(huntId)}/shell-plans/${pathSegment(plan.plan_id)}/confirm`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        plan_digest: plan.plan_digest,
+        confirmation_phrase: plan.confirmation_phrase,
+        confirm_exact_commands: true,
+        confirm_remote_device_effects: true,
+      }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to confirm Hunt SSH shell plan (${response.status})`))
+  }
+  return response.json()
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Interactive Testing"
+  short_description: "Drive manual browser and endpoint testing"
+  default_prompt: "Use $ai-security-session to drive an authorized Interactive Testing session with evidence-first BOLA/IDOR checks and same-origin scope by default."

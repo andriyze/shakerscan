@@ -1,0 +1,558 @@
+"""Worker-only resolution for target-bound V2 credential profiles.
+
+The resolver is deliberately an async context manager: decryption happens only after
+target and approval authority validation, and plaintext references are scrubbed as soon
+as the executable capability leaves the context.  No public representation includes a
+username, token, password, key, header value, or ciphertext.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import tempfile
+from typing import Any, AsyncIterator, Callable, Iterator, Mapping
+import uuid
+
+from .credential_store import (
+    CredentialProfileMetadata,
+    CredentialStoreError,
+    PostgresCredentialProfileStore,
+)
+from .credentials import (
+    CredentialContractError,
+    IMMEDIATE_HTTP_HEADER_KINDS,
+    immediate_http_headers,
+    parse_credential_secret,
+)
+from .models import TargetBinding
+from .approval_policy import approval_covers_risk, is_standing_target_authorization
+
+try:
+    from secret_store import SecretStoreUnavailable, decrypt_secret
+except ModuleNotFoundError:
+    from api.secret_store import SecretStoreUnavailable, decrypt_secret
+
+
+class CredentialResolutionError(RuntimeError):
+    """Credential authority, ciphertext, or decrypted material failed closed."""
+
+
+@dataclass(frozen=True)
+class CredentialResolutionAuthority:
+    owner_kind: str
+    owner_id: str
+    credential_access_allowed: bool
+    approval_validated: bool
+    approval_receipt_id: str | None
+    scope_receipt_id: str | None
+
+    def validate(self, target: TargetBinding) -> None:
+        if self.owner_kind not in {"scan", "hunt", "validation"} or not str(self.owner_id or "").strip():
+            raise CredentialResolutionError("credential owner authority is invalid")
+        if not self.credential_access_allowed:
+            raise CredentialResolutionError("credential access is not allowed by policy")
+        if not self.approval_validated or not str(self.approval_receipt_id or "").strip():
+            raise CredentialResolutionError(
+                "credential access requires a validated target-bound approval"
+            )
+        scope_id = str(self.scope_receipt_id or "").strip()
+        target_scope_id = str(target.scope_receipt_id or "").strip()
+        if not scope_id or not target_scope_id or scope_id != target_scope_id:
+            raise CredentialResolutionError(
+                "credential approval scope does not match the target binding"
+            )
+
+
+async def _derived_receipt_outlived_its_source(conn: Any, item: Any, target: TargetBinding) -> bool:
+    try:
+        from target_authorization import (
+            derived_credential_scan_context,
+            derived_credential_scan_source_is_current,
+        )
+    except ModuleNotFoundError:
+        from ..target_authorization import (
+            derived_credential_scan_context,
+            derived_credential_scan_source_is_current,
+        )
+    if derived_credential_scan_context(item) is None:
+        return False
+    return not await derived_credential_scan_source_is_current(
+        conn, item, expected_target_id=target.target_id or None,
+    )
+
+
+async def validate_worker_credential_authority(
+    conn: Any,
+    *,
+    owner_kind: str,
+    owner_id: str,
+    target: TargetBinding,
+    approval_receipt_id: Any,
+    scope_receipt_id: Any,
+    action_name: str,
+) -> CredentialResolutionAuthority:
+    """Reload approval and scope rows on the worker immediately before decryption."""
+    try:
+        approval_uuid = uuid.UUID(str(approval_receipt_id or ""))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise CredentialResolutionError("credential approval receipt is invalid") from exc
+    scope_id = str(scope_receipt_id or "").strip()
+    if not scope_id or scope_id != str(target.scope_receipt_id or "").strip():
+        raise CredentialResolutionError(
+            "credential approval scope does not match the target binding"
+        )
+    row = await conn.fetchrow(
+        """SELECT a.scope_receipt_id, a.risk_tier, a.confirmations, a.approved_by,
+                  a.denial_reason, a.expires_at, a.action_name, a.status, a.revoked_at,
+                  a.action_context, s.target_id, s.verdict
+           FROM approval_receipts a
+           JOIN scope_receipts s ON s.id=a.scope_receipt_id
+           WHERE a.id=$1""",
+        approval_uuid,
+    )
+    if not row:
+        raise CredentialResolutionError("credential approval receipt is unavailable")
+    item = dict(row)
+    # Revocation is the one authority change that lands AFTER a job is queued, and it writes only
+    # status/revoked_at -- leaving approver, confirmations, denial state and expiry all still
+    # looking valid. This reload is the last gate before decryption, so it is where a revoked
+    # receipt has to be refused; every other field here would happily authorize it.
+    approval_status = str(item.get("status") or "").strip().lower()
+    if not approval_status:
+        # approval_receipts.status is NOT NULL DEFAULT 'active', so an absent value means the row
+        # was not read as expected. Unknown authority is unsafe, not safe.
+        raise CredentialResolutionError("credential approval authority is unavailable")
+    if approval_status != "active" or item.get("revoked_at") is not None:
+        raise CredentialResolutionError("credential approval receipt is revoked or inactive")
+    if (
+        not item.get("approved_by")
+        or item.get("denial_reason")
+        or not approval_covers_risk(item, "credential")
+    ):
+        raise CredentialResolutionError("credential approval receipt does not authorize access")
+    expires_at = item.get("expires_at")
+    standing = is_standing_target_authorization(item)
+    if expires_at is None and not standing:
+        raise CredentialResolutionError("credential approval receipt requires a bounded expiry")
+    if expires_at is not None:
+        if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
+            raise CredentialResolutionError("credential approval receipt has an invalid expiry")
+        if expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+            raise CredentialResolutionError("credential approval receipt is expired")
+    raw_confirmations = item.get("confirmations") or []
+    if isinstance(raw_confirmations, str):
+        try:
+            raw_confirmations = json.loads(raw_confirmations)
+        except json.JSONDecodeError as exc:
+            raise CredentialResolutionError(
+                "credential approval confirmations are invalid"
+            ) from exc
+    confirmations = {
+        str(value) for value in raw_confirmations if isinstance(value, str)
+    }
+    if "confirm_authorized" not in confirmations:
+        raise CredentialResolutionError(
+            "credential approval is missing confirm_authorized"
+        )
+    if str(item.get("verdict") or "") == "blocked":
+        raise CredentialResolutionError("credential approval scope is blocked")
+    if (
+        str(item.get("verdict") or "") == "needs_approval"
+        and "confirm_scope_reviewed" not in confirmations
+    ):
+        raise CredentialResolutionError(
+            "credential approval is missing confirm_scope_reviewed"
+        )
+    if str(item.get("scope_receipt_id") or "") != scope_id:
+        raise CredentialResolutionError("credential approval scope changed")
+    if str(item.get("target_id") or "") != target.target_id:
+        try:
+            from targets.asset_authority import standing_authorization_matches_target
+        except ModuleNotFoundError:
+            from ..targets.asset_authority import standing_authorization_matches_target
+        inherited = standing and await standing_authorization_matches_target(conn,
+            target_id=target.target_id,scope_target_id=item.get("target_id"),
+            approval_receipt_id=approval_uuid)
+        if not inherited:
+            raise CredentialResolutionError("credential approval target changed")
+    if await _derived_receipt_outlived_its_source(conn, item, target):
+        # A credential-tier receipt derived for one Scan from the target's standing
+        # authorization ends with that authorization, whether or not a revocation reached it.
+        raise CredentialResolutionError(
+            "credential approval receipt's source authorization no longer stands"
+        )
+    receipt_action = str(item.get("action_name") or "").strip()
+    expected_action = str(action_name or "").strip()
+    if not expected_action:
+        raise CredentialResolutionError("credential capability action is invalid")
+    if receipt_action and receipt_action != expected_action and not standing:
+        raise CredentialResolutionError("credential approval action changed")
+    return CredentialResolutionAuthority(
+        owner_kind=owner_kind,
+        owner_id=owner_id,
+        credential_access_allowed=True,
+        approval_validated=True,
+        approval_receipt_id=str(approval_uuid),
+        scope_receipt_id=scope_id,
+    )
+
+
+@dataclass(frozen=True, repr=False)
+class SecretHTTPHeaders:
+    values: Mapping[str, str] = field(repr=False)
+
+    def __repr__(self) -> str:
+        return f"SecretHTTPHeaders(names={sorted(self.values)}, values_visible=False)"
+
+    def as_dict(self) -> dict[str, str]:
+        return dict(self.values)
+
+
+@dataclass(frozen=True, repr=False)
+class SecretQueryParameter:
+    name: str
+    value: str = field(repr=False)
+
+    def __repr__(self) -> str:
+        return f"SecretQueryParameter(name={self.name!r}, value_visible=False)"
+
+
+@dataclass(frozen=True, repr=False)
+class ImmediateHTTPCredential:
+    auth_kind: str
+    secret: str | None = field(repr=False)
+    username: str | None = field(repr=False)
+    header_name: str | None
+    custom_headers: Mapping[str, str] = field(repr=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"ImmediateHTTPCredential(auth_kind={self.auth_kind!r}, "
+            f"header_name={self.header_name!r}, "
+            f"custom_header_names={sorted(self.custom_headers)}, "
+            "values_visible=False)"
+        )
+
+
+@dataclass(frozen=True, repr=False)
+class InteractiveHTTPCredential:
+    auth_kind: str
+    username: str | None = field(repr=False)
+    secret: str = field(repr=False)
+    endpoint_url: str
+    client_id: str | None = field(repr=False)
+    scopes: tuple[str, ...]
+
+    def __repr__(self) -> str:
+        return (
+            f"InteractiveHTTPCredential(auth_kind={self.auth_kind!r}, "
+            f"endpoint_configured={bool(self.endpoint_url)}, scope_count={len(self.scopes)}, "
+            "values_visible=False)"
+        )
+
+
+@dataclass(frozen=True, repr=False)
+class SSHPasswordCredential:
+    username: str = field(repr=False)
+    password: str = field(repr=False)
+
+    def __repr__(self) -> str:
+        return "SSHPasswordCredential(username_configured=True, values_visible=False)"
+
+
+@dataclass(frozen=True, repr=False)
+class SSHPrivateKeyCredential:
+    username: str = field(repr=False)
+    private_key_path: str
+    passphrase: str | None = field(repr=False)
+
+    def __repr__(self) -> str:
+        return (
+            "SSHPrivateKeyCredential(username_configured=True, "
+            f"private_key_path={self.private_key_path!r}, "
+            f"passphrase_configured={bool(self.passphrase)}, values_visible=False)"
+        )
+
+
+@dataclass(repr=False)
+class ResolvedCredential:
+    profile: CredentialProfileMetadata
+    authority: CredentialResolutionAuthority
+    _material: dict[str, Any] = field(repr=False)
+    _temporary_root: str = field(repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"ResolvedCredential(profile_id={self.profile.profile_id!r}, "
+            f"auth_kind={self.profile.auth_kind!r}, version={self.profile.current_version}, "
+            f"closed={self._closed}, values_visible=False)"
+        )
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise CredentialResolutionError("resolved credential is closed")
+
+    def http_workflow_value(self, field_name: str) -> str:
+        """One explicitly bound HTTP field, never a planner-visible secret export."""
+        self._require_open()
+        if self.profile.auth_kind not in IMMEDIATE_HTTP_HEADER_KINDS | {
+            "query_parameter", "form_login", "json_login", "oauth_client_credentials", "oauth_password",
+        } or field_name not in {"secret", "username", "client_id"}:
+            raise CredentialResolutionError("credential field is not available to an HTTP workflow")
+        value = self._material.get(field_name)
+        if not isinstance(value, str) or not value:
+            raise CredentialResolutionError("selected HTTP credential field is unavailable")
+        return value
+
+    def http_headers(self) -> SecretHTTPHeaders:
+        self._require_open()
+        if self.profile.auth_kind not in IMMEDIATE_HTTP_HEADER_KINDS:
+            raise CredentialResolutionError(
+                "credential requires an interactive login or token exchange"
+            )
+        try:
+            return SecretHTTPHeaders(immediate_http_headers(self._material))
+        except CredentialContractError as exc:
+            raise CredentialResolutionError(str(exc)) from exc
+
+    def immediate_http(self) -> ImmediateHTTPCredential:
+        self._require_open()
+        if self.profile.auth_kind not in IMMEDIATE_HTTP_HEADER_KINDS:
+            raise CredentialResolutionError(
+                "credential requires an interactive login or token exchange"
+            )
+        return ImmediateHTTPCredential(
+            auth_kind=self.profile.auth_kind,
+            secret=str(self._material.get("secret") or "") or None,
+            username=str(self._material.get("username") or "") or None,
+            header_name=str(self._material.get("header_name") or "") or None,
+            custom_headers={
+                str(name): str(value)
+                for name, value in dict(
+                    self._material.get("custom_headers") or {}
+                ).items()
+            },
+        )
+
+    def interactive_http(self) -> InteractiveHTTPCredential:
+        self._require_open()
+        if self.profile.auth_kind not in {
+            "form_login", "oauth_client_credentials", "oauth_password", "json_login",
+        }:
+            raise CredentialResolutionError("credential is not an interactive HTTP profile")
+        return InteractiveHTTPCredential(
+            auth_kind=self.profile.auth_kind,
+            username=str(self._material.get("username") or "") or None,
+            secret=str(self._material.get("secret") or ""),
+            endpoint_url=str(self._material.get("endpoint_url") or ""),
+            client_id=str(self._material.get("client_id") or "") or None,
+            scopes=tuple(str(item) for item in self._material.get("scopes") or ()),
+        )
+
+    def browser_login_configuration(self) -> dict[str, Any]:
+        """Worker-private saved workflow; never include it in receipt metadata."""
+        self._require_open()
+        from .browser_login_contract import normalize_browser_login_profile
+        try:
+            return normalize_browser_login_profile(self._material.get("browser_login"))
+        except ValueError:
+            raise CredentialResolutionError("managed profile has no valid browser login workflow") from None
+
+    def query_parameter(self) -> SecretQueryParameter:
+        self._require_open()
+        if self.profile.auth_kind != "query_parameter":
+            raise CredentialResolutionError(
+                "credential is not a query-parameter profile"
+            )
+        name = str(self._material.get("parameter_name") or "")
+        value = str(self._material.get("secret") or "")
+        if not name or not value:
+            raise CredentialResolutionError(
+                "query-parameter credential material is incomplete"
+            )
+        return SecretQueryParameter(name=name, value=value)
+
+    def ssh_password(self) -> SSHPasswordCredential:
+        self._require_open()
+        if self.profile.auth_kind != "ssh_password":
+            raise CredentialResolutionError("credential is not an SSH password profile")
+        return SSHPasswordCredential(
+            username=str(self._material.get("username") or ""),
+            password=str(self._material.get("secret") or ""),
+        )
+
+    @contextmanager
+    def ssh_private_key(self) -> Iterator[SSHPrivateKeyCredential]:
+        self._require_open()
+        if self.profile.auth_kind not in {
+            "ssh_private_key", "ssh_private_key_with_passphrase",
+        }:
+            raise CredentialResolutionError("credential is not an SSH private-key profile")
+        root = Path(self._temporary_root)
+        if not root.is_dir() or root.is_symlink():
+            raise CredentialResolutionError("worker credential temporary directory is unavailable")
+        descriptor, path = tempfile.mkstemp(prefix="credential-", suffix=".key", dir=str(root))
+        try:
+            os.fchmod(descriptor, 0o600)
+            key = str(self._material.get("secret") or "").encode("utf-8")
+            with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                descriptor = -1
+                handle.write(key)
+                handle.flush()
+                os.fsync(handle.fileno())
+            yield SSHPrivateKeyCredential(
+                username=str(self._material.get("username") or ""),
+                private_key_path=path,
+                passphrase=str(self._material.get("secondary_secret") or "") or None,
+            )
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            try:
+                size = os.path.getsize(path)
+                with open(path, "r+b", buffering=0) as handle:
+                    handle.write(b"\0" * size)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError:
+                pass
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def receipt_metadata(self) -> dict[str, Any]:
+        return {
+            "principal_profile_ref": self.profile.profile_id,
+            "principal_profile_version": self.profile.current_version,
+            "auth_kind": self.profile.auth_kind,
+            "principal_slot": self.profile.principal_slot,
+            "principal_label": self.profile.principal_label,
+            "target_kind": self.profile.target_kind,
+            # Which target's grant the credential was used through, and whether it is shared
+            # from another (home) target: the audit trail for one-to-many credentials.
+            "credential_home_target_id": self.profile.target_id,
+            "credential_granted_target_id": self.profile.granted_target_id,
+            "approval_receipt_id": self.authority.approval_receipt_id,
+            "scope_receipt_id": self.authority.scope_receipt_id,
+            "secret_values_visible": False,
+        }
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        for key, value in list(self._material.items()):
+            if isinstance(value, dict):
+                value.clear()
+            elif isinstance(value, list):
+                value.clear()
+            self._material[key] = None
+        self._material.clear()
+        self._closed = True
+
+
+class WorkerCredentialResolver:
+    def __init__(
+        self,
+        *,
+        store: PostgresCredentialProfileStore | None = None,
+        decryptor: Callable[[Any], Any] = decrypt_secret,
+        temporary_root: str | None = None,
+    ) -> None:
+        self._store = store or PostgresCredentialProfileStore()
+        self._decryptor = decryptor
+        self._temporary_root = os.path.realpath(
+            temporary_root
+            or os.environ.get("SHAKERSCAN_CREDENTIAL_TMP_DIR")
+            or tempfile.gettempdir()
+        )
+
+    def _decrypt(self, value: Any, *, name: str) -> str:
+        try:
+            decrypted = self._decryptor(value)
+        except SecretStoreUnavailable as exc:
+            raise CredentialResolutionError("credential decryption is unavailable") from exc
+        except Exception as exc:
+            raise CredentialResolutionError(f"{name} could not be decrypted") from exc
+        result = str(decrypted or "")
+        if not result or result.startswith("enc:fernet:"):
+            raise CredentialResolutionError(f"{name} could not be decrypted")
+        return result
+
+    @asynccontextmanager
+    async def resolve(
+        self,
+        conn: Any,
+        *,
+        profile_id: Any,
+        target: TargetBinding,
+        capability: str,
+        authority: CredentialResolutionAuthority,
+        expected_version: int | None = None,
+        expected_record_version: int | None = None,
+        expected_principal_slot: str | None = None,
+    ) -> AsyncIterator[ResolvedCredential]:
+        # Authority is checked before even looking up the profile, and decryption comes
+        # only after the exact target-bound query succeeds.
+        authority.validate(target)
+        try:
+            stored = await self._store.load_for_worker(
+                conn,
+                profile_id=profile_id,
+                target_kind=target.target_kind,
+                target_id=target.target_id,
+                capability=capability,
+                # A Hunt may use another target's credential a person allowed for it alone.
+                hunt_run_id=authority.owner_id if authority.owner_kind == "hunt" else None,
+            )
+        except CredentialStoreError as exc:
+            raise CredentialResolutionError(str(exc)) from exc
+        if (
+            (expected_version is not None and (
+                type(expected_version) is not int
+                or expected_version < 1
+                or stored.metadata.current_version != expected_version
+            ))
+            or (expected_record_version is not None and (
+                type(expected_record_version) is not int
+                or expected_record_version < 1
+                or stored.metadata.record_version != expected_record_version
+            ))
+            or (expected_principal_slot is not None
+                and stored.metadata.principal_slot != expected_principal_slot)
+        ):
+            # Compare the exact version returned with the ciphertext, before
+            # decrypting. A separate metadata lookup would leave a rotation race.
+            raise CredentialResolutionError("credential selection changed before decryption")
+        envelope = self._decrypt(stored.encrypted_secret, name="credential secret")
+        private_metadata = self._decrypt(
+            stored.encrypted_metadata, name="credential metadata"
+        )
+        try:
+            material = parse_credential_secret(stored.metadata.auth_kind, envelope)
+            metadata = json.loads(private_metadata)
+        except (CredentialContractError, json.JSONDecodeError) as exc:
+            raise CredentialResolutionError("decrypted credential envelope is invalid") from exc
+        if not isinstance(metadata, Mapping) or metadata.get("schema_version") != (
+            "credential-private-metadata/v1"
+        ):
+            raise CredentialResolutionError("decrypted credential metadata is invalid")
+        resolved = ResolvedCredential(
+            profile=stored.metadata,
+            authority=authority,
+            _material=material,
+            _temporary_root=self._temporary_root,
+        )
+        try:
+            yield resolved
+        finally:
+            resolved.close()

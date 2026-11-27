@@ -1,0 +1,10 @@
+{
+  "_note": "Expected vulnerability FAMILIES and auth states for miss-analysis. No challenge names, routes, or solutions are encoded.",
+  "profile": "crapi",
+  "families": {
+    "bola": {"min_severity": "high", "min_confirmed": 1},
+    "mass_assignment": {"min_severity": "high", "min_confirmed": 1},
+    "jwt": {"min_severity": "high", "min_confirmed": 1}
+  },
+  "auth_states": ["user1", "user2"]
+}

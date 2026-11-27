@@ -1,0 +1,436 @@
+"""One integrated captured-request -> approval -> canonical action -> resume path.
+
+No network calls are made by propose/read/skip. Approval dispatches authz.verify
+through the existing Hunt lifecycle. Durable attempt links are written first;
+outcomes are read back from canonical actions, never accepted from the client.
+"""
+from __future__ import annotations
+
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
+from typing import Any, Awaitable, Callable, Mapping
+from urllib.parse import urlsplit
+import uuid
+
+from .authorization_evidence import (
+    AuthorizationWorkflowError, attributed_outcome, canonical_action_id,
+    digest, mapping, request_identity, supported_capture, _origin,
+)
+from .authorization_repository import (
+    ATTEMPT_TYPE, DECISION_TYPE, MAX_ATTEMPTS, PROPOSAL_TYPE,
+    PostgresAuthorizationRepository, uid, asset_id,
+)
+from .authorization_workflow import CapturedRequest, investigate
+from .investigation_memory import Experiment, InMemoryGraphStore, InvestigationMemory
+from .authorization_selected import capability_input, selected_object_pair
+
+
+Executor = Callable[[str, str, Mapping[str, Any]], Awaitable[Mapping[str, Any]]]
+ProofURL = Callable[..., str]
+TERMINAL_ACTION_STATES = frozenset({"completed", "partial", "failed", "blocked", "cancelled"})
+
+
+def _active(run: Mapping[str, Any]) -> None:
+    if run.get("status") not in {"active", "awaiting_planner"}:
+        raise AuthorizationWorkflowError("This Hunt is not active; existing investigations remain readable")
+
+
+def _target_context(run: Mapping[str, Any]) -> dict[str, Any]:
+    context = mapping(run.get("context_pack"))
+    target = mapping(context.get("target"))
+    if not target.get("origins"):
+        from urllib.parse import urlunsplit
+        locator = str(target.get("url") or target.get("locator") or "").strip()
+        if not locator:
+            raise AuthorizationWorkflowError("This Hunt has no frozen HTTP origins")
+        if "://" not in locator:
+            locator = "http://" + (f"[{locator}]" if ":" in locator and not locator.startswith("[") else locator)
+        parsed = urlsplit(locator)
+        target = {**target, "origins": [urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))]}
+    return {"target": target, "addresses": context.get("authorized_target_addresses", [])}
+
+
+#: A latest attempt with one of these outcomes settles an investigation; anything else leaves it open.
+SETTLED_OUTCOMES = frozenset({"supported", "refuted"})
+
+
+async def attempt_views(repo: PostgresAuthorizationRepository, conn: Any, run: Mapping[str, Any],
+                        proposal: Mapping[str, Any], *, latest_only: bool = False) -> list[dict[str, Any]]:
+    """Each attempt's outcome, read back from its canonical action and transactions.
+
+    Every persisted attempt binding is checked. ``latest_only`` reads the canonical records of the
+    last attempt alone (one view, or none), which is all a settled/open decision needs.
+    Raises ``AuthorizationWorkflowError`` when a persisted binding is inconsistent.
+    """
+    attempts = await repo.attempts(conn, run, proposal["proposal_id"])
+    for attempt in attempts:
+        if attempt["input_digest"] != proposal["capability_input_sha256"]:
+            raise AuthorizationWorkflowError("The attempt does not match the proposal's bound input")
+    views = []
+    for attempt in attempts[-1:] if latest_only else attempts:
+        action = await repo.action(conn, run, attempt["action_id"])
+        transactions = await repo.transactions(conn, run, attempt["action_id"])
+        outcome = attributed_outcome(proposal, attempt, action, transactions)
+        views.append({"attempt": attempt["attempt"], **outcome})
+    return views
+
+
+def investigation_status(attempts: list[Mapping[str, Any]], deferral_recorded: bool) -> dict[str, bool]:
+    """Deferred and settled, from the attempt views (in order) and whether a skip was recorded.
+
+    A deferral counts only while no attempt exists; an attempt made after a skip is not deferred.
+    """
+    latest = attempts[-1] if attempts else None
+    return {"deferred": bool(deferral_recorded and not attempts), "deferral_recorded": bool(deferral_recorded),
+            "settled": bool(latest and latest["outcome"] in SETTLED_OUTCOMES)}
+
+
+#: Proposals examined per asset; beyond this a count is reported as at least this many.
+MAX_COUNTED_INVESTIGATIONS = 1000
+_UNREADABLE = (AuthorizationWorkflowError, KeyError, TypeError)  # inconsistent persisted records
+
+
+async def asset_investigation_states(conn: Any, *, asset: Any, include_members: bool,
+                                     limit: int = MAX_COUNTED_INVESTIGATIONS,
+                                     repo: PostgresAuthorizationRepository | None = None) -> dict[str, Any]:
+    """Each authorization investigation on one asset, across every Hunt, with its state.
+
+    Each proposal is classified from the same reads as ``AuthorizationInvestigationService.read``:
+    its persisted binding, its latest attempt's canonical action and transactions
+    (``attributed_outcome``) and any recorded skip. States:
+
+    * ``proposed_not_run``: no attempt and no deferral;
+    * ``awaiting_execution``: the latest attempt's canonical action exists and is not finished
+      (reserved, running or awaiting permission);
+    * ``inconclusive``: the latest attempt finished, failed or was never dispatched without a
+      supported or refuted outcome (an undispatched attempt is recovered by approving the same
+      attempt number again);
+    * ``deferred``: skipped with no attempt; ``settled``: latest outcome supported or refuted;
+    * ``needs_review``: the persisted proposal, its Hunt or an attempt binding is inconsistent,
+      so no state can be derived from it.
+
+    Newest first, at most ``limit``; ``at_least`` says more exist. ``include_members`` adds the
+    asset's service members (a host asset's application origins). Database errors propagate.
+    """
+    repo = repo or PostgresAuthorizationRepository()
+    scope = ("target_id IN (SELECT id FROM targets WHERE id=$1 OR asset_owner_id=$1)"
+             if include_members else "target_id=$1")
+    rows = await conn.fetch(
+        f"""SELECT id, attributes->>'hunt_id' AS hunt_id FROM application_graph_nodes
+            WHERE {scope} AND node_type=$2 ORDER BY last_seen_at DESC, id LIMIT $3""",
+        asset, PROPOSAL_TYPE, limit + 1,
+    )
+    runs: dict[str, Any] = {}
+    views: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        view: dict[str, Any] = {"proposal_id": str(row["id"]), "hunt_id": str(row["hunt_id"]),
+                                "outcome": None, "conditions": {}, "evidence_refs": [], "completed_at": None}
+        try:
+            hunt_id = str(row["hunt_id"])
+            if hunt_id not in runs:
+                runs[hunt_id] = await repo.run(conn, hunt_id)
+            run = runs[hunt_id]
+            proposal = await repo.proposal(conn, run, row["id"])
+            attempts = await attempt_views(repo, conn, run, proposal, latest_only=True)
+            status = investigation_status(attempts, await repo.skipped(conn, run, row["id"]))
+            latest = attempts[-1] if attempts else None
+            if not attempts:
+                state = "deferred" if status["deferred"] else "proposed_not_run"
+            elif status["settled"]:
+                state = "settled"
+            elif latest["execution_status"] not in TERMINAL_ACTION_STATES | {"not_dispatched"}:
+                state = "awaiting_execution"
+            else:
+                state = "inconclusive"
+            # The exact conditions this investigation covered: one selected object, one principal pair,
+            # one route and one frozen target context. It says nothing about other objects or principals.
+            view["conditions"] = {
+                "technique": "authz.verify cross-principal replay", "method": "GET",
+                "route": urlsplit(str(proposal.get("public_consumer_url") or "")).path,
+                "objects": ["sha256:" + str(proposal.get("resource_id_sha256"))],
+                "principals": ["primary_session:" + str(proposal.get("primary_session_ref")),
+                               "secondary_session:" + str(proposal.get("secondary_session_ref"))],
+                "inputs": {"baseline_kind": proposal.get("baseline_kind") or "collection",
+                           "expected_access": proposal.get("expected_access") or "unknown",
+                           "proposal_digest": proposal.get("proposal_digest")},
+                "deployment_fingerprint": "target_context_sha256:" + str(proposal.get("target_context_sha256")),
+            }
+            # The exact request the proposal bound (method, URL, body size digest): what a later
+            # observation must repeat to say anything about this result (hunt/authorization_applicability.py).
+            view["capture_sha256"] = proposal.get("capture_sha256")
+            if latest:
+                view.update(outcome=latest.get("outcome"), completed_at=latest.get("completed_at"),
+                            action_id=latest.get("action_id"), transaction_ids=list(latest.get("transaction_ids") or []),
+                            evidence_refs=[ref for ref in (latest.get("action_id"), latest.get("receipt_id")) if ref])
+        except (*_UNREADABLE, ValueError, AttributeError):
+            views.append({**view, "state": "needs_review"})
+            continue
+        views.append({**view, "state": state})
+    return {"investigations": views, "at_least": len(rows) > limit}
+
+
+async def asset_investigation_counts(conn: Any, *, asset: Any, include_members: bool,
+                                     repo: PostgresAuthorizationRepository | None = None) -> dict[str, Any]:
+    """Authorization investigations on one asset, across every Hunt, counted by state
+    (``asset_investigation_states``). ``open`` is proposed_not_run + awaiting_execution +
+    inconclusive."""
+    states = await asset_investigation_states(conn, asset=asset, include_members=include_members, repo=repo)
+    counts = dict.fromkeys(("proposed_not_run", "awaiting_execution", "inconclusive",
+                            "deferred", "settled", "needs_review"), 0)
+    for view in states["investigations"]:
+        counts[view["state"]] += 1
+    return {
+        "open": counts["proposed_not_run"] + counts["awaiting_execution"] + counts["inconclusive"],
+        **counts,
+        "at_least": states["at_least"],
+    }
+
+
+class AuthorizationInvestigationService:
+    def __init__(self, pool: Any, execute: Executor, public_proof_url: ProofURL,
+                 repository: PostgresAuthorizationRepository | None = None) -> None:
+        self.pool = pool
+        self.execute = execute
+        self.public_proof_url = public_proof_url
+        self.repo = repository or PostgresAuthorizationRepository()
+
+    async def _bindings(self, conn: Any, run: Mapping[str, Any], values: Mapping[str, Any]) -> tuple[dict, dict, dict, dict]:
+        primary = await self.repo.session(conn, run, values["primary_session_ref"], "primary")
+        secondary = await self.repo.session(conn, run, values["secondary_session_ref"], "secondary")
+        if (primary["profile_id"] == secondary["profile_id"]
+                or primary["target_binding_digest"] != secondary["target_binding_digest"]):
+            raise AuthorizationWorkflowError("The sessions must use distinct profiles on the same frozen target")
+        capture = await self.repo.capture(conn, run, values["capture_id"])
+        baseline = await self.repo.capture(conn, run, values["baseline_capture_id"])
+        origins = list(_target_context(run)["target"]["origins"])
+        # A capture is evidence, not authority. Validate its selected service
+        # against the admitted asset/policy before accepting the captured origin.
+        if mapping(run.get("policy_json")).get("active_testing") is True:
+            from .target_binding import web_hunt_target
+            from .service_binding import endpoint_target
+            try:
+                binding, _ = web_hunt_target(run, mapping(run.get("context_pack")), mapping(run.get("policy_json")))
+                for captured in (capture, baseline):
+                    binding, _ = endpoint_target(binding, str(captured.get("url") or ""), mapping(run.get("policy_json")))
+            except ValueError as exc:
+                raise AuthorizationWorkflowError(
+                    "The capture's service is not valid for this Hunt's authorized asset", 422,
+                ) from exc
+            origins = list(binding.allowed_origins)
+        path = supported_capture(capture, origins)
+        baseline_path = supported_capture(baseline, origins)
+        if capture.get("principal_slot") != "primary" or baseline.get("principal_slot") != "secondary":
+            raise AuthorizationWorkflowError("Select the primary object request and the secondary principal's baseline capture", 422)
+        # authz.verify reuses session headers, not arbitrary headers/body options
+        # from a captured request. Do not silently claim faithful replay of a
+        # tenant/version/custom-header request that this capability cannot preserve.
+        for captured, session in ((capture, primary), (baseline, secondary)):
+            source = await self.repo.action(conn, run, captured.get("hunt_action_id"))
+            source_input = mapping(mapping(source.get("input_summary")).get("input")) if source else {}
+            if (not source or source.get("capability_name") != "http.request"
+                    or str(source_input.get("session_ref")) != str(session["id"])
+                    or set(source_input) - {"method", "path", "origin", "session_ref", "headers", "body", "timeout_seconds", "max_response_bytes"}
+                    or source_input.get("headers")
+                    or any(source_input.get(key) for key in ("body", "json_body", "request_collection_id", "collection_id", "request_collection_ref"))):
+                raise AuthorizationWorkflowError(
+                    "Use captures from this Hunt's http.request capability with the selected session_ref and no custom headers/body/collection options", 422,
+                )
+        request = CapturedRequest("GET", path, "primary")
+        if not request.addresses_an_object:
+            raise AuthorizationWorkflowError("The selected capture is not a supported identifier-addressed GET", 422)
+        if values.get("baseline_kind") == "own_object":
+            if selected_object_pair([capture["url"], baseline["url"]]) is None:
+                raise AuthorizationWorkflowError("Select two distinct identifier-addressed object GETs in the same origin and collection; no listing is required", 422)
+            if capture.get("status_code") != 200 or baseline.get("status_code") != 200:
+                raise AuthorizationWorkflowError("Selected-object comparison requires HTTP 200 object captures", 422)
+        elif (baseline_path.rstrip("/") != f"/{request.collection}"
+                or _origin(capture["url"]) != _origin(baseline["url"])):
+            raise AuthorizationWorkflowError("The baseline must address the same origin and resource collection as the selected object", 422)
+        return primary, secondary, capture, baseline
+
+    async def propose(self, hunt_id: Any, *, capture_id: Any, baseline_capture_id: Any,
+                      primary_session_ref: Any, secondary_session_ref: Any,
+                      baseline_kind: str = "collection", expected_access: str = "unknown") -> dict[str, Any]:
+        if baseline_kind not in {"collection", "own_object"} or expected_access not in {"unknown", "denied", "allowed"}:
+            raise AuthorizationWorkflowError("Unsupported baseline kind or access expectation", 422)
+        if baseline_kind == "collection" and expected_access != "unknown":
+            raise AuthorizationWorkflowError("Access expectations are supported only by the selected-object comparison", 422)
+        refs = {"capture_id": str(uid(capture_id)), "baseline_capture_id": str(uid(baseline_capture_id)),
+                "primary_session_ref": str(uid(primary_session_ref)), "secondary_session_ref": str(uid(secondary_session_ref))}
+        if baseline_kind == "own_object":
+            refs.update(baseline_kind=baseline_kind, expected_access=expected_access)
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                run = await self.repo.run(conn, hunt_id)
+                _active(run)
+                primary, secondary, capture, baseline = await self._bindings(conn, run, refs)
+                request = CapturedRequest("GET", urlsplit(capture["url"]).path, "primary")
+                # Reuse the proposal semantics. No ownership is inferred from the capture.
+                proposal = investigate(request, available_principals=["primary", "secondary"],
+                                       memory=InvestigationMemory(InMemoryGraphStore(), target_id=asset_id(run)))["proposals"][0]
+                origin = _target_context(run)["target"]["origins"][0]
+                binding = {
+                    "schema_version": "hunt-authorization/v1", "hunt_id": str(run["id"]),
+                    "target_id": str(asset_id(run)), **refs,
+                    "target_context_sha256": digest(_target_context(run)),
+                    "sessions_sha256": digest([primary, secondary]),
+                    "capture_sha256": request_identity(capture), "baseline_sha256": request_identity(baseline),
+                    "resource_id_sha256": keyed_body_digest(request.identifier.encode()),
+                    "public_consumer_url": self.public_proof_url(capture["url"], base_origin=origin, object_id=request.identifier),
+                    "public_baseline_url": self.public_proof_url(baseline["url"], base_origin=origin),
+                    "evidence_needed": list(proposal.evidence_needed),
+                    "capability_input_sha256": digest(capability_input(refs, capture, baseline)),
+                }
+                if baseline_kind == "own_object":
+                    _, own_id = selected_object_pair([capture["url"], baseline["url"]])
+                    binding.update(
+                        baseline_resource_id_sha256=keyed_body_digest(own_id.encode()),
+                        public_baseline_url=self.public_proof_url(baseline["url"], base_origin=origin, object_id=own_id),
+                        evidence_needed=[
+                            "a fresh successful secondary read of its own captured object, not a collection listing",
+                            "the exact selected object read as primary, then secondary, then primary again",
+                            "complete JSON with matching object IDs and stable equivalent selected-object content",
+                            "independent evidence of the expected access restriction; distinct IDs or matching responses do not prove entitlement",
+                        ],
+                    )
+                proposal_digest = digest(binding)
+                proposal_id = uuid.uuid5(uid(run["id"]), "authorization:" + proposal_digest)
+                document = {**binding, "proposal_id": str(proposal_id), "proposal_digest": proposal_digest}
+                await self.repo.insert_node(conn, run, proposal_id, PROPOSAL_TYPE,
+                                            f"authz:{proposal_id}", document)
+        return await self.read(hunt_id, proposal_id)
+
+    async def _attempt_views(self, conn: Any, run: Mapping[str, Any], proposal: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return await attempt_views(self.repo, conn, run, proposal)
+
+    async def read(self, hunt_id: Any, proposal_id: Any) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            run = await self.repo.run(conn, hunt_id)
+            proposal = await self.repo.proposal(conn, run, proposal_id)
+            attempts = await self._attempt_views(conn, run, proposal)
+            status = investigation_status(attempts, await self.repo.skipped(conn, run, proposal_id))
+        # A request-scoped memory projection, reconstructed from PostgreSQL after
+        # every restart. The graph stores references; canonical actions own outcomes.
+        memory = InvestigationMemory(InMemoryGraphStore(), target_id=asset_id(run))
+        template = urlsplit(proposal["public_consumer_url"]).path
+        collection = urlsplit(proposal["public_baseline_url"]).path
+        own_object = proposal.get("baseline_kind") == "own_object"
+        if own_object:
+            collection = template.rstrip("/").rpartition("/")[0]
+        for attempt in attempts:
+            if attempt["execution_status"] not in TERMINAL_ACTION_STATES:
+                continue
+            memory.record_experiment(Experiment(
+                hypothesis="Cross-principal access to the selected captured object",
+                method="GET", route_template=template, collection=collection,
+                identifier=proposal["resource_id_sha256"], actor_principal="secondary", subject_principal="primary",
+                conditions={"proposal_digest": proposal["proposal_digest"]},
+                outcome=attempt["outcome"], detail=attempt["reason"],
+                attempt_id=attempt["action_id"],
+                evidence_refs=tuple([attempt["action_id"]] + ([attempt["receipt_id"]] if attempt["receipt_id"] else [])),
+                **({"at": attempt["completed_at"]} if attempt.get("completed_at") else {}),
+            ))
+        latest = attempts[-1] if attempts else None
+        result = {
+            "schema_version": "hunt-authorization/v1", "hunt_id": str(run["id"]),
+            "proposal_id": proposal["proposal_id"], "proposal_digest": proposal["proposal_digest"],
+            "capture_id": proposal["capture_id"], "baseline_capture_id": proposal["baseline_capture_id"],
+            "route": template, "resource_id_sha256": proposal["resource_id_sha256"],
+            "evidence_needed": proposal["evidence_needed"], "attempts": attempts,
+            **status,
+            "next_attempt": len(attempts) + 1 if len(attempts) < MAX_ATTEMPTS else None,
+            "resume": memory.resume_briefing(),
+            "selected_request_examined": any(a.get("selected_request_examined") for a in attempts),
+            "explanation": latest["reason"] if latest else "A proposal only; no authorization test has run",
+            "reproduction": [
+                {"as": "secondary", "method": "GET", "capture_id": proposal["baseline_capture_id"], "establishes": "same-collection baseline"},
+                {"as": "primary", "method": "GET", "capture_id": proposal["capture_id"], "establishes": "primary view of selected object"},
+                {"as": "secondary", "method": "GET", "capture_id": proposal["capture_id"], "establishes": "cross-principal replay"},
+            ],
+            "reproduction_is_plan": True,
+            "limitations": ["GET-only, same-Hunt http.request captures using the selected session_ref; no custom headers/body/query/fragment support",
+                            "Requires a baseline for the same collection; listing completeness/entitlement is not inferred from capture status",
+                            "The collection-based verifier may not exercise every supplied object; another object's result never settles the selection",
+                            "Skipping records a deferral and does not cancel an already admitted action",
+                            "Canonical evidence is reported; this workflow never promotes findings or replaces proof validation"],
+        }
+        if own_object:
+            result.update(
+                baseline_kind="own_object", expected_access=proposal["expected_access"],
+                expectation_source="operator_declared_not_proof",
+                cross_access_observed=bool(latest and latest.get("cross_access_observed")),
+                authorization_assessment=latest.get("authorization_assessment", "not_examined") if latest else "not_examined",
+                evidence_gathering_complete=bool(latest and (
+                    latest.get("cross_access_observed") or latest.get("authorization_assessment") == "access_denied")),
+            )
+            result["next_step"] = ("review_access_expectation_without_repeating_the_same_requests"
+                                   if result["cross_access_observed"]
+                                   else "investigate_other_objects_or_conditions" if result["settled"]
+                                   else "review_missing_evidence_before_approving_or_retrying")
+            result["reproduction"][0]["establishes"] = "secondary's own-object reference; no listing is requested"
+            result["reproduction"].append({"as": "primary", "method": "GET", "capture_id": proposal["capture_id"], "establishes": "selected-object stability after the crossing"})
+            result["limitations"][1:3] = [
+                "Two complete JSON object GETs in the same collection; the selected object is addressed exactly, never chosen from a listing",
+                "Cross-access is evidence, not entitlement proof. Declared expectations cannot promote a finding; review shared/public access before asserting a vulnerability",
+            ]
+        return result
+
+    async def approve(self, hunt_id: Any, proposal_id: Any, *, proposal_digest: str,
+                      confirm: bool, attempt: int = 1, retry_settled: bool = False) -> dict[str, Any]:
+        if confirm is not True or type(attempt) is not int or not 1 <= attempt <= MAX_ATTEMPTS:
+            raise AuthorizationWorkflowError("Explicit confirmation and a bounded attempt number are required", 422)
+        replay_finished = False
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                run = await self.repo.run(conn, hunt_id)
+                proposal = await self.repo.proposal(conn, run, proposal_id, lock=True)
+                if proposal_digest != proposal["proposal_digest"]:
+                    raise AuthorizationWorkflowError("The approved proposal digest does not match")
+                history = await self.repo.attempts(conn, run, proposal_id)
+                existing = next((r for r in history if r["attempt"] == attempt), None)
+                if existing:
+                    action = await self.repo.action(conn, run, existing["action_id"])
+                    replay_finished = bool(action and action.get("status") in TERMINAL_ACTION_STATES)
+                if not replay_finished:
+                    _active(run)
+                    if not existing:
+                        if attempt != len(history) + 1:
+                            raise AuthorizationWorkflowError("Attempts must be consecutive; reuse an existing number to recover its execution")
+                        if history:
+                            previous = await self.repo.action(conn, run, history[-1]["action_id"])
+                            if not previous or previous.get("status") not in TERMINAL_ACTION_STATES:
+                                raise AuthorizationWorkflowError("Recover the preceding attempt before starting another")
+                            previous_outcome = (await self._attempt_views(conn, run, proposal))[-1]
+                            if previous_outcome["outcome"] in SETTLED_OUTCOMES and retry_settled is not True:
+                                raise AuthorizationWorkflowError("This experiment is settled; explicitly request a retest")
+                    primary, secondary, capture, baseline = await self._bindings(conn, run, proposal)
+                    if (digest(_target_context(run)) != proposal["target_context_sha256"]
+                            or digest([primary, secondary]) != proposal["sessions_sha256"]
+                            or request_identity(capture) != proposal["capture_sha256"]
+                            or request_identity(baseline) != proposal["baseline_sha256"]):
+                        raise AuthorizationWorkflowError("The captures, sessions or target changed; create and approve a fresh proposal")
+                    inputs = capability_input(proposal, capture, baseline)
+                    idempotency_key = f"authz-investigation:{proposal_id}:{attempt}"
+                    link = {"hunt_id": str(run["id"]), "proposal_id": str(proposal_id), "attempt": attempt,
+                            "idempotency_key": idempotency_key, "input_digest": digest(inputs),
+                            "action_id": str(canonical_action_id(run["id"], idempotency_key))}
+                    if existing and existing != link:
+                        raise AuthorizationWorkflowError("The persisted attempt binding changed")
+                    await self.repo.insert_node(conn, run, uuid.uuid5(uid(proposal_id), f"attempt:{attempt}"),
+                                                ATTEMPT_TYPE, f"authz:{proposal_id}:attempt:{attempt:03}", link)
+        # No database lock is held across a worker call. Canonical idempotency,
+        # approvals, session checks, cancellation and budgets stay authoritative.
+        if not replay_finished:
+            await self.execute(str(hunt_id), idempotency_key, inputs)
+        return await self.read(hunt_id, proposal_id)
+
+    async def skip(self, hunt_id: Any, proposal_id: Any) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                run = await self.repo.run(conn, hunt_id)
+                await self.repo.proposal(conn, run, proposal_id, lock=True)
+                await self.repo.insert_node(conn, run, uuid.uuid5(uid(proposal_id), "skip"), DECISION_TYPE,
+                                            f"authz:{proposal_id}:skip", {"hunt_id": str(run["id"]), "decision": "deferred"})
+        return await self.read(hunt_id, proposal_id)

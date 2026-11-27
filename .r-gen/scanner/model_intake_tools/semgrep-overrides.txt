@@ -1,0 +1,9 @@
+# Semgrep pins pyjwt~=2.13.0 (through at least 1.178.0), but PyJWT 2.13.x carries
+# CVE-2026-102268 (critical) and five high token-forgery CVEs fixed in 2.14.0. The release
+# image gate carries no waivers, so override Semgrep's pin rather than waive the finding.
+# Drop this override once Semgrep accepts pyjwt>=2.14.
+pyjwt[crypto]>=2.14.0
+# Semgrep pins mcp==1.29.0 (through at least 1.186.0), but MCP 1.29.0 carries CVE-2026-115563
+# (high, OAuth client) fixed in 1.30.0. Override the pin rather than waive the finding; drop this
+# once Semgrep accepts mcp>=1.30.
+mcp==1.30.0

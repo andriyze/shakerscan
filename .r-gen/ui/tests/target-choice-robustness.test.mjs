@@ -1,0 +1,84 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import test from 'node:test'
+
+import { boundedDisplayText, boundedTargetDisplay, targetChoiceLabel, usableWebTargets } from '../src/lib/targetChoices.ts'
+
+const credentialsPage = fs.readFileSync(new URL('../src/app/credentials/page.tsx', import.meta.url), 'utf8')
+const collectionsPage = fs.readFileSync(new URL('../src/app/request-collections/page.tsx', import.meta.url), 'utf8')
+const evidencePanel = fs.readFileSync(new URL('../src/components/EvidenceRetentionPanel.tsx', import.meta.url), 'utf8')
+const timelinePage = fs.readFileSync(new URL('../src/app/timeline/page.tsx', import.meta.url), 'utf8')
+const schedulesPage = fs.readFileSync(new URL('../src/app/schedules/page.tsx', import.meta.url), 'utf8')
+const targetsPage = fs.readFileSync(new URL('../src/components/targets/inventory/TargetRow.tsx', import.meta.url), 'utf8')
+const targetSearchPicker = fs.readFileSync(new URL('../src/components/targets/TargetSearchCombobox.tsx', import.meta.url), 'utf8')
+const targetGroups = fs.readFileSync(new URL('../src/components/targets/inventory/TargetGroups.tsx', import.meta.url), 'utf8')
+
+test('target-bound forms hide inactive and unnamed web targets', () => {
+  const usable = usableWebTargets([
+    { id: 'blank', url: '', is_active: true },
+    { id: 'spaces', url: '   ', is_active: true },
+    { id: 'oversized', url: `https://${'a'.repeat(2048)}.example`, is_active: true },
+    { id: 'unsupported', url: 'ftp://files.example', is_active: true },
+    { id: 'inactive', url: 'https://inactive.example', is_active: false },
+    { id: 'ready', url: 'https://ready.example', is_active: true },
+  ])
+  assert.deepEqual(usable.map((target) => target.id), ['ready'])
+})
+
+test('secret-bearing forms require an explicit target choice', () => {
+  assert.match(collectionsPage, /<Button onClick=\{openUploader\} disabled=\{!targetId\}>/)
+  // Credentials without a target is the library; creating one still needs an explicit target.
+  assert.match(credentialsPage, /noneLabel="All targets"/)
+  assert.match(credentialsPage, /onClick=\{openCreate\} disabled=\{!targetId\}/)
+  // A target ID from the URL is used only once it has been read and accepted as a choice.
+  assert.match(credentialsPage, /<Combobox value=\{selectedChoice \? targetId : ''\}/)
+  assert.match(collectionsPage, /if \(loading \|\| !targetId \|\| selectedAsset\) return/)
+  assert.match(collectionsPage, /if \(!result\.target\.is_active\) \{setError\('The linked target is retired'\);return\}/)
+  // With no target chosen the credentials page is the library, and says how to create one.
+  assert.match(credentialsPage, /Choose a target to create a credential/)
+  assert.match(collectionsPage, /Choose a collection owner/)
+})
+
+test('historical malformed target labels stay bounded in read-only selectors', () => {
+  const label = boundedTargetDisplay({
+    name: 'Historical fuzz target',
+    url: `https://${'a'.repeat(65_000)}.example`,
+  })
+  assert.equal(label.length, 160)
+  assert.ok(label.endsWith('…'))
+  assert.equal(boundedDisplayText(`target-${'x'.repeat(500)}`, 40).length, 40)
+  assert.equal(boundedDisplayText('  normal target  '), 'normal target')
+  assert.equal(boundedTargetDisplay({ url: 'https://example.test' }, { stripScheme: true }), 'example.test')
+  for (const surface of [evidencePanel, targetsPage]) {
+    assert.match(surface, /boundedTargetDisplay/)
+  }
+  // Timeline, Schedules and the evidence retention sweep pick targets through the server-searched
+  // picker, which bounds labels; none of them loads a first page of every target.
+  for (const surface of [timelinePage, schedulesPage, evidencePanel]) {
+    assert.match(surface, /<TargetSearchCombobox/)
+    assert.doesNotMatch(surface, /getTargets\(/)
+  }
+  assert.match(targetSearchPicker, /\.\.\.targetChoiceLabel\(asset\)/)
+  assert.match(targetGroups, /boundedDisplayText\(group\.root_domain/)
+})
+
+
+test('a target picker names targets, not raw origin URLs', () => {
+  assert.deepEqual(targetChoiceLabel({ name: 'Juice Shop (lab)', url: 'http://10.0.0.4:3000' }),
+    { label: 'Juice Shop (lab)', description: 'http://10.0.0.4:3000' })
+  // A name that only repeats the URL, or no name, shows the host a person recognizes.
+  assert.deepEqual(targetChoiceLabel({ name: 'http://shakerscan.example:2052', url: 'http://shakerscan.example:2052' }),
+    { label: 'shakerscan.example:2052', description: 'http://shakerscan.example:2052' })
+  assert.deepEqual(targetChoiceLabel({ name: null, url: 'https://app.example.test/' }),
+    { label: 'app.example.test', description: 'https://app.example.test/' })
+  assert.deepEqual(targetChoiceLabel({ name: 'app.example.test', url: 'https://app.example.test' }),
+    { label: 'app.example.test', description: 'https://app.example.test' })
+  assert.equal(targetChoiceLabel({ name: 'Portal', url: 'https://app.example.test/portal' }).label, 'Portal')
+  assert.equal(targetChoiceLabel({ name: '', url: 'https://app.example.test/portal/' }).label, 'app.example.test/portal')
+  // Hostile lengths stay bounded.
+  const long = targetChoiceLabel({ name: 'x'.repeat(5000), url: `https://${'a'.repeat(5000)}.test` })
+  assert.equal(long.label.length, 160)
+  assert.equal(long.description.length, 160)
+  // Schedules show the schedule's target by name too.
+  assert.match(schedulesPage, /targetChoiceLabel\(\{ name: schedule\.target_name, url: schedule\.target_url \}\)/)
+})

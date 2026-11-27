@@ -1,0 +1,279 @@
+"""Hunt start: credential references, start bounds, and the permissions they record.
+
+Credential references must name credentials attached to the target (the one attached list). A
+reference to another target's credential is admitted only when the person's own start bounds
+(``allow: credential.use:<targets>``) cover its home target and the credential-grant kind rules
+pass; the Hunt then records a pre-authorized ``credential.use`` request and grant for it in the
+start transaction, and no binding is created.
+
+``allow`` bounds are recorded as the starting person's (``allow_asserted_by``, which the
+Enterprise gateway sets after step-up; ``local`` on OSS). ``proposed_allow`` bounds, which the MCP
+start tool sends for the agent, become one pending ``preauthorization`` request: the agent cannot
+pre-authorize itself.
+
+``saved_logins`` a person attaches at start are checked before the Hunt row exists (each an
+active form or JSON login profile attached to the target, whose login URL can be read under the
+Hunt's authorization) and recorded with the start as the person's ``login.use`` pre-authorization
+and grant, with the login count the person chose (hunt/saved_logins.py).
+"""
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+import uuid
+
+from fastapi import HTTPException
+
+from .credential_uses import CREDENTIAL_NOT_ATTACHED, HuntCredentialRefusal, unattached_reference_refusal
+from .permission_bounds import parse_bounds
+from .permission_reasons import KIND_CREDENTIAL_USE, KIND_LOGIN_USE, KIND_PREAUTHORIZATION
+from .permission_store import pending_summary, raise_request, record_preauthorization
+from .permission_subjects import credential_kind_error
+from .start_contract import HuntStartContract
+
+try:
+    from runtime.credential_refs import CredentialReferenceError, validate_generic_credential_references
+    from runtime.credential_store import CredentialStoreError
+except ModuleNotFoundError:
+    from ..runtime.credential_refs import CredentialReferenceError, validate_generic_credential_references
+    from ..runtime.credential_store import CredentialStoreError
+
+
+def _reference_code(message: str) -> str | None:
+    """The reason code for a start-time credential reference refusal (D36)."""
+    if message.endswith("is inactive or expired"):
+        return "credential_inactive"
+    if message.endswith("is unavailable or bound to another target"):
+        return CREDENTIAL_NOT_ATTACHED
+    if "target kind does not match" in message or " is incompatible with " in message:
+        return "credential_kind_unsupported"
+    return None
+
+
+def _owner(contract: HuntStartContract) -> tuple[str, str]:
+    assertion = contract.allow_asserted_by or {}
+    return str(assertion.get("person") or "local-operator"), str(assertion.get("proof") or "local")
+
+
+async def _preauthorized_profile(
+    conn: Any, store: Any, contract: HuntStartContract, target_id: uuid.UUID, profile_id: str,
+) -> tuple[Any, str | None] | None:
+    """Another target's credential the person's start bounds cover (with its home host), or None."""
+    if not contract.allow:
+        return None
+    bounds = parse_bounds(contract.allow)
+    if not bounds.credential_targets:
+        return None
+    try:
+        profile = await store.get_profile(conn, profile_id=profile_id)
+    except CredentialStoreError:
+        return None
+    home = await conn.fetchrow("SELECT url FROM targets WHERE id=$1", uuid.UUID(str(profile.target_id)))
+    import urllib.parse
+    from .permission_subjects import destination_host
+    raw_home = urllib.parse.urlsplit(str((home or {}).get("url") or "")).hostname if home else None
+    # The one canonical spelling (IDNA 2008/UTS #46) the credential bounds are matched in.
+    home_host = destination_host(raw_home) or None if raw_home else None
+    if not bounds.covers_credential(home_target_id=str(profile.target_id), home_host=home_host):
+        return None
+    subject = {"profile_id": profile.profile_id, "profile_version": profile.current_version}
+    run = {"target_kind": contract.target_kind}
+    if await credential_kind_error(conn, run, subject):
+        return None
+    return profile, home_host
+
+
+async def validate_start_credentials(
+    conn: Any, contract: HuntStartContract, target_id: uuid.UUID, store: Any,
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """The credential rows a Hunt starts with, and the pre-authorized foreign profiles among them."""
+    if not contract.credential_refs:
+        return [], []
+    profiles = list(await store.list_profiles(
+        conn, target_kind=contract.target_kind, target_id=target_id, include_inactive=True,
+    ))
+    preauthorized: list[Any] = []
+    while (refusal := unattached_reference_refusal(contract.credential_refs, profiles)) is not None:
+        covered = await _preauthorized_profile(conn, store, contract, target_id, str(refusal.profile_id or ""))
+        if covered is None:
+            raise HTTPException(status_code=422, detail=refusal.public_detail())
+        profiles.append(covered[0])
+        preauthorized.append(covered)
+    try:
+        generic, _missing = validate_generic_credential_references(
+            contract.credential_refs, profiles, target_kind=contract.target_kind,
+        )
+    except CredentialReferenceError as exc:
+        code = _reference_code(str(exc))
+        if code is None:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        detail = HuntCredentialRefusal(code, str(exc)).public_detail() if code != "credential_inactive" else {
+            "error": "hunt_credential_refused", "reason_code": code, "message": str(exc),
+        }
+        raise HTTPException(status_code=422, detail=detail) from exc
+    return generic, preauthorized
+
+
+async def _receipt_covers_credentials(conn: Any, receipt_id: Any) -> bool:
+    """Whether the start's approval receipt covers the target's credentials (the standing
+    authorization does). Only a pre-check for the default selection: the start still validates
+    the receipt in full, at the credential tier, before the Hunt exists."""
+    try:
+        from runtime.approval_policy import approval_covers_risk
+    except ModuleNotFoundError:
+        from ..runtime.approval_policy import approval_covers_risk
+    try:
+        receipt_uuid = uuid.UUID(str(receipt_id))
+    except (TypeError, ValueError):
+        return False
+    row = await conn.fetchrow(
+        "SELECT action_name, risk_tier, action_context, status FROM approval_receipts WHERE id=$1",
+        receipt_uuid,
+    )
+    if not row or str(row["status"] or "") == "revoked":
+        return False
+    return approval_covers_risk(dict(row), "credential")
+
+
+async def validate_start_principals(
+    conn: Any, contract: HuntStartContract, target_id: uuid.UUID, store: Any,
+) -> tuple[list[dict[str, Any]], list[Any], dict[str, Any]]:
+    """``validate_start_credentials`` plus the target's registered principals by default.
+
+    A web, API or network Hunt whose start names no ``credential_refs``, asks for active testing
+    and carries an approval that covers the target's credentials selects the target's own
+    principals, one per slot (hunt/principal_roles.py). Returns the credential rows, the
+    pre-authorized foreign profiles and how the principals were selected.
+    """
+    from .principal_roles import default_principal_refs, registered_principals, selection_report_for
+    rows, preauthorized = await validate_start_credentials(conn, contract, target_id, store)
+    if contract.credential_refs:
+        return rows, preauthorized, selection_report_for(True, rows, None)
+    policy = contract.policy
+    if (contract.target_kind not in {"web", "api", "network"} or not policy.active_testing
+            or not await _receipt_covers_credentials(conn, policy.approval_receipt_id)):
+        return rows, preauthorized, selection_report_for(False, rows, None)
+    profiles = list(await store.list_profiles(conn, target_kind=contract.target_kind, target_id=target_id))
+    principals = await registered_principals(conn, target_id)
+    default_rows, report = default_principal_refs(
+        principals, profiles, target_id=target_id, target_kind=contract.target_kind,
+    )
+    return [*rows, *default_rows], preauthorized, report
+
+
+async def validate_start_saved_logins(conn: Any, contract: HuntStartContract, run: Mapping[str, Any]) -> None:
+    """Refuse a start whose saved logins cannot be attached, before the Hunt exists (``run`` is
+    the Hunt about to be inserted: target, context and the policy it will be governed by)."""
+    if not contract.saved_logins:
+        return
+    from .saved_logins import resolve_login_url, start_attach_subjects
+    try:
+        subjects = await start_attach_subjects(conn, run, contract.saved_logins)
+        for subject, _display, _logins in subjects:
+            await resolve_login_url(conn, run, subject["profile_id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={
+            "error": "saved_login_unavailable", "reason_code": "saved_login_unavailable",
+            "message": f"{exc}; no Hunt was started.",
+        }) from exc
+
+
+async def record_start_permissions(
+    conn: Any, run: Mapping[str, Any], contract: HuntStartContract, preauthorized: Sequence[Any],
+) -> dict[str, Any]:
+    """Record start bounds, the agent's proposal, and pre-authorized credential grants.
+
+    Returns what the start response adds: the requests still pending for a person (the agent's
+    proposed bounds), so the planner can tell the person which ``shakerscan approve`` to run.
+    """
+    if not (contract.allow or contract.proposed_allow or preauthorized or contract.saved_logins):
+        return {}
+    from .permission_grants import apply_grant, try_preauthorized_grant
+
+    person, proof = _owner(contract)
+    async with conn.transaction():
+        run = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", run["id"]))
+        if contract.allow:
+            bounds = parse_bounds(contract.allow)
+            await record_preauthorization(
+                conn, hunt_id=run["id"], bounds=bounds, created_by=person, proof=proof,
+            )
+            # A saved login the person's bounds name is attached now, so the Hunt starts with it
+            # (its login URL and logins left in the briefing) instead of finding it on first use.
+            await _attach_bound_saved_logins(conn, run, bounds.saved_logins, person, try_preauthorized_grant)
+        for profile, home_host in preauthorized:
+            request, _created = await raise_request(
+                conn, run=run, kind=KIND_CREDENTIAL_USE, reason_code=CREDENTIAL_NOT_ATTACHED,
+                subject={
+                    "profile_id": profile.profile_id, "profile_version": profile.current_version,
+                    "home_target_id": str(profile.target_id), "home_host": home_host,
+                    "slot": profile.principal_slot,
+                    "consuming_target_id": str(run.get("target_id") or run.get("device_target_id")),
+                },
+                actor=person, source="hunt_start",
+            )
+            if request is not None:
+                await try_preauthorized_grant(conn, run, request)
+        if contract.saved_logins:
+            await _attach_start_saved_logins(conn, run, contract, person, proof, apply_grant)
+        if contract.proposed_allow:
+            bounds = parse_bounds(contract.proposed_allow)
+            await raise_request(
+                conn, run=run, kind=KIND_PREAUTHORIZATION, reason_code="preauthorization_proposed",
+                subject={"allow": list(contract.proposed_allow), "bounds_digest": bounds.digest()},
+                actor="agent", source="proposed_allow",
+            )
+    return {"pending_permission_requests": await pending_summary(conn, run["id"])}
+
+
+async def _attach_bound_saved_logins(
+    conn: Any, run: dict[str, Any], profile_ids: Sequence[str], person: str, grant: Any,
+) -> None:
+    from .saved_logins import attached_profile, display_of, hunt_consuming_target_id, subject_of
+
+    for profile_id in profile_ids:
+        profile = await attached_profile(conn, hunt_consuming_target_id(run), profile_id)
+        if profile is None:
+            continue  # not a saved login of this target: the bound covers nothing here
+        request, _created = await raise_request(
+            conn, run=run, kind=KIND_LOGIN_USE, reason_code="saved_login_not_attached",
+            subject=subject_of(run, profile), display=display_of(profile), actor=person, source="hunt_start",
+        )
+        if request is not None and request["status"] == "pending":
+            await grant(conn, run, request)
+
+
+async def _attach_start_saved_logins(
+    conn: Any, run: dict[str, Any], contract: HuntStartContract, person: str, proof: str, apply_grant: Any,
+) -> None:
+    """The person's start attachment: one ``login.use`` pre-authorization for the saved logins,
+    and one granted request per login with the count the person chose."""
+    from .permission_store import record_event
+    from .saved_logins import start_attach_subjects
+
+    ids = ",".join(item["profile_id"] for item in contract.saved_logins)
+    preauth = await record_preauthorization(
+        conn, hunt_id=run["id"], bounds=parse_bounds([f"{KIND_LOGIN_USE}:{ids}"]), created_by=person, proof=proof,
+    )
+    for subject, display, logins in await start_attach_subjects(conn, run, contract.saved_logins):
+        request, _created = await raise_request(
+            conn, run=run, kind=KIND_LOGIN_USE, reason_code="saved_login_not_attached",
+            subject=subject, display=display, actor=person, source="hunt_start",
+        )
+        if request is None or request["status"] != "pending":
+            continue
+        grant = await apply_grant(
+            conn, run=run, request=request, scope="hunt", choice={"logins": logins},
+            actor=person, via="preauthorization", preauthorization_id=preauth["id"],
+        )
+        await record_event(
+            conn, hunt_id=run["id"], request_id=request["id"], grant_id=grant["id"],
+            event="auto_granted", actor=person, source="hunt_start",
+            detail={"preauthorization_id": str(preauth["id"])},
+        )
+
+
+__all__ = [
+    "record_start_permissions", "validate_start_credentials", "validate_start_principals",
+    "validate_start_saved_logins",
+]

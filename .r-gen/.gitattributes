@@ -1,0 +1,7 @@
+# Generated from the application or from other checked-in sources; regenerate, do not edit.
+docs/functionality-reference.md linguist-generated=true
+docs/generated/** linguist-generated=true
+ui/src/lib/*.generated.ts linguist-generated=true
+install/MANIFEST.sha256 linguist-generated=true
+install/index.html linguist-generated=true
+scanner/requirements.lock linguist-generated=true

@@ -1,0 +1,615 @@
+"""E3: approving a Hunt permission request from the person's own terminal, with the real CLI.
+
+Process tests: the installed command (``python -m shakerscan``) runs in a pseudo-terminal against
+a stub instance (``tests/hunt_permission_stub.py``, a unit fixture: real HTTP(S), scripted
+routes). They cover the three paths the design names:
+
+* Enterprise: the person's TOTP code, typed at the terminal, goes to the gateway's step-up
+  routes; the gateway sets ``decided_by`` to the person. The engine's decision route is never
+  called from an Enterprise connection.
+* An Enterprise gateway without those routes (before G1): an exact error, nothing decided, no
+  fallback to the engine.
+* A local open-source engine: a y/N confirmation sent to the engine's decision route.
+
+None of these may run from a pipe (an agent's tool shell): the CLI refuses without a terminal.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import pty
+import signal
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+from tests.hunt_permission_stub import HUNT, REQUEST, TITLE, TOKEN, TOTP, StubInstance, self_signed
+
+ROOT = Path(__file__).resolve().parents[1]
+CLIENT_SRC = ROOT / "client" / "src"
+sys.path.insert(0, str(ROOT / "scripts"))
+
+
+@contextlib.contextmanager
+def _sigint_as_a_shell_leaves_it():
+    """Start the CLI with SIGINT at its default, as a person's interactive shell starts a
+    foreground command. A test run launched in the background (``pytest &``) inherits SIGINT
+    ignored, a child inherits that, and a Python started that way keeps ignoring it: a Ctrl-C sent
+    below would never arrive. A handled signal (unlike an ignored one) is reset by exec."""
+    inherited = signal.getsignal(signal.SIGINT)
+    if inherited is not signal.SIG_IGN:
+        yield
+        return
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, inherited)
+
+
+class _Screen:
+    """What a pseudo-terminal shows, read from its master as it is written (a thread): macOS drops
+    what is left in a terminal once the program that wrote it has exited."""
+
+    def __init__(self, master: int) -> None:
+        self.master = master
+        self._raw = b""
+        self._lock = threading.Lock()
+        self._reader = threading.Thread(target=self._pump, daemon=True)
+        self._reader.start()
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self.master, 65536)
+            except OSError:  # the program exited and the terminal is closed
+                return
+            if not chunk:
+                return
+            with self._lock:
+                self._raw += chunk
+
+    @property
+    def text(self) -> bytes:
+        with self._lock:
+            return self._raw.replace(b"\r\n", b"\n")
+
+    def wait_for(self, text: bytes, timeout: float, alive: Callable[[], bool]) -> None:
+        deadline = time.monotonic() + timeout
+        while text not in self.text:
+            if time.monotonic() > deadline:
+                raise AssertionError(f"never saw {text!r}; output so far: {self.text.decode(errors='replace')}")
+            if not alive() and not self._reader.is_alive() and text not in self.text:
+                raise AssertionError(f"exited before {text!r}; output so far: {self.text.decode(errors='replace')}")
+            time.sleep(0.05)
+
+    def close(self) -> bytes:
+        self._reader.join(timeout=5)
+        os.close(self.master)
+        return self.text
+
+
+class Session:
+    """The CLI in a pseudo-terminal that is its stdin and its stdout, as a person's terminal is
+    (the CLI asks the person only when its input and its output are a terminal); stderr is read
+    separately. What the terminal shows is ``out``."""
+
+    def __init__(self, argv: list[str], env: dict[str, str]) -> None:
+        self.master, slave = pty.openpty()
+        with _sigint_as_a_shell_leaves_it():
+            self.proc = subprocess.Popen(
+                [sys.executable, "-m", "shakerscan", *argv], stdin=slave, stdout=slave,
+                stderr=subprocess.PIPE, env=env, cwd=str(ROOT), start_new_session=True,
+            )
+        os.close(slave)
+        self.screen = _Screen(self.master)
+
+    @property
+    def out(self) -> bytes:
+        return self.screen.text
+
+    def expect(self, text: str, timeout: float = 20.0) -> None:
+        self.screen.wait_for(text.encode(), timeout, lambda: self.proc.poll() is None)
+
+    def type(self, text: str) -> None:
+        os.write(self.master, text.encode())
+
+    def finish(self, timeout: float = 30.0) -> tuple[int, str, str]:
+        try:
+            _, err = self.proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            raise
+        return self.proc.returncode, self.screen.close().decode(), (err or b"").decode()
+
+
+def _environment(tmp_path: Path, **extra: str) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("SHAKERSCAN_")}
+    env.update({"PYTHONPATH": str(CLIENT_SRC), "SHAKERSCAN_CONFIG_DIR": str(tmp_path / "cfg"),
+                "SHAKERSCAN_HOME": str(tmp_path / "no-engine"), **extra})
+    return env
+
+
+@pytest.fixture
+def enterprise(tmp_path):
+    cert, key = self_signed(tmp_path)
+    token = tmp_path / "token"
+    token.write_text(TOKEN + "\n", encoding="utf-8")
+    token.chmod(0o600)
+
+    def start(gateway: str, **options):
+        stub = StubInstance(tls=(cert, key), gateway=gateway, **options)
+        env = _environment(tmp_path, SSL_CERT_FILE=str(cert))
+        return stub, ["--url", stub.url, "--token-file", str(token)], env
+
+    return start
+
+
+def test_enterprise_approval_takes_the_persons_totp_and_the_gateway_names_them(enterprise):
+    stub, connection, env = enterprise("g1")
+    with stub:
+        session = Session(["approve", *connection, REQUEST, "--hunt", HUNT, "--account", "alice"], env)
+        session.expect(TITLE)
+        session.expect("TOTP code for alice")
+        session.type(TOTP + "\n")
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    assert f"granted: {TITLE} (by alice, terminal stepup)" in out
+    assert TOTP not in out and TOTP not in err, "the code is never echoed"
+    finish = next(body for method, path, body in stub.seen if path == "/_enterprise/approvals/finish")
+    assert finish["proof"] == {"method": "totp", "code": TOTP}
+    begin = next(body for method, path, body in stub.seen if path == "/_enterprise/approvals/begin")
+    assert begin["purpose"] == "permission_decision" and begin["account"] == "alice"
+    assert begin["decisions"] == [{"hunt_id": HUNT, "request_id": REQUEST, "subject_digest": "d" * 64,
+                                   "decision": "allow", "scope": "hunt", "choice": {}}]
+    assert stub.request["status"] == "granted" and stub.request["decided_by"] == "alice"
+    assert stub.request["decision_via"] == "terminal_stepup"
+    assert not [path for path in stub.routes("POST") if path.endswith("/decision")], (
+        "an Enterprise connection never calls the engine's decision route itself"
+    )
+
+
+def test_ctrl_c_ends_watch_promptly_when_the_gateway_stalls_the_revoke(enterprise):
+    stub, connection, env = enterprise("g1", stall_revoke=True)
+    with stub:
+        session = Session(["approve", *connection, "--watch", "--hunt", HUNT, "--account", "alice",
+                           "--minutes", "1"], env)
+        session.expect("TOTP code for alice")
+        session.type(TOTP + "\n")
+        session.expect("approver session open until")
+        session.expect("[a]llow")
+        started = time.monotonic()
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish(timeout=30)
+        elapsed = time.monotonic() - started
+    assert code == 0, (out, err)
+    assert elapsed < 10, f"Ctrl-C took {elapsed:.1f}s to end --watch"
+    assert "approver session ended\n" in out and "(time limit)" not in out, (out, err)
+    assert "could not revoke the approver session at the gateway; it expires on its own" in out
+    assert "/_enterprise/approvals/session/revoke" in stub.routes("POST"), "the revoke was attempted"
+    assert stub.request["status"] == "pending", "nothing was decided"
+
+
+def test_a_wrong_totp_code_decides_nothing(enterprise):
+    stub, connection, env = enterprise("g1")
+    with stub:
+        session = Session(["approve", *connection, REQUEST, "--hunt", HUNT, "--account", "alice"], env)
+        session.expect("TOTP code for alice")
+        session.type("111111\n")
+        code, out, err = session.finish()
+    assert code == 2 and "stepup_failed" in err, (out, err)
+    assert stub.request["status"] == "pending"
+
+
+def test_a_gateway_without_the_step_up_routes_gets_an_exact_error_and_no_fallback(enterprise):
+    stub, connection, env = enterprise("pre-g1")
+    with stub:
+        session = Session(["approve", *connection, REQUEST, "--hunt", HUNT, "--account", "alice"], env)
+        code, out, err = session.finish()
+    assert code == 2, (out, err)
+    assert ("this ShakerScan Enterprise gateway has no terminal approval yet: POST "
+            "/_enterprise/approvals/begin answered HTTP 403") in err
+    assert "step-up routes (G1)" in err and "Nothing was approved, denied or pre-authorized" in err
+    assert stub.request["status"] == "pending"
+    assert not [path for path in stub.routes() if path.endswith("/decision")], "no fallback to the engine"
+
+
+def test_local_open_source_approval_is_a_y_n_confirmation_through_the_engine(tmp_path):
+    with StubInstance() as stub:
+        env = _environment(tmp_path)
+        session = Session(["approve", "--url", stub.url, REQUEST], env)
+        session.expect("anyone who can reach its API could decide")
+        session.expect("on this engine? [y/N]")
+        session.type("y\n")
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    assert f"granted: {TITLE} (by local-operator, local confirmation)" in out
+    decision = next(body for method, path, body in stub.seen if path.endswith("/decision"))
+    assert decision["decision"] == "allow" and decision["decision_via"] == "local_confirm"
+    assert decision["subject_digest"] == "d" * 64 and decision["idempotency_key"].startswith("local-approve-")
+    # Without --hunt the request was found among the open Hunts.
+    assert any(path.startswith("/hunts?status=active") for path in stub.routes("GET"))
+
+
+def test_local_deny_and_a_declined_confirmation(tmp_path):
+    with StubInstance() as stub:
+        env = _environment(tmp_path)
+        session = Session(["approve", "--url", stub.url, REQUEST, "--hunt", HUNT], env)
+        session.expect("[y/N]")
+        session.type("\n")
+        code, out, _ = session.finish()
+        assert code == 1 and "nothing was decided" in out
+        assert stub.request["status"] == "pending"
+        session = Session(["deny", "--url", stub.url, REQUEST, "--hunt", HUNT], env)
+        session.expect("Deny this request on this engine? [y/N]")
+        session.type("yes\n")
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    assert stub.request["status"] == "denied"
+
+
+def test_approve_refuses_without_a_terminal(tmp_path):
+    """An agent's tool shell is a pipe: the command must not decide from there (exit 3: refused,
+    nothing ran)."""
+    with StubInstance() as stub:
+        result = subprocess.run(
+            [sys.executable, "-m", "shakerscan", "approve", "--url", stub.url, REQUEST, "--hunt", HUNT],
+            input="y\n", capture_output=True, text=True, env=_environment(tmp_path), cwd=str(ROOT), timeout=60,
+        )
+    assert result.returncode == 3
+    assert "interactive terminal" in result.stderr and "never through an agent's shell" in result.stderr
+    assert stub.request["status"] == "pending"
+    assert not [path for path in stub.routes() if path.endswith("/decision")]
+
+
+def _input_terminal_only(argv: list[str], env: dict[str, str], *, stderr_terminal: bool = False):
+    """The CLI with a terminal for input only and its output captured (as a tool harness that
+    gives an agent's command a terminal on stdin), or with stderr the terminal too."""
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "shakerscan", *argv], stdin=slave, stdout=subprocess.PIPE,
+            stderr=slave if stderr_terminal else subprocess.PIPE, env=env, cwd=str(ROOT),
+            start_new_session=True,
+        )
+    finally:
+        os.close(slave)
+    return master, proc
+
+
+@pytest.mark.parametrize("argv", [
+    ["approve", REQUEST, "--hunt", HUNT, "--account", "alice"],
+    ["deny", REQUEST, "--hunt", HUNT, "--account", "alice"],
+], ids=["approve", "deny"])
+@pytest.mark.parametrize("stderr_terminal", [False, True], ids=["all-captured", "stderr-terminal"])
+def test_a_terminal_for_input_only_is_asked_as_0_11_1_asked(tmp_path, enterprise, argv, stderr_terminal):
+    """``shakerscan approve ... | tee log``, ``> file``: stdin a terminal and the output captured.
+    Client 0.11.1 asked the person there (its prompts on stdout); 0.11.2 asks too, with the switch
+    off, the prompts on stderr where that is a terminal, else where 0.11.1 wrote them, and the code
+    0.11.1 chose. Nothing that worked with 0.11.0 or 0.11.1 is refused."""
+    stub, connection, env = enterprise("g1", touch_switch=False)
+    with stub:
+        master, proc = _input_terminal_only([argv[0], *connection, *argv[1:]], env, stderr_terminal=stderr_terminal)
+        screen = _Screen(master)
+        prompt = b"TOTP code for alice"
+        if stderr_terminal:
+            # On the person's terminal (stderr), not in the captured output.
+            screen.wait_for(prompt, 30, lambda: proc.poll() is None)
+            early = b""
+        else:
+            # Where 0.11.1 wrote it: the captured output (a `| tee log` shows it).
+            early, deadline = b"", time.monotonic() + 30
+            while prompt not in early:
+                assert time.monotonic() < deadline and proc.poll() is None, early
+                early += _read_ready(proc.stdout)
+        os.write(master, (TOTP + "\n").encode())
+        out, err = proc.communicate(timeout=60)
+        shown = screen.close()
+    out = early + out
+    assert proc.returncode == 0, (out, err, shown)
+    assert (prompt in out) is (not stderr_terminal), (out, shown)
+    finish = next(body for method, path, body in stub.seen if path == "/_enterprise/approvals/finish")
+    assert finish["proof"] == {"method": "totp", "code": TOTP}
+    assert stub.request["status"] == ("granted" if argv[0] == "approve" else "denied")
+
+
+@pytest.mark.parametrize("argv", [
+    ["approve", REQUEST, "--hunt", HUNT],
+    ["approve", "--all-pending", "--hunt", HUNT],
+    ["approve", "--watch", "--hunt", HUNT, "--minutes", "1"],
+    ["deny", REQUEST, "--hunt", HUNT],
+], ids=["approve", "all-pending", "watch", "deny"])
+def test_output_captured_under_the_switch_is_refused_and_no_key_blinks(tmp_path, enterprise, argv):
+    """Where the gateway's administrator requires a touch, a command whose output is captured (a
+    harness that gives an agent's command a terminal for its input and errors) never asks for one:
+    exit 3 on the terminal, nothing written to the pipe, only the gateway's description read,
+    nothing begun or decided, so no key blinks for it."""
+    stub, connection, env = enterprise("g1", touch_switch=True)
+    with stub:
+        master, proc = _input_terminal_only([argv[0], *connection, *argv[1:]], env, stderr_terminal=True)
+        screen = _Screen(master)
+        out, _ = proc.communicate(timeout=60)
+        shown = screen.close()
+    assert proc.returncode == 3, (out, shown)
+    assert out == b"", "nothing went to the pipe"
+    assert b"only when the command's output is your terminal too" in shown
+    assert b"nothing was asked or decided" in shown
+    assert [path for method, path, _ in stub.seen] == ["/_enterprise/me"], "only the description was read"
+    assert stub.request["status"] == "pending"
+
+
+@pytest.mark.parametrize("instance", ["enterprise", "local"])
+def test_no_terminal_for_input_is_no_persons_terminal(tmp_path, enterprise, instance):
+    """An agent's tool call: no terminal for input. Refused at once (exit 3), nothing written to
+    the captured output, nothing read of the instance, nothing decided."""
+    if instance == "enterprise":
+        stub, connection, env = enterprise("g1")
+    else:
+        stub, connection, env = StubInstance(), [], _environment(tmp_path)
+    with stub:
+        connection = connection or ["--url", stub.url]
+        proc = subprocess.run(
+            [sys.executable, "-m", "shakerscan", "approve", *connection, REQUEST, "--hunt", HUNT],
+            stdin=subprocess.DEVNULL, capture_output=True, env=env, cwd=str(ROOT), timeout=60,
+        )
+    assert proc.returncode == 3, (proc.stdout, proc.stderr)
+    assert b"interactive terminal" in proc.stderr and b"nothing was asked or decided" in proc.stderr
+    assert proc.stdout == b""
+    assert stub.seen == [], "nothing was read from or sent to the instance"
+    assert stub.request["status"] == "pending"
+
+
+def _read_ready(stream) -> bytes:
+    import select
+
+    return os.read(stream.fileno(), 65536) if select.select([stream], [], [], 0.1)[0] else b""
+
+
+PROMPT = "[d]eny  [s]kip  [q]uit: "
+
+
+def _local_watch(stub: StubInstance, tmp_path: Path) -> Session:
+    return Session(["approve", "--url", stub.url, "--watch", "--hunt", HUNT, "--minutes", "1"], _environment(tmp_path))
+
+
+def test_watch_ignores_a_key_pressed_before_the_request_and_keeps_polling(tmp_path):
+    """L2: a key typed before the keypress prompt was armed was echoed, then thrown away, and the
+    watch sat in a blocking read: nothing decided, no polling (150 s seen). A key pressed before a
+    prompt is ready must not decide, must be reported, and must not stop the watch."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.type("a")  # before the CLI has shown anything, let alone the request
+        session.expect(f"watching Hunt {HUNT} for permission requests... (Ctrl-C to stop)")
+        session.expect("(ignored keys pressed before this prompt was ready)")
+        session.expect(PROMPT)
+        assert stub.request["status"] == "pending", "a key typed before the request decided nothing"
+        session.type("d")
+        session.expect(f"denied: {TITLE} (by local-operator, local confirmation)")
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    assert stub.request["status"] == "denied" and stub.request["decision_via"] == "local_confirm"
+    # O2: an open-source engine has no approver session.
+    assert "stopped watching for permission requests" in out and "approver session" not in out, out
+
+
+def test_watch_needs_a_fresh_key_once_the_prompt_is_ready(tmp_path):
+    """L2, the reported case (a key sent the instant the request is on the screen): the key is
+    discarded on purpose, said so, and the watch is still there for the next key."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.expect(TITLE)
+        session.type("a")
+        session.expect("(ignored keys pressed before this prompt was ready)")
+        session.expect(PROMPT)
+        assert stub.request["status"] == "pending"
+        session.type("a")
+        session.expect(f"granted: {TITLE} (by local-operator, local confirmation)", timeout=10)
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    assert stub.request["status"] == "granted"
+
+
+@pytest.mark.parametrize("burst", ["\x1b[A", "\x1b[D", "\x1bOA", "\x1ba", "\x1b", "allow\n", "dq"],
+                         ids=["up-arrow", "left-arrow", "up-arrow-ss3", "alt-a", "escape", "paste", "two-keys"])
+def test_escape_sequences_and_pastes_never_decide(tmp_path, burst):
+    """B1: bytes were read one at a time and lowercased, so the Up arrow (ESC [ A) allowed, the
+    Left arrow denied, Alt-a allowed and a paste decided on its first a/d/s/q. A burst is
+    discarded whole; the watch then still takes a lone key."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.expect(PROMPT)
+        session.type(burst)
+        time.sleep(1.0)
+        assert stub.request["status"] == "pending", f"{burst!r} decided the request"
+        assert not [path for path in stub.routes("POST") if path.endswith("/decision")]
+        if burst == "\x1b":
+            # A lone ESC starts a sequence: the next byte is part of it (Alt-d), not a decision.
+            session.type("d")
+            time.sleep(1.0)
+            assert stub.request["status"] == "pending", "the byte after ESC decided the request"
+        session.type("d")
+        session.expect(f"denied: {TITLE}", timeout=10)
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    decisions = [body for method, path, body in stub.seen if path.endswith("/decision")]
+    assert [body["decision"] for body in decisions] == ["deny"], decisions
+
+
+@pytest.mark.parametrize("pieces", [("\x1b[", "A"), ("\x1b", "a"), ("\x1bO", "A"), ("\x1b[1;5", "D"), ("A",), ("D",)],
+                         ids=["csi-split", "alt-a-split", "ss3-split", "csi-params-split", "uppercase-A", "uppercase-D"])
+def test_a_sequence_split_in_time_or_an_uppercase_key_never_decides(tmp_path, pieces):
+    """B1: timing alone cannot tell keys from a sequence. ESC [ and then A 0.3 s later is still
+    the Up arrow, ESC and then a is still Alt-a; and an uppercase letter is not a choice."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.expect(PROMPT)
+        for piece in pieces:
+            session.type(piece)
+            time.sleep(0.3)
+        time.sleep(0.7)
+        assert stub.request["status"] == "pending", f"{pieces!r} decided the request"
+        session.type("a")
+        session.expect(f"granted: {TITLE}", timeout=10)
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    decisions = [body["decision"] for method, path, body in stub.seen if path.endswith("/decision")]
+    assert decisions == ["allow"], decisions
+
+
+@pytest.mark.parametrize(("pieces", "close"), [
+    ((b"\x1b]", b"a"), b"\x07"),
+    ((b"\x1bP", b"d"), b"\x1b\\"),
+    ((b"\x1b_", b"a"), b"\x07"),
+    ((b"\x1b^", b"d"), b"\x07"),
+    ((b"\x1bX", b"a"), b"\x07"),
+    ((b"\x9b", b"a"), b""),
+    ((b"\xc4\x9b",), b""),
+], ids=["osc", "dcs", "apc", "pm", "sos", "c1-csi", "utf8-with-9b"])
+def test_control_strings_and_8bit_csi_never_decide(tmp_path, pieces, close):
+    """OSC, DCS, APC, PM and SOS are strings that only BEL or ST end, so a key inside one (here
+    0.3 s after the introducer) is part of it; a lone 0x9B is CSI and swallows up to its final
+    byte; a UTF-8 character whose last byte is 0x9B is just a character. None decides."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.expect(PROMPT)
+        for piece in pieces:
+            os.write(session.master, piece)
+            time.sleep(0.3)
+        time.sleep(0.7)
+        assert stub.request["status"] == "pending", f"{pieces!r} decided the request"
+        if close:
+            os.write(session.master, close)  # the string ends; the next lone key counts again
+            time.sleep(0.3)
+        session.type("a")
+        session.expect(f"granted: {TITLE}", timeout=10)
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    decisions = [body["decision"] for method, path, body in stub.seen if path.endswith("/decision")]
+    assert decisions == ["allow"], decisions
+
+
+def test_an_open_control_string_ends_after_a_quiet_pause_and_not_before(tmp_path):
+    """Alt-] (ESC ]) opens an OSC string that only BEL or ST would end. Keys inside the quiet
+    window never decide (each one restarts it) and are reported; after about 1.5 s with no input
+    the string is closed and a lone key counts again."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.expect(PROMPT)
+        session.type("\x1b]")
+        time.sleep(0.3)
+        session.type("a")
+        session.expect("(input ignored: a terminal control string is open)")
+        for _ in range(3):  # keep typing inside the window: still nothing decides
+            time.sleep(0.8)
+            session.type("a")
+        time.sleep(0.5)
+        assert stub.request["status"] == "pending", "a key inside the reset window decided"
+        session.expect("(the terminal control string ended after a pause; keys count again)", timeout=5)
+        session.type("a")
+        session.expect(f"granted: {TITLE}", timeout=10)
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    decisions = [body["decision"] for method, path, body in stub.seen if path.endswith("/decision")]
+    assert decisions == ["allow"], decisions
+    assert out.count("(input ignored: a terminal control string is open)") == 1, "said once per string"
+
+
+def test_escape_escape_starts_a_new_sequence():
+    import hunt_approve  # the runtime helper, as the client vendors it
+
+    terminal = hunt_approve.Terminal()
+    assert terminal._feed(b"\x1b") is False
+    assert terminal._feed(b"\x1b") is False and terminal._escape == "escape", "ESC ESC: a new sequence"
+    assert terminal._feed(b"[") is False and terminal._escape == "csi"
+    assert terminal._feed(b"A") is False and terminal._escape == "idle"
+    assert terminal._feed(b"a") is True
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP], ids=["SIGTERM", "SIGHUP"])
+def test_a_terminated_watch_restores_the_terminal(tmp_path, signum):
+    """SIGTERM and SIGHUP left the terminal in keypress mode (no echo) and skipped the session
+    revoke; they now end the watch as Ctrl-C does."""
+    import termios
+
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        before = termios.tcgetattr(session.master)
+        session.expect(PROMPT)
+        armed = termios.tcgetattr(session.master)
+        assert not armed[3] & termios.ECHO, "keypress mode is on while the prompt waits"
+        session.proc.send_signal(signum)
+        session.proc.wait(timeout=15)
+        after = termios.tcgetattr(session.master)
+        code, out, err = session.finish()
+    assert code == 128 + signum, (code, out, err)  # ended by a signal, not by the person
+    assert after[3] & termios.ECHO and after[3] & termios.ICANON, "echo and line mode are back"
+    assert after[3] == before[3]
+    if signum == signal.SIGTERM:
+        assert "stopped watching for permission requests" in out, out
+    assert stub.request["status"] == "pending"
+
+
+def test_enterprise_watch_revokes_its_session_on_sigterm(enterprise):
+    stub, connection, env = enterprise("g1")
+    with stub:
+        session = Session(["approve", *connection, "--watch", "--hunt", HUNT, "--account", "alice",
+                           "--minutes", "1"], env)
+        session.expect("TOTP code for alice")
+        session.type(TOTP + "\n")
+        session.expect(PROMPT)
+        session.proc.send_signal(signal.SIGTERM)
+        code, out, err = session.finish()
+    assert code == 128 + signal.SIGTERM, (code, out, err)
+    assert "approver session ended" in out
+    assert "/_enterprise/approvals/session/revoke" in stub.routes("POST"), "the session was revoked"
+    assert stub.sessions == {}, "the gateway no longer holds the session"
+
+
+def test_watch_keeps_polling_while_the_prompt_waits(tmp_path):
+    """L2: waiting for the person's key never stops the watch from following the request."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.expect(PROMPT)
+        stub._decide({"subject_digest": "d" * 64, "decision": "allow", "decided_by": "someone-else",
+                      "decision_via": "local_confirm", "scope": "hunt"})
+        session.expect(f"{TITLE}: granted elsewhere by someone-else", timeout=15)
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    assert "stopped watching for permission requests" in out
+    assert not [body for method, path, body in stub.seen if path.endswith("/decision")], (
+        "the watch decided nothing itself"
+    )
+
+
+def test_sigterm_during_the_enterprise_step_up_opens_nothing_and_restores_the_terminal(enterprise):
+    """The handlers are installed before the step-up, so a signal there ends the command cleanly
+    (no traceback, echo back) and no approver session is left open."""
+    import termios
+
+    stub, connection, env = enterprise("g1")
+    with stub:
+        session = Session(["approve", *connection, "--watch", "--hunt", HUNT, "--account", "alice",
+                           "--minutes", "1"], env)
+        session.expect("TOTP code for alice")
+        session.proc.send_signal(signal.SIGTERM)
+        session.proc.wait(timeout=15)
+        after = termios.tcgetattr(session.master)
+        code, out, err = session.finish()
+    assert code == 128 + signal.SIGTERM, (code, out, err)
+    assert "stopped; no approver session was opened" in out and "Traceback" not in err, (out, err)
+    assert after[3] & termios.ECHO, "echo is back"
+    assert stub.sessions == {}
+    assert "/_enterprise/approvals/finish" not in stub.routes("POST")

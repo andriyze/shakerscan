@@ -1,0 +1,194 @@
+"""`shakerscan api`: the agent kit's one way to call the API, local or remote."""
+
+from __future__ import annotations
+
+import io
+import json
+import sys
+import urllib.error
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, "scripts")
+import api_cli  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class FakeOpener:
+    def __init__(self, status=200, body=b'{"ok": true}'):
+        self.status, self.body, self.requests = status, body, []
+
+    def open(self, request, timeout=None):
+        self.requests.append(request)
+        if self.status >= 400:
+            raise urllib.error.HTTPError(request.full_url, self.status, "err", {}, io.BytesIO(self.body))
+        return _Response(self.status, self.body)
+
+
+class _Response(io.BytesIO):
+    def __init__(self, status, body):
+        super().__init__(body)
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_base_url_precedence_and_validation():
+    assert api_cli.base_url(None, {}) == "http://127.0.0.1:8080"
+    assert api_cli.base_url(None, {"SHAKERSCAN_API_URL": "https://a.example/"}) == "https://a.example"
+    assert api_cli.base_url(None, {"SHAKERSCAN_API_BASE": "https://b.example", "SHAKERSCAN_API_URL": "https://a.example"}) == "https://b.example"
+    assert api_cli.base_url("https://c.example", {"SHAKERSCAN_API_BASE": "https://b.example"}) == "https://c.example"
+    with pytest.raises(api_cli.ApiCliError):
+        api_cli.base_url("ftp://x", {})
+
+
+def test_token_comes_from_a_file_by_preference_and_travels_only_over_https(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("sse_secret\n", encoding="utf-8")
+    assert api_cli.bearer_token({"SHAKERSCAN_API_TOKEN_FILE": str(token_file), "SHAKERSCAN_API_TOKEN": "other"}) == "sse_secret"
+    assert api_cli.bearer_token({"SHAKERSCAN_API_TOKEN": "sse_env"}) == "sse_env"
+    assert api_cli.bearer_token({}) is None
+    request = api_cli.build_request("get", "/findings?limit=2", None, api_url="https://a.example", token="sse_secret")
+    assert request.full_url == "https://a.example/findings?limit=2"
+    assert request.get_header("Authorization") == "Bearer sse_secret"
+    with pytest.raises(api_cli.ApiCliError, match="https"):
+        api_cli.build_request("GET", "/health", None, api_url="http://127.0.0.1:8080", token="sse_secret")
+    plain = api_cli.build_request("GET", "/health", None, api_url="http://127.0.0.1:8080", token=None)
+    assert plain.get_header("Authorization") is None
+
+
+def test_a_url_in_the_query_is_a_parameter_not_a_full_url():
+    """GET /targets/lookup?url=https://app.example is a path whose query names a URL: refusing it
+    as "not a full URL" sent people to percent-encode a value the engine documents unencoded."""
+    request = api_cli.build_request(
+        "GET", "/targets/lookup?url=https://t.example/app", None, api_url="https://a.example", token="sse_secret"
+    )
+    assert request.full_url == "https://a.example/targets/lookup?url=https://t.example/app"
+    assert request.host == "a.example"
+    for whole in ("https://other.example/findings", "/https://other.example/findings"):
+        with pytest.raises(api_cli.ApiCliError, match="not a full URL"):
+            api_cli.build_request("GET", whole, None, api_url="https://a.example", token="sse_secret")
+
+
+def test_post_sends_compact_json_and_errors_show_the_instance_detail():
+    request = api_cli.build_request("POST", "/scans", '{"target": "https://t.example", "policy": {"active_testing": false}}', api_url="https://a.example", token=None)
+    assert request.data == b'{"target":"https://t.example","policy":{"active_testing":false}}'
+    assert request.get_header("Content-type") == "application/json"
+    with pytest.raises(api_cli.ApiCliError, match="JSON"):
+        api_cli.build_request("POST", "/scans", "{not json", api_url="https://a.example", token=None)
+    opener = FakeOpener(403, json.dumps({"detail": "operation is not enabled for this role in Enterprise beta"}).encode())
+    status, text = api_cli.call(request, opener=opener)
+    output, code = api_cli.render(status, text)
+    assert code == 1 and output == "HTTP 403: operation is not enabled for this role in Enterprise beta"
+    output, code = api_cli.render(200, '{"b": 1, "a": [1, 2]}')
+    assert code == 0 and output == '{\n  "b": 1,\n  "a": [\n    1,\n    2\n  ]\n}'
+
+
+@pytest.mark.parametrize("detail, shown", [
+    # A workflow refusal: the code alone ("invalid_workflow") was all an agent read.
+    ({"error": "invalid_workflow", "violation": "no proof workflow could be built for this candidate"},
+     "invalid_workflow: no proof workflow could be built for this candidate"),
+    ({"error": "hypothesis_not_claimable", "message": "hypothesis_not_claimable: the lead changed"},
+     "hypothesis_not_claimable: the lead changed"),
+    ({"message": "No credential attached to this target.", "attach": "A person attaches one."},
+     "No credential attached to this target. A person attaches one."),
+    ({"error": "kind_moved_to_lead_board"}, "kind_moved_to_lead_board"),
+    ({"status": "claimed"}, '{"status": "claimed"}'),
+])
+def test_an_error_object_shows_its_reason_and_next_step(detail, shown):
+    output, code = api_cli.render(422, json.dumps({"detail": detail}))
+    assert code == 1 and output == f"HTTP 422: {shown}"
+
+
+def test_the_agent_kit_calls_the_api_only_through_the_helper():
+    """Every API call the kit teaches an agent goes through `shakerscan api`, so the same
+    instructions work against a local engine and a connected remote instance with a token."""
+    kit = [ROOT / "AGENTS.md", *(ROOT / ".claude" / "commands").glob("*.md"), *(ROOT / ".claude" / "agents").glob("*.md"),
+           ROOT / "skills" / "shakerscan" / "SKILL.md", *(ROOT / "skills" / "content-discovery" / "references").glob("*.md"),
+           *(ROOT / "skills" / "js-analyze" / "references").glob("*.md"), ROOT / "skills" / "ai-security-session" / "references" / "api.md"]
+    offenders = [str(p.relative_to(ROOT)) for p in kit if 'curl' in p.read_text(encoding="utf-8") and 'API_BASE' in p.read_text(encoding="utf-8") and any(
+        'curl' in line and 'API_BASE' in line for line in p.read_text(encoding="utf-8").splitlines())]
+    assert offenders == [], offenders
+    hook = (ROOT / ".claude" / "hooks" / "session-start.sh").read_text(encoding="utf-8")
+    assert "SHAKERSCAN_MANAGED_INSTANCE" in hook and "shakerscan api GET /health" in hook
+    assert "scripts/api_cli.py" in (ROOT / "install" / "index.sh").read_text(encoding="utf-8")
+
+
+def test_a_validation_refusal_names_each_field():
+    """D48: GLM spent four minutes on /coverage-angles because `shakerscan api` printed "HTTP 422:
+    Field required; Extra inputs are not permitted" with no field names. The body here is the
+    engine's own 422 for one of those live attempts."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.hunt import run_router
+
+    app = FastAPI()
+    app.include_router(run_router.router)
+    response = TestClient(app).post(
+        "/hunts/00000000-0000-4000-8000-000000000001/coverage-angles",
+        json={"family": "data_exposure", "state": "candidate", "locus": {"method": "GET", "path": "/id_rsa"}},
+    )
+    assert response.status_code == 422
+    text, code = api_cli.render(422, response.text)
+    assert code == 1
+    assert "status: Field required" in text and "state: Extra inputs are not permitted" in text
+    assert "candidate" not in text.replace("Field required", ""), "the rejected value is not echoed"
+
+
+def test_an_oversized_answer_fails_loudly_instead_of_printing_a_truncated_one(monkeypatch, capsys):
+    """an answer over the cap was cut at 8 MiB and printed as if whole (invalid JSON)."""
+    monkeypatch.setattr(api_cli, "MAX_RESPONSE_BYTES", 64)
+    request = api_cli.build_request("GET", "/findings", None, api_url="https://a.example", token=None)
+    exact = json.dumps({"items": ["x" * 40]}).encode()
+    assert len(exact) <= 64
+    assert api_cli.call(request, opener=FakeOpener(200, exact)) == (200, exact.decode())
+    with pytest.raises(api_cli.ApiCliError, match="larger than .* not printed.*limit=.*cursor="):
+        api_cli.call(request, opener=FakeOpener(200, json.dumps({"items": ["x" * 80]}).encode()))
+
+    class Big(FakeOpener):
+        pass
+
+    monkeypatch.setattr(api_cli, "_opener", lambda: Big(200, b'{"items": ["' + b"y" * 200 + b'"]}'))
+    monkeypatch.setattr(api_cli, "bearer_token", lambda: None)
+    assert api_cli.main(["--api-url", "https://a.example", "GET", "/findings"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "not printed" in captured.err
+
+
+def test_an_error_body_is_read_only_as_far_as_its_message():
+    request = api_cli.build_request("GET", "/findings", None, api_url="https://a.example", token=None)
+    status, text = api_cli.call(request, opener=FakeOpener(500, b"e" * (api_cli.MAX_ERROR_BYTES + 10)))
+    assert status == 500 and len(text) == api_cli.MAX_ERROR_BYTES
+
+
+def test_a_write_can_carry_a_retry_key_so_a_timed_out_batch_is_not_queued_twice():
+    # A 50-target POST /scans/batch outlived a 120 s client timeout and kept running; with no way
+    # to pass Idempotency-Key from the CLI, a retry would queue every Scan again.
+    request = api_cli.build_request("POST", "/scans/batch", '{"targets": ["https://t.example"]}',
+                                    api_url="https://a.example", token=None, idempotency_key="batch-2026-11-18-01")
+    assert request.get_header("Idempotency-key") == "batch-2026-11-18-01"
+    assert api_cli.build_request("POST", "/scans", "{}", api_url="https://a.example", token=None
+                                 ).get_header("Idempotency-key") is None
+    for bad in ("short", "-starts-with-dash", "has space in it", "x" * 201):
+        with pytest.raises(api_cli.ApiCliError, match="8 to 200 characters"):
+            api_cli.build_request("POST", "/scans", "{}", api_url="https://a.example", token=None, idempotency_key=bad)
+    with pytest.raises(api_cli.ApiCliError, match="POST, PUT, PATCH and DELETE"):
+        api_cli.build_request("GET", "/scans", None, api_url="https://a.example", token=None,
+                              idempotency_key="batch-2026-11-18-01")
+
+
+def test_the_cli_retry_key_matches_the_servers_key_rule():
+    from api.public_api_contract import _IDEMPOTENCY_KEY_RE
+    assert api_cli.IDEMPOTENCY_KEY_PATTERN.pattern == _IDEMPOTENCY_KEY_RE.pattern
+
+
+def test_the_scan_batch_route_is_covered_by_the_servers_retry_store():
+    from api.public_api_contract import public_v2_surface
+    assert public_v2_surface("/scans/batch") == "scan"

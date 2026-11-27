@@ -527,7 +527,7 @@ def test_a_revoked_pre_authorized_grant_is_not_granted_again_by_the_start_bounds
     assert note.startswith(f"Asked again because grant {auto['id']} (state-changing) was revoked at ")
     assert "by alice@example.test" in note and "allow_state_changing_http" in note
     withheld = {"coverage": "capability:state-changing", "fields": ["allow_state_changing_http"],
-                "flags": ["active-replay", "state-changing"]}
+                "flags": ["account-creation", "active-replay", "state-changing"]}
     (listed,) = run(env, list_grants(env.conn, hunt["id"]))
     assert listed["auto_grant_withheld"] == withheld
     revoked_event = run(env, env.conn.fetchval(

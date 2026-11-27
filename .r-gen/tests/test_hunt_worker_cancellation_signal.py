@@ -1,0 +1,301 @@
+"""Cancelling a Hunt must reach the capability jobs it queued to workers.
+
+Not every Hunt capability runs inline. A worker-placed one polls `agent_tool_cancel:{job_id}` for
+a job id minted fresh at queue time, so a Hunt cancellation could not reconstruct it -- and
+`HuntRunService.cancel` cancelled the Hunt row and its scans while that traffic kept running. An
+external audit found this after the inline watch and scan cascade were added, which is exactly the
+gap those two did not cover.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+
+from hunt.cancellation import (  # noqa: E402
+    JOB_CANCEL_PREFIX,
+    JOB_SET_PREFIX,
+    record_cancellable_job,
+    signal_cancelled_jobs,
+)
+
+
+class _Redis:
+    def __init__(self, *, fail_on=()):
+        self.sets: dict[str, set[str]] = {}
+        self.keys: dict[str, str] = {}
+        self.expiries: dict[str, int] = {}
+        self._fail_on = set(fail_on)
+
+    def sadd(self, key, value):
+        if "sadd" in self._fail_on:
+            raise RuntimeError("redis down")
+        self.sets.setdefault(key, set()).add(value)
+
+    def expire(self, key, ttl):
+        self.expiries[key] = ttl
+
+    def smembers(self, key):
+        if "smembers" in self._fail_on:
+            raise RuntimeError("redis down")
+        return set(self.sets.get(key) or ())
+
+    def set(self, key, value, ex=None):
+        if "set" in self._fail_on:
+            raise RuntimeError("redis down")
+        self.keys[key] = value
+
+
+def test_a_queued_job_is_signalled_when_its_hunt_is_cancelled():
+    redis = _Redis()
+    record_cancellable_job(redis, "hunt-1", "job-a")
+    record_cancellable_job(redis, "hunt-1", "job-b")
+
+    signalled = signal_cancelled_jobs(redis, "hunt-1")
+    assert signalled == ["job-a", "job-b"]
+    # The exact key a worker-placed capability polls.
+    assert redis.keys[f"{JOB_CANCEL_PREFIX}job-a"] == "1"
+    assert redis.keys[f"{JOB_CANCEL_PREFIX}job-b"] == "1"
+
+
+def test_another_hunts_jobs_are_untouched():
+    redis = _Redis()
+    record_cancellable_job(redis, "hunt-1", "mine")
+    record_cancellable_job(redis, "hunt-2", "theirs")
+
+    signal_cancelled_jobs(redis, "hunt-1")
+    assert f"{JOB_CANCEL_PREFIX}mine" in redis.keys
+    assert f"{JOB_CANCEL_PREFIX}theirs" not in redis.keys
+
+
+def test_signalling_is_idempotent():
+    redis = _Redis()
+    record_cancellable_job(redis, "hunt-1", "job-a")
+    assert signal_cancelled_jobs(redis, "hunt-1") == ["job-a"]
+    assert signal_cancelled_jobs(redis, "hunt-1") == ["job-a"]
+
+
+def test_the_job_set_expires_so_it_cannot_grow_without_bound():
+    redis = _Redis()
+    record_cancellable_job(redis, "hunt-1", "job-a")
+    assert redis.expiries[f"{JOB_SET_PREFIX}hunt-1"] > 0
+
+
+def test_bookkeeping_never_breaks_the_queue_path():
+    # Failing to remember a job must not stop it being queued: losing the ability to cancel it is
+    # bad, refusing to run authorized work because Redis hiccuped is worse.
+    record_cancellable_job(_Redis(fail_on=("sadd",)), "hunt-1", "job-a")
+
+
+def test_an_unreadable_set_does_not_block_the_cancellation():
+    # The Hunt is cancelled either way; signalling is best-effort on top of that.
+    assert signal_cancelled_jobs(_Redis(fail_on=("smembers",)), "hunt-1") == []
+
+
+def test_missing_identifiers_are_refused_rather_than_guessed():
+    redis = _Redis()
+    record_cancellable_job(redis, "", "job-a")
+    record_cancellable_job(redis, "hunt-1", "")
+    record_cancellable_job(None, "hunt-1", "job-a")
+    assert redis.sets == {}
+    assert signal_cancelled_jobs(redis, "") == []
+
+
+def test_every_queue_site_records_its_job():
+    """Enumerated from the source, not listed by hand.
+
+    The first version of this test named the two sites the fix had touched, so it passed while
+    browser, scanner and replay work stayed uncancellable -- an external audit found exactly that.
+    Discovering the sites means a new one cannot be added without either registering its job or
+    failing here.
+    """
+    import ast
+
+    router = Path("api/hunt/interaction_router.py").read_text(encoding="utf-8")
+    tree = ast.parse(router)
+    missing = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        if not node.name.startswith("_enqueue_"):
+            continue
+        body = ast.get_source_segment(router, node) or ""
+        # A site that mints a job id is placing work on a worker, so a Hunt cancellation has to be
+        # able to reach it.
+        if "job_id = str(uuid.uuid4())" not in body:
+            continue
+        if "record_cancellable_job_durable(" not in body:
+            missing.append(node.name)
+    assert not missing, (
+        "these queue work to a worker but never register it for Hunt cancellation: "
+        + ", ".join(sorted(missing))
+    )
+
+
+def test_the_enumeration_finds_every_known_site():
+    # Guard the guard: if the discovery predicate stops matching, the test above would pass
+    # vacuously.
+    import ast
+
+    router = Path("api/hunt/interaction_router.py").read_text(encoding="utf-8")
+    tree = ast.parse(router)
+    found = {
+        node.name for node in ast.walk(tree)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+        and node.name.startswith("_enqueue_")
+        and "job_id = str(uuid.uuid4())" in (ast.get_source_segment(router, node) or "")
+    }
+    assert found >= {
+        "_enqueue_canonical_network_capability",
+        "_enqueue_canonical_http_capability",
+        "_enqueue_canonical_browser_capability",
+        "_enqueue_canonical_scanner_capability",
+        "_enqueue_hunt_replay_capability",
+    }, found
+
+
+def test_cancel_signals_and_reports_what_it_reached():
+    from tests.api_sources import definition_source
+
+    # The signalling is shared with the startup authority repair, which cancels a Hunt it cannot
+    # rebuild the same way; cancel calls it.
+    source = definition_source("cancel")
+    assert "signal_hunt_jobs(" in source
+    assert "signal_cancelled_jobs(" in definition_source("signal_hunt_jobs")
+    assert 'payload["cancelled_job_ids"] = signalled' in source
+
+
+# ---------------------------------------------------------------------------
+# Executing the cancel path, not reading it.
+#
+# The tests above search `HuntRunService.cancel` for the name of the signalling
+# function. That is exactly what let a missing import ship: the call raised
+# NameError on every cancellation, a blanket `except Exception` swallowed it,
+# and the response reported an empty `cancelled_job_ids` as though the Hunt had
+# queued no jobs. Source text said the fix was there; nothing ran it.
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+import sys  # noqa: E402
+import uuid as _uuid  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "api"))
+
+from hunt.cancellation import record_cancellable_job  # noqa: E402
+from hunt.run_service import HuntRunService  # noqa: E402
+
+
+class _FakeRedis:
+    """Enough of the client for the job-set and cancel-flag calls."""
+
+    def __init__(self):
+        self.sets: dict[str, set[str]] = {}
+        self.strings: dict[str, str] = {}
+
+    def sadd(self, key, *values):
+        self.sets.setdefault(key, set()).update(str(v) for v in values)
+
+    def smembers(self, key):
+        return {value.encode() for value in self.sets.get(key, set())}
+
+    def expire(self, key, ttl):
+        return True
+
+    def set(self, key, value, **kwargs):
+        self.strings[key] = str(value)
+
+    def setex(self, key, ttl, value):
+        self.strings[key] = str(value)
+
+
+class _FakeRow(dict):
+    pass
+
+
+class _FakeConnection:
+    def __init__(self, hunt_row):
+        self._hunt_row = hunt_row
+
+    def transaction(self):
+        return _FakeAcquire(self)
+
+    async def fetchrow(self, query, *args):
+        return self._hunt_row
+
+    async def fetch(self, query, *args):
+        return []
+
+    async def execute(self, query, *args):
+        return None
+
+
+class _FakeAcquire:
+    def __init__(self, connection):
+        self._connection = connection
+
+    async def __aenter__(self):
+        return self._connection
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakePool:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def acquire(self):
+        return _FakeAcquire(self._connection)
+
+
+def test_cancel_actually_writes_worker_cancel_flags():
+    hunt_id = _uuid.uuid4()
+    redis = _FakeRedis()
+    # Two capability jobs this Hunt queued.
+    record_cancellable_job(redis, hunt_id, "job-alpha")
+    record_cancellable_job(redis, hunt_id, "job-beta")
+
+    row = _FakeRow({
+        "id": hunt_id, "status": "cancelled", "target_id": _uuid.uuid4(),
+        "objective": "o", "budget_profile": "fast", "stop_reason": "cancelled",
+        "created_at": None, "updated_at": None, "completed_at": None,
+    })
+    service = HuntRunService(lambda: _FakePool(_FakeConnection(row)), lambda: redis)
+
+    payload = asyncio.run(service.cancel(str(hunt_id)))
+
+    assert sorted(payload["cancelled_job_ids"]) == ["job-alpha", "job-beta"], (
+        "cancel reported no signalled jobs; the signalling call did not run"
+    )
+    for job_id in ("job-alpha", "job-beta"):
+        assert f"agent_tool_cancel:{job_id}" in redis.strings, job_id
+
+
+def test_a_coding_error_in_signalling_is_not_swallowed():
+    """An unreachable Redis is tolerated; a broken call must surface.
+
+    The blanket handler treated both the same, which is why a NameError looked
+    like "Redis had nothing to signal" for as long as it shipped.
+    """
+    hunt_id = _uuid.uuid4()
+    row = _FakeRow({
+        "id": hunt_id, "status": "cancelled", "target_id": _uuid.uuid4(),
+        "objective": "o", "budget_profile": "fast", "stop_reason": "cancelled",
+        "created_at": None, "updated_at": None, "completed_at": None,
+    })
+
+    class _BrokenRedis:
+        def smembers(self, key):
+            raise AttributeError("client has no smembers")
+
+    service = HuntRunService(
+        lambda: _FakePool(_FakeConnection(row)), lambda: _BrokenRedis(),
+    )
+    try:
+        asyncio.run(service.cancel(str(hunt_id)))
+    except AttributeError:
+        return
+    raise AssertionError("a coding error in signalling was swallowed")

@@ -1,0 +1,1550 @@
+"""Target-bound, read-only browser actions for canonical Hunt execution."""
+
+from __future__ import annotations
+
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
+import asyncio
+import base64
+import contextlib
+import dataclasses
+from dataclasses import dataclass, field
+import json
+import hashlib
+import ipaddress
+import math
+import re
+import sys
+import time
+import uuid
+import zlib
+from http.cookies import SimpleCookie
+from typing import Any, Mapping
+import urllib.parse
+from .browser_steps import browser_steps, browser_surface, ELEMENT_DESCRIPTOR, validate_fill
+from .xss_proof_payload import (
+    XSS_PROOF_ATTRIBUTE, XSS_PROOF_SETTLE_SECONDS, XSS_PROOF_TIMEOUT_MS, xss_proof_marker,
+    xss_proof_payload, xss_proof_signal,
+)
+
+try:
+    from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from pinned_socks_proxy import PinnedSocksProxy
+    from runtime.auth_refusal import (
+        AUTHENTICATION_REQUIRED, TARGET_UNAVAILABLE, UNAVAILABLE_STATUSES, is_login_location,
+        refusal, unavailable_status,
+    )
+    from runtime.auth_session_store import AuthSessionStoreError
+    from runtime.models import PreparedExecution, TargetBinding
+    from runtime.request_shape import nested_json_body
+    from runtime.secret_material import contains_secret_material
+    from runtime.target_bound_socket import FrozenTargetSocketFactory
+except ModuleNotFoundError:  # package imports in host-side tests
+    from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from ..pinned_socks_proxy import PinnedSocksProxy
+    from ..runtime.auth_refusal import (
+        AUTHENTICATION_REQUIRED, TARGET_UNAVAILABLE, UNAVAILABLE_STATUSES, is_login_location,
+        refusal, unavailable_status,
+    )
+    from ..runtime.auth_session_store import AuthSessionStoreError
+    from ..runtime.models import PreparedExecution, TargetBinding
+    from ..runtime.request_shape import nested_json_body
+    from ..runtime.secret_material import contains_secret_material
+    from ..runtime.target_bound_socket import FrozenTargetSocketFactory
+
+try:
+    from scanner_tools import http_archive_capture as _scan_capture
+except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools import http_archive_capture as _scan_capture
+
+try:
+    from scanner_tools.url_redaction import redact_client_route, redact_url
+except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
+try:
+    from scanner_tools import credential_redirects as _credential_redirects
+    from scanner_tools.destination_guard import DISABLE_WEBRTC as _DISABLE_WEBRTC
+except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools import credential_redirects as _credential_redirects
+    from scanner.scanner_tools.destination_guard import DISABLE_WEBRTC as _DISABLE_WEBRTC
+
+
+SAFE_BROWSER_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# Navigation answers that mean the proof never saw the route under test.
+MAX_BROWSER_RESPONSE_OBSERVATIONS = 200
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
+_SAFE_CSS_SELECTOR = re.compile(r"^[A-Za-z0-9_.#\-\[\]=:'\" ()>+~,*^$|]+$")
+_DANGEROUS_INTERACTION = re.compile(
+    r"(?:^|[^a-z0-9])(?:"
+    r"approve|buy|checkout|confirm|create|delete|destroy|disable|enable|execute|"
+    r"invite|log[ -]?out|pay|purchase|remove|reset|revoke|save|send|sign[ -]?out|"
+    r"start|stop|submit|terminate|transfer|upload"
+    r")(?:[^a-z0-9]|$)",
+    re.IGNORECASE,
+)
+
+
+
+# A proof page's dialog and console text is digested for at most this many events; past it an
+# event keeps only whether it matched the marker. Keyed (HMAC), never scrypt: a page that logs in
+# a loop must not hold the worker.
+MAX_DIGESTED_PROOF_EVENTS = 50
+
+
+def _event_digest(events: list[dict[str, Any]], text: str) -> str | None:
+    if len(events) >= MAX_DIGESTED_PROOF_EVENTS:
+        return None
+    return keyed_body_digest(str(text).encode("utf-8", "replace"))
+
+class BrowserCapabilityInputError(ValueError):
+    pass
+
+
+def _origin(value: str) -> str:
+    parsed = urllib.parse.urlsplit(str(value or ""))
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise BrowserCapabilityInputError("browser target origin is invalid")
+    if parsed.username or parsed.password:
+        raise BrowserCapabilityInputError("browser target origin must not contain userinfo")
+    return urllib.parse.urlunsplit(
+        (parsed.scheme.lower(), parsed.netloc.lower(), "", "", "")
+    )
+
+
+def _origin_key(value: str) -> tuple[str, str, int]:
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise BrowserCapabilityInputError("browser URL is invalid")
+    try:
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except ValueError as exc:
+        raise BrowserCapabilityInputError("browser URL port is invalid") from exc
+    return parsed.scheme.lower(), parsed.hostname.lower().rstrip("."), port
+
+
+def _redacted_path(value: str) -> str:
+    return redact_url(value, max_length=2_000)
+
+
+@dataclass(frozen=True)
+class PreparedBrowserNavigation:
+    capability_name: str
+    adapter_name: str
+    adapter_version: str
+    parser_version: str
+    target: TargetBinding
+    url: str
+    origin: str
+    pinned_address: str
+    wait_until: str
+    timeout_ms: int
+    max_requests: int
+    input_digest: str
+    estimated_budget: Mapping[str, int]
+    redacted_execution: Mapping[str, Any]
+    session_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class PreparedBrowserInteraction:
+    capability_name: str
+    adapter_name: str
+    adapter_version: str
+    parser_version: str
+    target: TargetBinding
+    url: str
+    origin: str
+    pinned_address: str
+    wait_until: str
+    timeout_ms: int
+    max_requests: int
+    selector: str
+    selector_digest: str
+    settle_ms: int
+    input_digest: str
+    estimated_budget: Mapping[str, int]
+    redacted_execution: Mapping[str, Any]
+    session_ref: str | None = None
+    steps: tuple[Mapping[str, str], ...] = ()
+    max_state_changing_requests: int = 0
+    traffic_counts: dict[str, int] = field(default_factory=dict, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class PreparedXSSBrowserProof:
+    capability_name: str
+    adapter_name: str
+    adapter_version: str
+    parser_version: str
+    target: TargetBinding
+    url: str
+    origin: str
+    pinned_address: str
+    wait_until: str
+    timeout_ms: int
+    max_requests: int
+    marker: str
+    marker_sha256: str
+    payload_sha256: str
+    candidate_id: str
+    parameter_name: str
+    injection_location: str
+    method: str
+    body: bytes
+    content_type: str | None
+    input_digest: str
+    estimated_budget: Mapping[str, int]
+    redacted_execution: Mapping[str, Any]
+
+
+PreparedBrowserAction = (
+    PreparedBrowserNavigation | PreparedBrowserInteraction | PreparedXSSBrowserProof
+)
+
+
+class XSSBrowserProofAdapter:
+    """Execute one server-derived XSS payload in the pinned browser runtime."""
+
+    capability_name = "xss.browser_prove_batch"
+    # The identity the registry declares for xss.browser_prove_batch; the executor refuses
+    # any other. The Hunt prover (a subclass) declares the plain runtime it runs under.
+    adapter_name = "playwright.xss_proof_batch"
+    adapter_version = "1"
+    parser_version = "xss-browser-proof/v1"
+    manages_cancellation = True
+
+    def __init__(
+        self, prepared: PreparedXSSBrowserProof, *,
+        trusted_headers: Mapping[str, str] | None = None,
+    ):
+        self.prepared = prepared
+        # The principal the candidate was discovered under. Held only on the adapter (never
+        # in the frozen prepared input, its digest or redacted execution) so header values
+        # cannot reach a receipt; the browser binds cookies to the origin and sends the rest
+        # on same-origin requests only.
+        self._trusted_headers = dict(trusted_headers or {})
+
+    @classmethod
+    def prepare(
+        cls, *, target: TargetBinding, execution_url: str,
+        candidate_id: str, parameter_name: str,
+        method: str = "GET", content_type: str | None = None,
+        body_field_names: tuple[str, ...] = (),
+    ) -> PreparedXSSBrowserProof:
+        origin = _origin(execution_url)
+        allowed_keys = {_origin_key(value) for value in target.allowed_origins}
+        if _origin_key(origin) not in allowed_keys or _origin_key(origin)[1] != target.canonical_host:
+            raise BrowserCapabilityInputError("XSS proof URL differs from target binding")
+        if not target.allowed_addresses:
+            raise BrowserCapabilityInputError("XSS proof target has no frozen address")
+        parsed = urllib.parse.urlsplit(execution_url)
+        normalized_method = str(method or "GET").strip().upper()
+        marker = xss_proof_marker(candidate_id)
+        payload = xss_proof_payload(candidate_id)
+        body = b""
+        normalized_content_type: str | None = None
+        if body_field_names:
+            if normalized_method not in {"POST", "PUT", "PATCH"}:
+                raise BrowserCapabilityInputError(
+                    "XSS body proof requires a bounded write method"
+                )
+            fields = tuple(dict.fromkeys(str(item) for item in body_field_names))
+            if parameter_name not in fields:
+                raise BrowserCapabilityInputError(
+                    "XSS proof parameter is absent from body authority"
+                )
+            normalized_content_type = str(content_type or "").lower()
+            if "json" in normalized_content_type:
+                # Dotted names describe a nested body; literal dotted keys would test a
+                # schema the target does not have and could only ever report not proven.
+                document = nested_json_body(
+                    fields, placeholder="shakerscan", values={parameter_name: payload},
+                )
+                body = json.dumps(
+                    document, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+                if json.dumps(payload).encode("utf-8") not in body:
+                    raise BrowserCapabilityInputError(
+                        "XSS proof parameter names a container, not a body value"
+                    )
+                normalized_content_type = "application/json"
+            else:
+                values = {
+                    name: payload if name == parameter_name else "shakerscan"
+                    for name in fields
+                }
+                body = urllib.parse.urlencode(values).encode("utf-8")
+                normalized_content_type = "application/x-www-form-urlencoded"
+            url = urllib.parse.urlunsplit((
+                parsed.scheme, parsed.netloc, parsed.path, "", "",
+            ))
+        else:
+            if normalized_method != "GET":
+                raise BrowserCapabilityInputError(
+                    "query XSS proof requires GET"
+                )
+            pairs = urllib.parse.parse_qsl(
+                parsed.query, keep_blank_values=True, max_num_fields=50,
+            )
+            query_matches = [
+                index for index, (name, _value) in enumerate(pairs)
+                if name == parameter_name
+            ]
+            fragment_parts = urllib.parse.urlsplit(parsed.fragment)
+            if fragment_parts.scheme or fragment_parts.netloc or fragment_parts.fragment:
+                raise BrowserCapabilityInputError("XSS proof fragment route is invalid")
+            fragment_pairs = urllib.parse.parse_qsl(
+                fragment_parts.query, keep_blank_values=True, max_num_fields=50,
+            )
+            fragment_matches = [
+                index for index, (name, _value) in enumerate(fragment_pairs)
+                if name == parameter_name
+            ]
+            if len(query_matches) + len(fragment_matches) != 1:
+                raise BrowserCapabilityInputError(
+                    "XSS proof parameter authority is ambiguous"
+                )
+            injection_location = "fragment" if fragment_matches else "query"
+            if fragment_matches:
+                index = fragment_matches[0]
+                fragment_pairs[index] = (fragment_pairs[index][0], payload)
+                fragment = urllib.parse.urlunsplit((
+                    "", "", fragment_parts.path,
+                    urllib.parse.urlencode(fragment_pairs, doseq=True), "",
+                ))
+            else:
+                index = query_matches[0]
+                pairs[index] = (pairs[index][0], payload)
+                fragment = parsed.fragment
+            url = urllib.parse.urlunsplit((
+                parsed.scheme, parsed.netloc, parsed.path,
+                urllib.parse.urlencode(pairs, doseq=True), fragment,
+            ))
+        if body:
+            injection_location = "body"
+        if _origin_key(url) != _origin_key(origin):
+            raise BrowserCapabilityInputError("XSS proof URL escaped target origin")
+        socket_factory = FrozenTargetSocketFactory(
+            hostname=target.canonical_host,
+            port=parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+            frozen_addresses=target.allowed_addresses,
+        )
+        normalized = {
+            "target_id": target.target_id, "candidate_id": candidate_id,
+            "parameter_name": parameter_name, "method": normalized_method,
+            "injection_location": injection_location,
+            "url_sha256": hashlib.sha256(url.encode()).hexdigest(),
+            "body_sha256": hashlib.sha256(body).hexdigest() if body else None,
+        }
+        return PreparedXSSBrowserProof(
+            capability_name=cls.capability_name, adapter_name=cls.adapter_name,
+            adapter_version=cls.adapter_version, parser_version=cls.parser_version,
+            target=target, url=url, origin=origin,
+            pinned_address=socket_factory.primary_address,
+            wait_until="domcontentloaded", timeout_ms=XSS_PROOF_TIMEOUT_MS, max_requests=50,
+            marker=marker, marker_sha256=hashlib.sha256(marker.encode()).hexdigest(),
+            payload_sha256=hashlib.sha256(payload.encode()).hexdigest(),
+            candidate_id=candidate_id, parameter_name=parameter_name,
+            injection_location=injection_location,
+            method=normalized_method, body=body,
+            content_type=normalized_content_type,
+            input_digest=PreparedExecution.digest_input(normalized),
+            estimated_budget={
+                "browser_actions": 2, "http_requests": 50,
+                **({"state_changing_requests": 1} if body else {}),
+                "tool_wall_seconds": 30,
+            },
+            redacted_execution={
+                "candidate_id": candidate_id, "parameter_name": parameter_name,
+                "injection_location": injection_location,
+                "method": normalized_method,
+                "request_url": _proof_request_url(url),
+                "body_sha256": hashlib.sha256(body).hexdigest() if body else None,
+                "payload_sha256": hashlib.sha256(payload.encode()).hexdigest(),
+                "marker_sha256": hashlib.sha256(marker.encode()).hexdigest(),
+                "address_policy": socket_factory.policy_receipt,
+                "secret_values_visible": False,
+            },
+        )
+
+    async def execute(self, *, heartbeat: Heartbeat, cancelled: Cancelled) -> CapabilityAdapterResult:
+        return await _execute_browser_action(
+            self.prepared, heartbeat=heartbeat, cancelled=cancelled,
+            trusted_headers=self._trusted_headers or None,
+        )
+
+
+def _prepare_browser_base(
+    *,
+    target: TargetBinding,
+    base_url: str,
+    args: Mapping[str, Any],
+    allowed_fields: set[str],
+) -> dict[str, Any]:
+    unknown_fields = sorted(str(key) for key in set(args) - allowed_fields)
+    if unknown_fields:
+        raise BrowserCapabilityInputError(
+            f"unsupported browser input fields: {', '.join(unknown_fields)}"
+        )
+    if target.target_kind not in {"web", "api", "network", "device"}:
+        raise BrowserCapabilityInputError(
+            "browser actions support only web and API targets"
+        )
+    base_origin = _origin(args.get("origin") or base_url)
+    # Compare by normalized origin key so an explicit default port (host:80,
+    # host:443) matches a binding that stored the bare origin, and vice versa.
+    if _origin_key(base_origin) not in {_origin_key(value) for value in target.allowed_origins}:
+        raise BrowserCapabilityInputError(
+            "browser origin is not present in the target binding"
+        )
+    if _origin_key(base_origin)[1] != target.canonical_host:
+        raise BrowserCapabilityInputError(
+            "browser origin host does not match the target binding"
+        )
+    raw_path = args.get("path", "/")
+    if not isinstance(raw_path, str):
+        raise BrowserCapabilityInputError("browser path must be a string")
+    path = raw_path.strip() or "/"
+    if (
+        not path.startswith("/")
+        or path.startswith("//")
+        or "\\" in path
+        or len(path) > 2_000
+        or _CONTROL_CHARACTER.search(path)
+    ):
+        raise BrowserCapabilityInputError(
+            "browser path must be a bounded same-origin absolute path"
+        )
+    parsed_path = urllib.parse.urlsplit(path)
+    if parsed_path.scheme or parsed_path.netloc:
+        raise BrowserCapabilityInputError(
+            "browser path must not contain an origin"
+        )
+    query_pairs = urllib.parse.parse_qsl(
+        parsed_path.query, keep_blank_values=True, max_num_fields=50,
+    )
+    if contains_secret_material(dict(query_pairs)) or contains_secret_material(path):
+        raise BrowserCapabilityInputError(
+            "browser input contains raw secret material; use a managed credential reference"
+        )
+    session_ref = args.get("session_ref")
+    if session_ref is not None:
+        try:
+            session_ref = str(uuid.UUID(session_ref))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise BrowserCapabilityInputError("session_ref must be an opaque session UUID") from exc
+    raw_wait_until = args.get("wait_until", "domcontentloaded")
+    if not isinstance(raw_wait_until, str):
+        raise BrowserCapabilityInputError("wait_until must be a string")
+    wait_until = raw_wait_until.strip().lower() or "domcontentloaded"
+    if wait_until not in {"domcontentloaded", "load"}:
+        raise BrowserCapabilityInputError(
+            "wait_until must be domcontentloaded or load"
+        )
+    raw_timeout_ms = args.get("timeout_ms", 20_000)
+    raw_max_requests = args.get("max_requests", 25)
+    if (
+        isinstance(raw_timeout_ms, bool)
+        or not isinstance(raw_timeout_ms, int)
+        or isinstance(raw_max_requests, bool)
+        or not isinstance(raw_max_requests, int)
+    ):
+        raise BrowserCapabilityInputError(
+            "browser timeout and request limit must be integers"
+        )
+    timeout_ms = raw_timeout_ms
+    max_requests = raw_max_requests
+    if not 1_000 <= timeout_ms <= 30_000:
+        raise BrowserCapabilityInputError(
+            "browser timeout_ms must be between 1000 and 30000"
+        )
+    if not 1 <= max_requests <= 50:
+        raise BrowserCapabilityInputError(
+            "browser max_requests must be between 1 and 50"
+        )
+    if not target.allowed_addresses:
+        raise BrowserCapabilityInputError(
+            "browser target binding has no frozen runtime address"
+        )
+    parsed_origin = urllib.parse.urlsplit(base_origin)
+    socket_factory = FrozenTargetSocketFactory(
+        hostname=target.canonical_host,
+        port=parsed_origin.port or (
+            443 if parsed_origin.scheme.lower() == "https" else 80
+        ),
+        frozen_addresses=target.allowed_addresses,
+    )
+    pinned_address = socket_factory.primary_address
+    if _is_ip_literal(target.canonical_host) and str(
+        ipaddress.ip_address(str(target.canonical_host))
+    ) != pinned_address:
+        raise BrowserCapabilityInputError(
+            "browser IP target does not match its frozen runtime address"
+        )
+    url = urllib.parse.urljoin(f"{base_origin}/", path.lstrip("/"))
+    if _origin_key(url) != _origin_key(base_origin):
+        raise BrowserCapabilityInputError("browser URL escaped the target origin")
+    return {
+        "target": target,
+        "url": url,
+        "origin": base_origin,
+        "path": path,
+        "pinned_address": pinned_address,
+        "wait_until": wait_until,
+        "timeout_ms": timeout_ms,
+        "max_requests": max_requests,
+        "address_policy": socket_factory.policy_receipt,
+        "session_ref": session_ref,
+    }
+
+
+class BrowserNavigateAdapter:
+    capability_name = "browser.navigate"
+    adapter_name = "playwright"
+    adapter_version = "1"
+    parser_version = "browser-navigation/v1"
+
+    def __init__(self, prepared: PreparedBrowserNavigation, *, session_loader=None):
+        self.prepared = prepared
+        self.session_loader = session_loader
+
+    @classmethod
+    def prepare(
+        cls,
+        *,
+        target: TargetBinding,
+        base_url: str,
+        args: Mapping[str, Any],
+    ) -> PreparedBrowserNavigation:
+        common = _prepare_browser_base(
+            target=target,
+            base_url=base_url,
+            args=args,
+            allowed_fields={"origin", "path", "wait_until", "timeout_ms", "max_requests", "session_ref"},
+        )
+        normalized = {
+            "target_id": target.target_id,
+            "target_kind": target.target_kind,
+            "origin": common["origin"],
+            "path": common["path"],
+            "pinned_address": common["pinned_address"],
+            "wait_until": common["wait_until"],
+            "timeout_ms": common["timeout_ms"],
+            "max_requests": common["max_requests"],
+            "session_ref": common["session_ref"],
+        }
+        return PreparedBrowserNavigation(
+            capability_name=cls.capability_name,
+            adapter_name=cls.adapter_name,
+            adapter_version=cls.adapter_version,
+            parser_version=cls.parser_version,
+            target=target,
+            url=common["url"],
+            origin=common["origin"],
+            pinned_address=common["pinned_address"],
+            wait_until=common["wait_until"],
+            timeout_ms=common["timeout_ms"],
+            max_requests=common["max_requests"],
+            session_ref=common["session_ref"],
+            input_digest=PreparedExecution.digest_input(normalized),
+            estimated_budget={
+                "browser_actions": 1,
+                "http_requests": common["max_requests"],
+                "tool_wall_seconds": max(
+                    1, math.ceil(common["timeout_ms"] / 1_000)
+                ),
+            },
+            redacted_execution={
+                "origin": common["origin"],
+                "path": _redacted_path(common["path"]),
+                "pinned_address": common["pinned_address"],
+                "address_policy": common["address_policy"],
+                "wait_until": common["wait_until"],
+                "max_requests": common["max_requests"],
+                "read_only_requests_only": True,
+            },
+        )
+
+    async def execute(
+        self,
+        *,
+        heartbeat: Heartbeat,
+        cancelled: Cancelled,
+    ) -> CapabilityAdapterResult:
+        return await _execute_browser_with_session(
+            self.prepared,
+            session_loader=self.session_loader,
+            heartbeat=heartbeat,
+            cancelled=cancelled,
+        )
+
+
+class BrowserInteractAdapter:
+    capability_name = "browser.interact"
+    adapter_name = "playwright"
+    adapter_version = "1"
+    parser_version = "browser-interaction/v1"
+
+    def __init__(self, prepared: PreparedBrowserInteraction, *, session_loader=None):
+        self.prepared = prepared
+        self.session_loader = session_loader
+
+    @classmethod
+    def prepare(
+        cls,
+        *,
+        target: TargetBinding,
+        base_url: str,
+        args: Mapping[str, Any],
+    ) -> PreparedBrowserInteraction:
+        common = _prepare_browser_base(
+            target=target,
+            base_url=base_url,
+            args=args,
+            allowed_fields={
+                "origin", "path", "selector", "wait_until", "timeout_ms",
+                "max_requests", "settle_ms", "steps", "session_ref",
+            },
+        )
+        try:
+            steps = browser_steps(args)
+        except ValueError as exc:
+            raise BrowserCapabilityInputError(str(exc)) from exc
+        raw_selector = steps[-1]["selector"]
+        if not isinstance(raw_selector, str):
+            raise BrowserCapabilityInputError("browser selector must be a string")
+        selector = raw_selector.strip()
+        lowered_selector = selector.lower()
+        if (
+            not selector
+            or len(selector) > 500
+            or _CONTROL_CHARACTER.search(selector)
+            or not _SAFE_CSS_SELECTOR.fullmatch(selector)
+            or ">>" in selector
+            or lowered_selector.startswith(("xpath=", "text="))
+            or ":has-text" in lowered_selector
+            or ":text" in lowered_selector
+            or contains_secret_material(selector)
+        ):
+            raise BrowserCapabilityInputError(
+                "browser selector must be a bounded CSS selector without secret material"
+            )
+        raw_settle_ms = args.get("settle_ms", 500)
+        if isinstance(raw_settle_ms, bool) or not isinstance(raw_settle_ms, int):
+            raise BrowserCapabilityInputError("browser settle_ms must be an integer")
+        settle_ms = raw_settle_ms
+        if not 0 <= settle_ms <= 2_000:
+            raise BrowserCapabilityInputError(
+                "browser settle_ms must be between 0 and 2000"
+            )
+        selector_digest = hashlib.sha256(selector.encode("utf-8")).hexdigest()
+        normalized = {
+            "target_id": target.target_id,
+            "target_kind": target.target_kind,
+            "origin": common["origin"],
+            "path": common["path"],
+            "pinned_address": common["pinned_address"],
+            "wait_until": common["wait_until"],
+            "timeout_ms": common["timeout_ms"],
+            "max_requests": common["max_requests"],
+            "selector": selector,
+            "settle_ms": settle_ms,
+            "steps": steps,
+            "session_ref": common["session_ref"],
+        }
+        return PreparedBrowserInteraction(
+            capability_name=cls.capability_name,
+            adapter_name=cls.adapter_name,
+            adapter_version=cls.adapter_version,
+            parser_version=cls.parser_version,
+            target=target,
+            url=common["url"],
+            origin=common["origin"],
+            pinned_address=common["pinned_address"],
+            wait_until=common["wait_until"],
+            timeout_ms=common["timeout_ms"],
+            max_requests=common["max_requests"],
+            session_ref=common["session_ref"],
+            steps=steps,
+            selector=selector,
+            selector_digest=selector_digest,
+            settle_ms=settle_ms,
+            input_digest=PreparedExecution.digest_input(normalized),
+            estimated_budget={
+                "browser_actions": 1 + len(steps),
+                "http_requests": common["max_requests"],
+                "tool_wall_seconds": max(
+                    1, math.ceil(common["timeout_ms"] / 1_000)
+                ),
+            },
+            redacted_execution={
+                "origin": common["origin"],
+                "path": _redacted_path(common["path"]),
+                "pinned_address": common["pinned_address"],
+                "address_policy": common["address_policy"],
+                "wait_until": common["wait_until"],
+                "max_requests": common["max_requests"],
+                "selector_sha256": selector_digest,
+                "settle_ms": settle_ms,
+                "interaction": "replay",
+                "step_count": len(steps),
+                "authenticated_session": bool(common["session_ref"]),
+                "read_only_requests_only": True,
+            },
+        )
+
+    async def execute(
+        self,
+        *,
+        heartbeat: Heartbeat,
+        cancelled: Cancelled,
+    ) -> CapabilityAdapterResult:
+        return await _execute_browser_with_session(
+            self.prepared,
+            session_loader=self.session_loader,
+            heartbeat=heartbeat,
+            cancelled=cancelled,
+        )
+
+
+def require_workflow_policy(policy):
+    get = policy.get if isinstance(policy,dict) else lambda key: getattr(policy,key,None)
+    if not (get('active_testing') is True and get('allow_state_changing_http') is True and get('approval_receipt_id')):
+        raise BrowserCapabilityInputError('Browser workflows require active and state-changing HTTP authority')
+
+
+class BrowserWorkflowAdapter(BrowserInteractAdapter):
+    """Authorized forms and cleanup share the same pinned browser executor."""
+    adapter_name='playwright'
+    adapter_version='1'
+    capability_name='browser.workflow'
+
+    @classmethod
+    def prepare(cls,*,target,base_url,args):
+        from dataclasses import replace
+        # Any request the call sends may be a write: up to its request ceiling (50, as
+        # browser.interact), never a smaller second count that ends a form flow halfway.
+        writes=args.get('max_state_changing_requests',4)
+        if type(writes) is not int or not 1<=writes<=50:
+            raise BrowserCapabilityInputError('Workflow mutation ceiling must be from 1 to 50')
+        values={key:value for key,value in args.items() if key!='max_state_changing_requests'}
+        prepared=super().prepare(target=target,base_url=base_url,args=values)
+        return replace(prepared,max_state_changing_requests=writes,
+            input_digest=hashlib.sha256((prepared.input_digest+':writes:'+str(writes)).encode()).hexdigest(),
+            estimated_budget={**prepared.estimated_budget,'state_changing_requests':writes},
+            redacted_execution={**prepared.redacted_execution,'read_only_requests_only':False,
+                                'max_state_changing_requests':writes})
+
+
+def browser_capability_adapter(name: str):
+    if name == "browser.login_check":
+        from .browser_login_action import BrowserLoginAdapter
+        return BrowserLoginAdapter
+    adapters = {
+        BrowserNavigateAdapter.capability_name: BrowserNavigateAdapter,
+        BrowserInteractAdapter.capability_name: BrowserInteractAdapter,
+    }
+    if name == "browser.workflow":
+        return BrowserWorkflowAdapter
+    normalized = str(name or "").strip().lower()
+    if normalized not in adapters:
+        raise BrowserCapabilityInputError(
+            f"unsupported browser capability: {normalized or '<empty>'}"
+        )
+    return adapters[normalized]
+
+
+def _refused_session_code(exc: Exception) -> str:
+    # The store's refusals are fixed sentences without target data; reduce them to a stable code.
+    message = str(exc)
+    if "capability" in message:
+        return "auth_session_capability_not_allowed"
+    if "expired or revoked" in message:
+        return "auth_session_expired"
+    return "auth_session_unavailable"
+
+
+async def _execute_browser_with_session(prepared, *, session_loader, heartbeat, cancelled):
+    if prepared.session_ref:
+        if session_loader is None:
+            raise BrowserCapabilityInputError("Managed browser session requires worker resolution")
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                headers = await stack.enter_async_context(session_loader())
+            except AuthSessionStoreError as exc:
+                # A refused session ends the action before any request, with its reason: as a
+                # bare adapter fault the agent could not tell that the session's profile does
+                # not allow the browser.
+                return CapabilityAdapterResult(
+                    status="failed",
+                    errors=(_refused_session_code(exc),),
+                    actual_budget={},
+                    parser_version=prepared.parser_version,
+                    redacted_execution=prepared.redacted_execution,
+                )
+            return await _execute_browser_action(prepared, heartbeat=heartbeat, cancelled=cancelled, trusted_headers=headers)
+    return await _execute_browser_action(prepared, heartbeat=heartbeat, cancelled=cancelled)
+
+
+async def _execute_browser_action(
+    prepared: PreparedBrowserAction,
+    *,
+    heartbeat: Heartbeat,
+    cancelled: Cancelled,
+    trusted_headers: Mapping[str, str] | None = None,
+) -> CapabilityAdapterResult:
+    """Run one browser action. Its pinned proxy admits only the bound origin, so trusted headers
+    reach nothing else; the result says what was refused (``browser_session_header_coverage``)."""
+    events = _credential_redirects.SessionHeaderEvents()
+    result = await _execute_browser_action_in_context(
+        prepared, heartbeat=heartbeat, cancelled=cancelled, trusted_headers=trusted_headers,
+        session_header_events=events,
+    )
+    if not events.reasons():
+        return result
+    coverage = {"kind": "browser_session_header_coverage", **events.as_dict()}
+    return dataclasses.replace(
+        result, observations=(coverage, *result.observations)[:MAX_BROWSER_RESPONSE_OBSERVATIONS],
+    )
+
+
+async def _execute_browser_action_in_context(
+    prepared: PreparedBrowserAction,
+    *,
+    heartbeat: Heartbeat,
+    cancelled: Cancelled,
+    trusted_headers: Mapping[str, str] | None = None,
+    session_header_events: Any = None,
+) -> CapabilityAdapterResult:
+    started = time.monotonic()
+    request_count = 0
+    proof_body_requests = 0
+    # A refused write that carried the XSS proof's marker (the page's own writes do not count).
+    payload_write_blocked = False
+    browser_actions = 0
+    blocked: list[dict[str, Any]] = []
+    responses: list[dict[str, Any]] = []
+    action_observations: list[dict[str, Any]] = []
+    navigation_observations: list[dict[str, Any]] = []
+    related_request_urls: list[str] = []
+    playwright = None
+    browser = None
+    context = None
+    pinned_proxy = None
+    try:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return CapabilityAdapterResult(
+            status="failed",
+            errors=("playwright_unavailable",),
+            actual_budget={},
+            parser_version=prepared.parser_version,
+            redacted_execution=prepared.redacted_execution,
+        )
+
+    async def await_task(task: asyncio.Task[Any]) -> tuple[bool, Any]:
+        loop = asyncio.get_running_loop()
+        next_heartbeat = loop.time() + 5.0
+        while not task.done():
+            if cancelled():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                return False, None
+            if loop.time() >= next_heartbeat:
+                await heartbeat()
+                next_heartbeat = loop.time() + 5.0
+            await asyncio.wait({task}, timeout=0.1)
+        return True, await task
+
+    try:
+        if cancelled():
+            return CapabilityAdapterResult(
+                status="cancelled",
+                errors=("cancelled_before_browser_start",),
+                actual_budget={},
+                parser_version=prepared.parser_version,
+                redacted_execution=prepared.redacted_execution,
+            )
+        parsed_origin = urllib.parse.urlsplit(prepared.origin)
+        pinned_proxy = await PinnedSocksProxy(
+            hostname=prepared.target.canonical_host,
+            pinned_addresses=prepared.target.allowed_addresses,
+            port=parsed_origin.port or (
+                443 if parsed_origin.scheme.lower() == "https" else 80
+            ),
+            max_connections=prepared.max_requests,
+            # Only the bound origin's scheme crosses the tunnel (TLS for https, plaintext for http).
+            scheme=parsed_origin.scheme.lower(),
+        ).start()
+        responses.append({
+            "kind": "browser_target_transport",
+            "address_policy": pinned_proxy.socket_factory.policy_receipt,
+            "address_attempts": pinned_proxy.address_attempts,
+            "address_connections": pinned_proxy.address_connections,
+            "hostname_preserved": True,
+            "runtime_dns_resolution": False,
+        })
+        playwright = await async_playwright().start()
+        browser = await playwright.chromium.launch(
+            headless=True,
+            proxy={"server": pinned_proxy.proxy_url},
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-background-networking",
+                "--dns-prefetch-disable",
+                "--disable-features=Prerender2,SpeculationRulesPrefetch,UseDnsHttpsSvcbAlpn",
+                "--proxy-bypass-list=<-loopback>",
+                "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1",
+            ],
+        )
+        context = await browser.new_context(
+            accept_downloads=False,
+            ignore_https_errors=True,
+            service_workers="block",
+            # Every connection goes through the pinned proxy, so Local Network Access can be
+            # granted without widening where the page can reach.
+            **_credential_redirects.local_network_access(True),
+        )
+        # Cookie headers cannot be overridden by Playwright routing. Bind them
+        # to the exact target URL; do not serialize or return browser storage.
+        for name, value in (trusted_headers or {}).items():
+            if name.lower() == "cookie":
+                cookies = SimpleCookie()
+                cookies.load(value)
+                await context.add_cookies([
+                    {"name": key, "value": cookie.value, "url": prepared.origin,
+                     "httpOnly": True, "secure": prepared.origin.startswith("https:")}
+                    for key, cookie in cookies.items()
+                ])
+        if trusted_headers and session_header_events is not None:
+            context.on("console", session_header_events.observe_console)
+            session_header_events.origins = frozenset(_credential_redirects.bound_origins([prepared.origin]))
+            context.on("request", session_header_events.observe_request)
+
+        # WebRTC sends UDP outside the pinned proxy: the page has no RTCPeerConnection.
+        await context.add_init_script(_DISABLE_WEBRTC)
+        await context.add_init_script(
+            "window.WebSocket = class { constructor() { throw new Error('blocked'); } };"
+            "window.EventSource = class { constructor() { throw new Error('blocked'); } };"
+            "window.open = () => { throw new Error('blocked'); };"
+            "navigator.sendBeacon = () => false;"
+        )
+
+        async def route_request(route) -> None:
+            nonlocal request_count, proof_body_requests, payload_write_blocked
+            request = route.request
+            reason = None
+            if cancelled():
+                reason = "cancelled"
+            else:
+                try:
+                    same_origin = _origin_key(request.url) == _origin_key(prepared.origin)
+                except BrowserCapabilityInputError:
+                    same_origin = False
+                body_navigation = (
+                    isinstance(prepared, PreparedXSSBrowserProof)
+                    and bool(prepared.body)
+                    and request.method.upper() == "GET"
+                    and request.url == prepared.url
+                    and proof_body_requests == 0
+                )
+                if not same_origin:
+                    reason = "cross_origin"
+                elif body_navigation:
+                    if request_count >= prepared.max_requests:
+                        reason = "request_budget_exhausted"
+                    else:
+                        request_count += 1
+                        proof_body_requests += 1
+                        headers = {**dict(request.headers), **{
+                            name.lower(): value for name, value in (trusted_headers or {}).items()
+                            if name.lower() != "cookie"
+                        }}
+                        headers["content-type"] = str(prepared.content_type)
+                        await route.continue_(
+                            method=prepared.method,
+                            post_data=prepared.body,
+                            headers=headers,
+                        )
+                        return
+                elif request.method.upper() not in SAFE_BROWSER_METHODS:
+                    if not isinstance(prepared, PreparedBrowserInteraction) or not prepared.max_state_changing_requests:
+                        reason = "state_changing_method"
+                        if isinstance(prepared, PreparedXSSBrowserProof) and _carries_marker(
+                            request, prepared.marker,
+                        ):
+                            payload_write_blocked = True
+                    elif request.method.upper() not in {"POST","PUT","PATCH","DELETE"}:
+                        reason = "unsupported_mutation_method"
+                    elif prepared.traffic_counts.get("state_changing_requests",0) >= prepared.max_state_changing_requests:
+                        reason = "mutation_budget_exhausted"
+                    elif request_count >= prepared.max_requests:
+                        reason = "request_budget_exhausted"
+                    else:
+                        prepared.traffic_counts["state_changing_requests"] = prepared.traffic_counts.get("state_changing_requests",0)+1
+                elif request_count >= prepared.max_requests:
+                    reason = "request_budget_exhausted"
+            if reason:
+                if len(blocked) < MAX_BROWSER_RESPONSE_OBSERVATIONS:
+                    blocked.append({
+                        "kind": "browser_request_blocked",
+                        "reason": reason,
+                        "method": request.method.upper(),
+                        "url": _observation_url(request.url),
+                    })
+                await route.abort("blockedbyclient")
+                return
+            request_count += 1
+            if trusted_headers:
+                headers = {**dict(request.headers), **{
+                    name.lower(): value for name, value in trusted_headers.items()
+                    if name.lower() != "cookie"
+                }}
+                # Chromium carries continued headers into redirect hops; the pinned proxy admits
+                # only the target's hostname and port, so a hop elsewhere is refused before any
+                # byte of it leaves (refusals are counted below).
+                await route.continue_(headers=headers)
+            else:
+                await route.continue_()
+
+        async def record_response(response) -> None:
+            if len(responses) >= MAX_BROWSER_RESPONSE_OBSERVATIONS:
+                return
+            try:
+                if _origin_key(response.url) != _origin_key(prepared.origin):
+                    return
+                public_url = _observation_url(response.url)
+                if (
+                    isinstance(prepared, PreparedXSSBrowserProof)
+                    and prepared.marker in urllib.parse.unquote(response.url)
+                    and public_url not in related_request_urls
+                    and len(related_request_urls) < 20
+                ):
+                    related_request_urls.append(public_url)
+                responses.append({
+                    "kind": "browser_http_response",
+                    "method": response.request.method.upper(),
+                    "url": public_url,
+                    "status_code": int(response.status),
+                    "content_type": _safe_content_type(
+                        response.headers.get("content-type")
+                    ),
+                    # What the page asked for (document, script, fetch, xhr, image...): a retest
+                    # of a browser XSS proof judges the page's data requests against these.
+                    "resource_type": str(getattr(response.request, "resource_type", "") or "")[:20],
+                })
+            except Exception:
+                return
+
+        await context.route("**/*", route_request)
+        context.on("response", record_response)
+        page = await context.new_page()
+        proof_events: list[dict[str, Any]] = []
+        if isinstance(prepared, PreparedXSSBrowserProof):
+            async def proof_dialog(dialog) -> None:
+                message = str(dialog.message or "")
+                proof_events.append({
+                    "signal": "dialog",
+                    "marker_match": xss_proof_signal(message, prepared.marker),
+                    "message_sha256": _event_digest(proof_events, message),
+                })
+                await dialog.dismiss()
+
+            def proof_console(message) -> None:
+                text = str(message.text or "")
+                proof_events.append({
+                    "signal": "console",
+                    "marker_match": xss_proof_signal(text, prepared.marker),
+                    "message_sha256": _event_digest(proof_events, text),
+                })
+
+            page.on("dialog", proof_dialog)
+            page.on("console", proof_console)
+        browser_actions = 1
+        navigation = asyncio.create_task(page.goto(
+            prepared.url,
+            wait_until=prepared.wait_until,
+            timeout=prepared.timeout_ms,
+        ))
+        completed, response = await await_task(navigation)
+        if not completed:
+            return _browser_result(
+                prepared,
+                status="cancelled",
+                request_count=request_count,
+                browser_actions=browser_actions,
+                started=started,
+                observations=responses,
+                blocked=blocked,
+                errors=("cancelled",),
+            )
+        await heartbeat()
+        if _origin_key(page.url) != _origin_key(prepared.origin):
+            return _browser_result(
+                prepared,
+                status="blocked",
+                request_count=request_count,
+                browser_actions=browser_actions,
+                started=started,
+                observations=responses,
+                blocked=blocked,
+                errors=("final_url_outside_target_origin",),
+            )
+        navigation_observation = {
+            "kind": "browser_navigation",
+            "url": _observation_url(page.url),
+            "status_code": int(response.status) if response is not None else None,
+            "same_origin": True,
+            "read_only_requests_only": True,
+            "request_count": request_count,
+            "blocked_request_count": len(blocked),
+        }
+        navigation_observations.append(navigation_observation)
+        if isinstance(prepared, PreparedXSSBrowserProof):
+            browser_actions = 2
+            await asyncio.sleep(XSS_PROOF_SETTLE_SECONDS)
+            await heartbeat()
+            dom_marker = await page.get_attribute(
+                "html", XSS_PROOF_ATTRIBUTE,
+            )
+            dom_match = xss_proof_signal(dom_marker, prepared.marker)
+            matched = [item for item in proof_events if item["marker_match"]]
+            proven = bool(matched or dom_match)
+            screenshot_sha256 = None
+            if proven:
+                # Replace target content before capture so the proof image cannot
+                # retain user data, credentials, or application response text.
+                await page.evaluate(
+                    "marker => { document.body.replaceChildren(); const node = "
+                    "document.createElement('div'); node.id='shakerscan-proof'; "
+                    "node.textContent='ShakerScan deterministic XSS execution proof'; "
+                    "node.setAttribute('data-marker-sha256', marker); "
+                    "document.body.appendChild(node); }",
+                    prepared.marker_sha256,
+                )
+                screenshot = await page.screenshot(full_page=False)
+                screenshot_sha256 = hashlib.sha256(bytes(screenshot)).hexdigest()
+            proof_observation = {
+                "kind": "xss_browser_proof",
+                "candidate_id": prepared.candidate_id,
+                "parameter_name": prepared.parameter_name,
+                "injection_location": prepared.injection_location,
+                "request_url": _proof_request_url(prepared.url),
+                "related_request_urls": related_request_urls,
+                "proof_state": "verified" if proven else "not_proven",
+                "finding_verdict": "verified" if proven else "not_proven",
+                "proof_producer": "shakerscan",
+                "evidence_type": "dom_execution" if proven else None,
+                "technique": (
+                    "headless_xss_dialog" if any(
+                        item["signal"] == "dialog" for item in matched
+                    ) else "headless_xss_console" if matched
+                    else "headless_xss_dom" if dom_match else None
+                ),
+                "payload_sha256": prepared.payload_sha256,
+                "marker_sha256": prepared.marker_sha256,
+                "event_transcript": proof_events[:20],
+                "dom_marker_executed": dom_match,
+                # The proof is read-only, so every write is refused. Only a refused write that
+                # carried the payload is part of the attempt; a page's own writes (socket
+                # polling, telemetry) are not, and leave a negative complete.
+                "payload_write_blocked": payload_write_blocked,
+                "sanitized_screenshot_sha256": screenshot_sha256,
+                "browser_build": str(getattr(browser, "version", "unknown")),
+                "same_origin": True,
+                "secret_values_visible": False,
+            }
+            # An authentication or authorization refusal means the payload never reached
+            # the page under test: the browser rendered a 401/403 page, not the route. That
+            # is an inconclusive attempt, not a negative result, so it must not count as
+            # completed coverage (an authenticated candidate replayed without its session
+            # used to read as "examined, not vulnerable").
+            navigation_status = navigation_observation["status_code"]
+            refused = None if proven else refusal(
+                navigation_status,
+                dict(getattr(response, "headers", None) or {}) if response is not None else {},
+            )
+            if refused is None and not proven and is_login_location(page.url) and not (
+                is_login_location(getattr(prepared, "url", ""))
+            ):
+                # The browser followed a redirect to sign-in: the route under test never
+                # rendered.
+                refused = (int(navigation_status or 0), AUTHENTICATION_REQUIRED)
+            if refused is None and not proven and (
+                not navigation_status
+                or navigation_status in UNAVAILABLE_STATUSES
+                or (
+                    prepared.injection_location == "fragment"
+                    and unavailable_status((navigation_status,)) is not None
+                )
+            ):
+                # The service did not serve the page under test: it answered the navigation
+                # with 408, 429 or 502-504 (down, overloaded, rate-limiting), or not at all. The
+                # browser rendered that answer, not the route, so a payload that did not run
+                # there is no verdict on the candidate. A fragment never reaches the server, so
+                # for a fragment parameter a missing page or a server error is the service's
+                # answer too. A query or body payload does reach it, and a 404 or 500 may be the
+                # application's answer to that payload (request validation, a lookup by the
+                # value); with no ordinary request to compare with (the retest sends one), that
+                # stays a negative.
+                refused = (int(navigation_status or 0), TARGET_UNAVAILABLE)
+            if refused is not None:
+                # A 403 that asks for no credentials (a WAF, an access rule) is told apart:
+                # adding a credential profile would not help it. The attempt is no verdict, so
+                # the observation says so too, as the partial action does: not "not proven".
+                proof_observation["inconclusive_reason"] = refused[1]
+                proof_observation["proof_state"] = "inconclusive"
+                proof_observation["finding_verdict"] = "inconclusive"
+                return _browser_result(
+                    prepared,
+                    status="partial",
+                    request_count=request_count,
+                    browser_actions=browser_actions,
+                    started=started,
+                    observations=[navigation_observation, proof_observation, *responses],
+                    blocked=blocked,
+                    errors=(f"{refused[1]}:{refused[0]}",),
+                )
+            # A pinned browser blocks every off-origin subresource by design, so a real
+            # single-page app always reports some blocked requests. That is the transport
+            # enforcing the frozen origin, not a failed proof: the attempt navigated the
+            # bound origin and ran its deterministic DOM marker check, so it is a completed
+            # (success) attempt whether or not the marker fired. proof_state records the
+            # verdict; the blocked requests stay in the observations for the receipt. A
+            # partial here would have kept every real-target proof out of the "completed"
+            # state the skill-usage and finding contracts require.
+            return _browser_result(
+                prepared,
+                status="success",
+                request_count=request_count,
+                browser_actions=browser_actions,
+                started=started,
+                observations=[navigation_observation, proof_observation, *responses],
+                blocked=blocked,
+                errors=(),
+            )
+        if isinstance(prepared, PreparedBrowserInteraction):
+            steps = prepared.steps or ({"action": "click", "selector": prepared.selector},)
+            for index, step in enumerate(steps):
+                locator = page.locator(step["selector"])
+                match_count = await locator.count()
+                if match_count != 1:
+                    return _browser_result(
+                        prepared, status="partial" if action_observations else "blocked",
+                        request_count=request_count, browser_actions=browser_actions,
+                        started=started, observations=[navigation_observation, *action_observations, *responses],
+                        blocked=blocked, errors=("browser_selector_not_found" if match_count == 0 else "browser_selector_ambiguous",),
+                    )
+                element = await locator.evaluate(ELEMENT_DESCRIPTOR)
+                if step["action"] == "fill":
+                    try:
+                        validate_fill(element)
+                    except ValueError as exc:
+                        raise BrowserCapabilityInputError(str(exc)) from exc
+                    element_kind = "text_field"
+                else:
+                    if prepared.max_state_changing_requests:
+                        if element.get("tag") not in {"button","input","a","summary"} and element.get("role") not in {"button","tab"}:
+                            raise BrowserCapabilityInputError("Workflow requires a clickable control")
+                        element_kind = "workflow_control"
+                    else:
+                        element_kind = _validate_read_only_interaction(prepared, element)
+                remaining_ms = prepared.timeout_ms - int((time.monotonic() - started) * 1_000)
+                if remaining_ms <= 0:
+                    raise PlaywrightTimeoutError("browser interaction deadline expired")
+                browser_actions += 1
+                operation = locator.fill(step["value"], timeout=remaining_ms) if step["action"] == "fill" else locator.click(timeout=remaining_ms)
+                completed, _value = await await_task(asyncio.create_task(operation))
+                if not completed:
+                    return _browser_result(
+                        prepared, status="cancelled", request_count=request_count,
+                        browser_actions=browser_actions, started=started,
+                        observations=[navigation_observation, *action_observations, *responses],
+                        blocked=blocked, errors=("cancelled",),
+                    )
+                remaining_ms = prepared.timeout_ms - int((time.monotonic() - started) * 1_000)
+                if prepared.settle_ms and remaining_ms > 0:
+                    await asyncio.sleep(min(prepared.settle_ms, remaining_ms) / 1_000)
+                if _origin_key(page.url) != _origin_key(prepared.origin):
+                    raise BrowserCapabilityInputError("interaction_final_url_outside_target_origin")
+                action_observations.append({
+                    "kind": "browser_interaction", "interaction": step["action"],
+                    "step_index": index, "selector_sha256": hashlib.sha256(step["selector"].encode()).hexdigest(),
+                    "element_kind": element_kind, "url": _observation_url(page.url),
+                    "client_route": redact_client_route(page.url),
+                    "same_origin": True, "read_only_requests_only": not bool(prepared.max_state_changing_requests),
+                    "request_count": request_count, "blocked_request_count": len(blocked),
+                })
+        remaining_seconds = max(0.001, prepared.timeout_ms / 1000 - (time.monotonic() - started))
+        surface = await asyncio.wait_for(browser_surface(page), timeout=remaining_seconds)
+        return _browser_result(
+            prepared, status="partial" if blocked else "success",
+            request_count=request_count, browser_actions=browser_actions, started=started,
+            observations=[navigation_observation, *action_observations, surface, *responses],
+            blocked=blocked, errors=("browser_requests_blocked",) if blocked else (),
+        )
+    except (PlaywrightTimeoutError, asyncio.TimeoutError):
+        return _browser_result(
+            prepared,
+            status="partial",
+            request_count=request_count,
+            browser_actions=browser_actions,
+            started=started,
+            observations=[*navigation_observations, *action_observations, *responses],
+            blocked=blocked,
+            errors=("browser_action_timeout",),
+            timed_out=True,
+        )
+    except BrowserCapabilityInputError as exc:
+        return _browser_result(
+            prepared,
+            status="partial" if action_observations else "blocked",
+            request_count=request_count,
+            browser_actions=browser_actions,
+            started=started,
+            observations=[*navigation_observations, *action_observations, *responses],
+            blocked=blocked,
+            errors=(str(exc),),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        return _browser_result(
+            prepared,
+            status="partial" if action_observations else "failed",
+            request_count=request_count,
+            browser_actions=browser_actions,
+            started=started,
+            observations=[*navigation_observations, *action_observations, *responses],
+            blocked=blocked,
+            errors=(f"browser_action:{type(exc).__name__}",),
+        )
+    finally:
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                pass
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        if playwright is not None:
+            try:
+                await playwright.stop()
+            except Exception:
+                pass
+        if pinned_proxy is not None:
+            try:
+                await pinned_proxy.close()
+            except Exception:
+                pass
+            if trusted_headers and session_header_events is not None:
+                # Connections to anything but the bound origin, refused at the pinned proxy.
+                session_header_events.record(
+                    _credential_redirects.SESSION_CROSS_ORIGIN_REFUSED,
+                    sum(dict(getattr(pinned_proxy, "refused_destinations", {}) or {}).values())
+                    + int(getattr(pinned_proxy, "refused_destinations_other", 0) or 0),
+                )
+            # Inside a Scan worker the browser's tunnel joins the Scan's request archive; the
+            # archive never decides the action's outcome.
+            try:
+                _scan_capture.record_tunnel(
+                    pinned_proxy.tunnel_record(scheme=urllib.parse.urlsplit(prepared.origin).scheme),
+                    capability_name=prepared.capability_name, tool="chromium",
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[http-archive] {prepared.capability_name}: tunnel not recorded: "
+                      f"{type(exc).__name__}", file=sys.stderr, flush=True)
+
+
+def _validate_read_only_interaction(
+    prepared: PreparedBrowserInteraction,
+    element: Any,
+) -> str:
+    if not isinstance(element, Mapping):
+        raise BrowserCapabilityInputError("browser interaction element is invalid")
+    tag = str(element.get("tag") or "").strip().lower()
+    role = str(element.get("role") or "").strip().lower()
+    element_type = str(element.get("type") or "").strip().lower()
+    href = str(element.get("href") or "").strip()
+    target = str(element.get("target") or "").strip().lower()
+    semantics = str(element.get("semantics") or "")[:500]
+    if bool(element.get("download")) or target not in {"", "_self"}:
+        raise BrowserCapabilityInputError("browser interaction is not read-only")
+    if _DANGEROUS_INTERACTION.search(" ".join((semantics, href))):
+        raise BrowserCapabilityInputError("browser interaction has unsafe semantics")
+    if tag in {"a", "area"}:
+        if not href:
+            raise BrowserCapabilityInputError("browser link has no destination")
+        if _origin_key(href) != _origin_key(prepared.origin):
+            raise BrowserCapabilityInputError("browser link leaves the target origin")
+        parsed = urllib.parse.urlsplit(href)
+        try:
+            query = dict(urllib.parse.parse_qsl(
+                parsed.query, keep_blank_values=True, max_num_fields=50,
+            ))
+        except ValueError as exc:
+            raise BrowserCapabilityInputError(
+                "browser link query is too large"
+            ) from exc
+        if contains_secret_material(query) or contains_secret_material(href):
+            raise BrowserCapabilityInputError("browser link contains unsafe material")
+        return "same_origin_link"
+    if tag == "summary":
+        return "disclosure"
+    if tag == "button" and element_type == "button" and element.get("expanded"):
+        return "disclosure_button"
+    if role == "tab" and tag in {"button", "div", "li", "span"}:
+        if tag == "button" and element_type not in {"", "button"}:
+            raise BrowserCapabilityInputError("browser tab button can submit a form")
+        return "tab"
+    raise BrowserCapabilityInputError(
+        "browser interaction must select one same-origin link, disclosure, or tab"
+    )
+
+
+def _is_ip_literal(value: str | None) -> bool:
+    try:
+        ipaddress.ip_address(str(value or ""))
+        return True
+    except ValueError:
+        return False
+
+
+def _observation_url(value: str) -> str:
+    return redact_url(str(value or ""), max_length=2_000)
+
+
+# The most of a refused write's body (or of what a compressed body expands to) searched for the
+# proof's marker. A larger body cannot be told apart, so it counts as carrying the marker.
+_MARKER_SEARCH_BYTES = 1_048_576
+_BASE64URL = bytes.maketrans(b"+/", b"-_")
+
+
+def _marker_forms(marker: str) -> frozenset[bytes]:
+    """The byte runs a value carrying ``marker`` contains in the encodings a page applies before
+    it writes: as text (URL, form and JSON encoding leave the marker's letters, digits, ``_`` and
+    ``-`` as they are), hexadecimal, UTF-16, and base64 or base64url at each of the three byte
+    alignments the marker can start at (the whole 3-byte groups it fills encode the same way
+    whatever surrounds it)."""
+    raw = marker.encode()
+    forms = {raw, raw.hex().encode(), raw.hex().upper().encode(),
+             marker.encode("utf-16-le"), marker.encode("utf-16-be")}
+    for start in range(3):
+        whole = raw[start:start + (len(raw) - start) // 3 * 3]
+        if len(whole) >= 9:
+            encoded = base64.b64encode(whole)
+            forms.update((encoded, encoded.translate(_BASE64URL)))
+    return frozenset(forms)
+
+
+def _decoded_views(data: bytes) -> list[bytes]:
+    """``data``, what it reads as once percent-decoded (up to twice: a page may encode every
+    byte, and the browser may encode that again), and, when it is gzip, zlib or raw deflate,
+    what it expands to (bounded)."""
+    views = [data]
+    for _ in range(2):
+        decoded = urllib.parse.unquote_to_bytes(views[-1])
+        if decoded == views[-1]:
+            break
+        views.append(decoded)
+    for wbits in (47, -15):  # 47: gzip or zlib header; -15: raw deflate
+        try:
+            expanded = zlib.decompressobj(wbits).decompress(data, _MARKER_SEARCH_BYTES)
+        except zlib.error:
+            continue
+        if expanded:
+            views.append(expanded)
+            break
+    return views
+
+
+def _carries_marker(request: Any, marker: str) -> bool:
+    """Whether a refused write carries the XSS proof's marker, in its URL or its body.
+
+    The marker is searched as text and in the common encodings a page applies before it writes
+    (``_marker_forms``), in the URL and the body as sent, percent-decoded and decompressed. A
+    body that cannot be read, or is larger than the search window, counts as carrying it, so a
+    write the proof cannot tell apart keeps the negative incomplete. A page that transforms the
+    payload further (encrypts or hashes it) before writing it is not told apart.
+    """
+    forms = _marker_forms(marker)
+    try:
+        body = request.post_data_buffer or b""
+    except Exception:  # noqa: BLE001 - an unreadable body is not evidence of a page-only write
+        return True
+    body = bytes(body)
+    if len(body) > _MARKER_SEARCH_BYTES:
+        return True
+    url = str(getattr(request, "url", "") or "").encode("utf-8", "replace")
+    return any(form in view for data in (url, body) for view in _decoded_views(data) for form in forms)
+
+
+def _proof_request_url(value: str) -> str:
+    """Retain a value-free SPA route while applying the normal URL redaction contract."""
+    parsed = urllib.parse.urlsplit(str(value or ""))
+    base = redact_url(urllib.parse.urlunsplit((
+        parsed.scheme, parsed.netloc, parsed.path, parsed.query, "",
+    )), max_length=2_000)
+    client_route = redact_client_route(value)
+    return f"{base}#{client_route}" if client_route else base
+
+
+def _safe_content_type(value: Any) -> str:
+    media_type = str(value or "").split(";", 1)[0].strip().lower()
+    if not re.fullmatch(r"[a-z0-9!#$&^_.+\-]+/[a-z0-9!#$&^_.+\-]+", media_type):
+        return ""
+    return media_type[:127]
+
+
+def _browser_result(
+    prepared: PreparedBrowserAction,
+    *,
+    status: str,
+    request_count: int,
+    browser_actions: int,
+    started: float,
+    observations: list[Mapping[str, Any]],
+    blocked: list[Mapping[str, Any]],
+    errors: tuple[str, ...],
+    timed_out: bool = False,
+) -> CapabilityAdapterResult:
+    partial = status == "partial"
+    elapsed = max(0, math.ceil(time.monotonic() - started))
+    # ``started`` precedes proxy and browser launch, which the reservation (the navigation
+    # timeout) does not cover: a navigation that used its whole timeout must settle as the
+    # reservation, not as an over-reservation that fails the action and drops what it observed.
+    reserved_wall = prepared.estimated_budget.get("tool_wall_seconds")
+    if reserved_wall is not None:
+        elapsed = min(elapsed, max(1, int(reserved_wall)))
+    return CapabilityAdapterResult(
+        status=status,
+        observations=tuple([*observations, *blocked][
+            :MAX_BROWSER_RESPONSE_OBSERVATIONS
+        ]),
+        errors=errors,
+        actual_budget={
+            "browser_actions": browser_actions,
+            "http_requests": request_count,
+            **({"state_changing_requests":prepared.traffic_counts.get("state_changing_requests",0)}
+               if isinstance(prepared,PreparedBrowserInteraction) and prepared.max_state_changing_requests else {}),
+            **({
+                "state_changing_requests": 1
+            } if (
+                isinstance(prepared, PreparedXSSBrowserProof)
+                and bool(prepared.body)
+                and request_count > 0
+            ) else {}),
+            "tool_wall_seconds": elapsed,
+        },
+        partial=partial,
+        timed_out=timed_out,
+        execution_started=browser_actions > 0,
+        parser_version=prepared.parser_version,
+        redacted_execution=prepared.redacted_execution,
+    )

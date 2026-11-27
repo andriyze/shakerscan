@@ -1,0 +1,183 @@
+"""Token issuance cannot override explicit rejected or unfinished authentication."""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from tests.test_sqli_proof_capability import _request, _run as run_sql
+from tests.test_nosqli_verify_capability import _run as run_nosql, _result
+
+
+def _run(family, response, *, token_header=False):
+    class AuthenticationTransport:
+        async def send(self, request, **_kwargs):
+            value = json.loads(request.body)["password"]
+            injected = isinstance(value, dict) if family == "nosql" else "OR 1=1" in value
+            headers = {"Content-Type": "application/json"}
+            if injected and token_header:
+                headers["Authorization"] = "Bearer operator-token"
+            return _result(
+                200 if injected else 401,
+                json.dumps(response if injected else {"error": "invalid credentials"}).encode(),
+                headers,
+            )
+
+    run = run_sql if family == "sql" else run_nosql
+    return run(
+        _request(
+            method="POST", url="https://app.example.test/login",
+            body='{"email":"nobody@example.test","password":"invalid"}',
+            content_type="application/json",
+        ),
+        {"candidate_id": "c" * 64, "method": "POST", "field_path": "password",
+         "request_class": "safe_authentication", "request_ref_id": "exact-request"},
+        AuthenticationTransport(),
+    )
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+@pytest.mark.parametrize("envelope", [
+    {"authenticated": False},
+    {"isAuthenticated": "false"},
+    {"requires_mfa": True},
+    {"requiresMfa": True},
+    {"requires_two_factor": "true"},
+    {"status": "MFA_REQUIRED"},
+    {"state": "pending_verification"},
+    {"success": False},
+    {"error": {"code": "MFA_REQUIRED"}},
+    {"error_description": "login rejected"},
+    {"challenge": "complete captcha"},
+    {"mfa": {"required": True}},
+    {"mfa": {"token": "challenge-secret"}},
+    {"code": "INVALID_CREDENTIALS"},
+    {"purpose": "mfa"},
+    {"data": {"status": "mfa_required"}},
+    {"challenge": {"required": True}},
+    {"challenge": {"status": "pending"}},
+])
+def test_explicit_incomplete_authentication_vetoes_json_and_header_tokens(family, envelope):
+    response = {"authentication": {"token": "operator-token"}, **envelope}
+    result = _run(family, response, token_header=True)
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"
+    assert proof["proof_contract"] is None
+    assert result.actual_budget["http_requests"] == (8 if family == "sql" else 4)
+    assert "operator-token" not in json.dumps(result.__dict__, default=str)
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+@pytest.mark.parametrize("response", [
+    {"token": "mfa-challenge-token", "requires_mfa": True, "authenticated": False},
+    {"authentication": {"token": "operator-token", "authenticated": False}},
+    {"token": "operator-token"},
+])
+def test_unvalidated_or_nested_rejected_token_is_an_observation(family, response):
+    result = _run(family, response)
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert result.observations[0]["proof_contract"] is None
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+@pytest.mark.parametrize("response", [
+    {"authentication": {"token": "operator-token"}},
+    {"token": "operator-token", "authenticated": True, "requires_mfa": False},
+    {"access_token": "operator-token", "token_type": "Bearer", "errors": []},
+    {"session": {"token": "operator-token"}, "user": {"mfa": {"enabled": True}}},
+    # Status fields that describe other objects do not veto a successful login.
+    {"authentication": {"token": "operator-token"}, "user": {"email_verification": {"status": "pending"}}},
+    {"access_token": "operator-token", "user": {"status": "unverified"}},
+    {"access_token": "operator-token", "subscription": {"state": "failed", "error": "card declined"}},
+    {"authentication": {"token": "operator-token"}, "challenge": {"required": False}},
+    {"data": {"access_token": "operator-token", "token_type": "Bearer"}},
+])
+def test_successful_authentication_token_responses_still_prove_bypass(family, response):
+    result = _run(family, response)
+    assert result.observations[0]["proof_state"] == "verified"
+    assert result.observations[0]["proof_contract"] is not None
+    assert "operator-token" not in json.dumps(result.__dict__, default=str)
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+@pytest.mark.parametrize("wrapper", ["loginResult", "customEnvelope", "vendorReply"])
+@pytest.mark.parametrize("failure", [{"authenticated": False}, {"status": "mfa_required"}, {"requires_mfa": True}])
+def test_unknown_wrappers_do_not_hide_a_tokens_own_failed_authentication(family, wrapper, failure):
+    response = {wrapper: {"authentication": {"token": "stage-canary", **failure}}}
+    result = _run(family, response, token_header=True)
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert result.observations[0]["proof_contract"] is None
+    assert "stage-canary" not in json.dumps(result.__dict__, default=str)
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_unknown_wrapper_failure_along_the_token_ancestry_vetoes_bypass(family):
+    result = _run(family, {"loginResult": {"requiresMfa": True, "authentication": {"token": "stage-canary"}}})
+    assert result.observations[0]["proof_state"] == "not_proven"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_successful_unknown_wrapper_ignores_unrelated_metadata(family):
+    result = _run(family, {"loginResult": {"authentication": {"token": "login-canary"}},
+                          "user": {"verification": {"required": True}, "subscription": {"status": "failed"}}})
+    assert result.observations[0]["proof_state"] == "verified"
+
+
+# Inspection is bounded, so a verdict the walk cannot see must never count as "no failure".
+# These run the real SQL and NoSQL adapters end to end, as the cases above do.
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_a_rejection_in_a_body_larger_than_the_parse_window_is_not_proof(family):
+    """The helper parsed only the first 2,000,000 bytes while the transport accepts 2 MiB. A
+    larger valid body failed to parse and the header token alone was returned as proof."""
+    response = {"authenticated": False, "padding": "x" * 2_000_000}
+    assert 2_000_000 < len(json.dumps(response)) < 2 * 1024 * 1024
+    result = _run(family, response, token_header=True)
+    assert result.observations[0]["proof_state"] != "verified"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_a_rejection_past_the_list_limit_is_not_proof(family):
+    """Only the first twenty list items were inspected, so moving a rejection from index 19
+    to index 20 turned an explicit failure into verified bypass."""
+    steps = [{"step": index} for index in range(20)] + [{"status": "mfa_required"}]
+    result = _run(family, {"access_token": "issued", "login_steps": steps})
+    assert result.observations[0]["proof_state"] != "verified"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_a_rejection_below_the_depth_limit_is_not_proof(family):
+    nested: dict = {"authenticated": False}
+    for _ in range(10):
+        nested = {"wrapper": nested}
+    result = _run(family, {"access_token": "issued", **nested})
+    assert result.observations[0]["proof_state"] != "verified"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_malformed_json_with_a_header_token_is_not_proof(family):
+    class Malformed:
+        async def send(self, request, **_kwargs):
+            value = json.loads(request.body)["password"]
+            injected = isinstance(value, dict) if family == "nosql" else "OR 1=1" in value
+            headers = {"Content-Type": "application/json"}
+            if injected:
+                headers["Authorization"] = "Bearer operator-token"
+            return _result(200 if injected else 401,
+                           b'{"authenticated": false' if injected else b'{"error":"invalid"}', headers)
+
+    run = run_sql if family == "sql" else run_nosql
+    result = run(
+        _request(method="POST", url="https://app.example.test/login",
+                 body='{"email":"nobody@example.test","password":"invalid"}', content_type="application/json"),
+        {"candidate_id": "c" * 64, "method": "POST", "field_path": "password",
+         "request_class": "safe_authentication", "request_ref_id": "exact-request"},
+        Malformed(),
+    )
+    assert result.observations[0]["proof_state"] != "verified"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_a_successful_login_with_a_short_list_still_proves_bypass(family):
+    steps = [{"step": index, "status": "complete"} for index in range(5)]
+    result = _run(family, {"access_token": "issued", "authenticated": True, "login_steps": steps})
+    assert result.observations[0]["proof_state"] == "verified"

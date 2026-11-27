@@ -1,0 +1,124 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { agentHandoff, budgetUsage, decidedPermissionRequests, defaultRunTab, huntIsLive, huntStopReasonLabel, huntStopReasonText, pendingDecisions, requestsByAction } from './huntRunModel.mjs'
+
+test('a live run opens on its requests, a finished one on its results, and a hash wins', () => {
+  assert.equal(defaultRunTab({ status: 'active' }), 'requests')
+  assert.equal(defaultRunTab({ status: 'awaiting_planner' }), 'requests')
+  assert.equal(defaultRunTab({ status: 'completed', completed_at: '2026-10-01T00:00:00Z' }), 'results')
+  assert.equal(defaultRunTab({ status: 'completed' }, '#timeline'), 'timeline')
+  assert.equal(defaultRunTab({ status: 'completed' }, '#nonsense'), 'results')
+  assert.equal(huntIsLive({ status: 'active', completed_at: '2026-10-01T00:00:00Z' }), false)
+})
+
+test('budget use pairs each limit with its own counter and lists zero limits as disabled', () => {
+  const { rows, disabled } = budgetUsage({
+    budget: { max_capability_calls: 300, max_http_requests: 20000, max_tcp_ports: 0, max_duration_seconds: 600 },
+    budget_used: { agent_actions: 150, http_requests: 196, tcp_ports_attempted: 0 },
+    created_at: '2026-10-01T10:00:00Z', completed_at: '2026-10-01T10:05:00Z',
+  }, { max_capability_calls: 'Maximum capability calls' })
+  const byName = Object.fromEntries(rows.map(row => [row.name, row]))
+  assert.equal(byName.max_capability_calls.used, 150)
+  assert.equal(byName.max_capability_calls.label, 'capability calls')
+  assert.equal(byName.max_http_requests.used, 196)
+  assert.equal(byName.max_duration_seconds.used, 300)
+  assert.deepEqual(disabled, ['tcp ports'])
+  // The most consumed dimension comes first.
+  assert.equal(rows[0].name, 'max_capability_calls')
+})
+
+test('verifier writes show their own use beside the state-changing ceiling', () => {
+  const { rows } = budgetUsage({
+    budget: { max_http_requests: 1843200, max_state_changing_requests: 20, max_verifier_write_requests: 36000, max_capability_calls: 100, max_candidates: 100 },
+    budget_used: { http_requests: 900, state_changing_requests: 1, verifier_write_requests: 432, agent_actions: 90, candidates: 3 },
+  })
+  const names = rows.map(row => row.name)
+  assert.equal(names[names.indexOf('max_state_changing_requests') + 1], 'max_verifier_write_requests')
+  assert.equal(rows.find(row => row.name === 'max_verifier_write_requests').used, 432)
+  assert.equal(rows.find(row => row.name === 'max_state_changing_requests').used, 1)
+})
+
+test('only operator decisions are pending: proposed SSH plans and an unfinished exhausted budget', () => {
+  assert.deepEqual(pendingDecisions({ status: 'completed' }, [{ plan_id: 'p1', status: 'queued' }]), [])
+  assert.deepEqual(pendingDecisions({ status: 'budget_exhausted', stop_reason: 'budget_exhausted:tcp_ports_attempted' }, [{ plan_id: 'p2', status: 'proposed' }]), [
+    { kind: 'ssh_plan', id: 'p2' },
+    { kind: 'budget', id: 'budget', reason: 'tcp ports attempted' },
+  ])
+  assert.deepEqual(pendingDecisions({ status: 'budget_exhausted', completed_at: '2026-10-01T00:00:00Z' }), [])
+})
+
+test('pending permission requests are listed read-only with the terminal command that answers them', () => {
+  const request = { id: 'r1', kind: 'budget.raise', title: 'Raise max_http_requests for this Hunt', approve_command: 'shakerscan approve r1' }
+  assert.deepEqual(pendingDecisions({ status: 'active', pending_permission_requests: [request] }), [
+    { kind: 'permission', id: 'r1', title: 'Raise max_http_requests for this Hunt', command: 'shakerscan approve r1' },
+  ])
+  assert.deepEqual(pendingDecisions({ status: 'cancelled', completed_at: '2026-10-01T00:00:00Z', pending_permission_requests: [request] }), [])
+})
+
+test('requests group under the action that sent them', () => {
+  const { byAction, unlinked } = requestsByAction([
+    { id: 'r1', hunt_action_id: 'a1' }, { id: 'r2', hunt_action_id: 'a1' }, { id: 'r3', hunt_action_id: null }, { id: 'r4', hunt_action_id: 'a2' },
+  ])
+  assert.deepEqual(byAction.get('a1').map(row => row.id), ['r1', 'r2'])
+  assert.deepEqual(byAction.get('a2').map(row => row.id), ['r4'])
+  assert.deepEqual(unlinked.map(row => row.id), ['r3'])
+})
+
+test('the agent handoff names the Hunt so a terminal agent can pick it up', () => {
+  const handoff = agentHandoff({ hunt_id: 'abc-123' })
+  assert.equal(handoff.command, 'shakerscan agent')
+  assert.match(handoff.prompt, /Hunt abc-123/)
+  assert.match(handoff.prompt, /shakerscan hunt get abc-123/)
+})
+
+test('the record gives each action its call arguments and its failure reason', async () => {
+  const { actionOutcomes, callArguments } = await import('./huntRunModel.mjs')
+  const outcomes = actionOutcomes({ decision_trace: [
+    { action_id: 'a1', decision: { input: { as_principal: 'primary' } },
+      outcome: { error: 'target login form was not identified', parser_errors: ['target login form was not identified'] } },
+    { action_id: 'a2', decision: { input: { method: 'GET', path: '/api/orders', headers: { accept: 'json' } } }, outcome: { ok: true, error: null } },
+    { decision: { input: {} } },
+  ] })
+  assert.deepEqual(outcomes.get('a1'), { input: { as_principal: 'primary' }, errors: ['target login form was not identified'] })
+  assert.deepEqual(outcomes.get('a2').errors, [])
+  assert.equal(outcomes.size, 2)
+  assert.deepEqual(callArguments(outcomes.get('a2').input).map(item => `${item.key}=${item.value}`),
+    ['method=GET', 'path=/api/orders', 'headers={"accept":"json"}'])
+  assert.equal(callArguments({ body: 'x'.repeat(500) }, 20)[0].value.length, 20)
+})
+
+test('an exhausted stop reason names the limit to extend', async () => {
+  const { exhaustedDimension } = await import('./huntRunModel.mjs')
+  assert.equal(exhaustedDimension({ stop_reason: 'budget_exhausted:hosts_attempted' }), 'max_hosts')
+  assert.equal(exhaustedDimension({ stop_reason: 'budget_exhausted:http_requests' }), 'max_http_requests')
+  assert.equal(exhaustedDimension({ stop_reason: 'budget_exhausted:max_tcp_ports' }), 'max_tcp_ports')
+  assert.equal(exhaustedDimension({ stop_reason: 'budget_exhausted:tool_wall_seconds', budget: {} }), null)
+  assert.equal(exhaustedDimension({ stop_reason: 'completed' }), null)
+})
+
+test('a Hunt the upgrade could not rebuild explains itself instead of showing its code', () => {
+  const text = huntStopReasonText('permission_authority_unrepaired')
+  assert.match(text, /could not be rebuilt after a revocation/)
+  assert.doesNotMatch(text, /permission_authority_unrepaired/)
+  assert.equal(huntStopReasonText('budget_exhausted'), 'budget exhausted')
+  assert.equal(huntStopReasonText(null), '')
+  assert.equal(huntStopReasonLabel('permission_authority_unrepaired'), 'cancelled on upgrade: permissions could not be rebuilt')
+  assert.equal(huntStopReasonLabel('cancelled'), 'cancelled')
+})
+
+test('decided permission requests stay readable with who decided, how and when, newest first', () => {
+  const decided = decidedPermissionRequests([
+    { id: 'p1', status: 'pending', title: 'Raise the HTTP budget' },
+    { id: 'g1', status: 'granted', title: 'Raise the HTTP budget', decided_by: 'op1', decision_via: 'terminal_stepup', decided_at: '2026-10-20T17:30:00Z' },
+    { id: 'd1', status: 'denied', kind: 'capability.enable', decided_by: 'op1', decision_via: 'terminal_stepup', decided_at: '2026-10-20T17:31:00Z' },
+    { id: 'e1', status: 'expired', title: 'Use a credential', decided_at: null },
+    { status: 'granted' },
+  ])
+  assert.deepEqual(decided.map(item => item.id), ['d1', 'g1', 'e1'])
+  assert.deepEqual(decided[0], {
+    id: 'd1', title: 'capability.enable', status: 'denied', decidedBy: 'op1', via: 'in a terminal with step-up', decidedAt: '2026-10-20T17:31:00Z',
+  })
+  assert.equal(decided[2].decidedBy, null)
+  assert.deepEqual(decidedPermissionRequests(null), [])
+})

@@ -1,0 +1,810 @@
+"""The batch adapter runs planned active-template positions past a host's endpoints.
+
+A thorough or deep slice declares ``endpoint_entries`` (E) beside ``manifest_entries`` (the
+positions planned, up to the allowlist's 39 windows): position o runs window o on endpoint o % E.
+Positions below E keep the attempt identities, checkpoints and resume of every earlier release;
+later positions are their own attempts; a position past a smaller (GET-only) allowlist's windows
+runs nothing. These tests drive the real adapter with a synthetic template bundle shaped like the
+pinned one (1,146 templates, 1,000 of them GET-only) and a fake execution that returns success; no
+scanner process runs. The last test checks the planned window count against the pinned bundle
+and runs only in the scanner image.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import math
+import os
+import uuid
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+import scan.action_adapter as action_adapter_module
+from hunt.capability_executor import CapabilityAdapterResult
+from runtime.capability_registry import CAPABILITY_REGISTRY
+from runtime.models import ScanPolicy, TargetBinding
+from scan.action_adapter import DatabaseNeutralScanActionDispatcher, _batch_candidate_id
+from scan.action_plan import ScanAction, ScanActionPlan
+from scan.execution_backend import ActionLease
+from scan.external_process import ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS
+from scan.nuclei_execution import (
+    ACTIVE_TEMPLATE_PLANNED_WINDOWS,
+    ACTIVE_TEMPLATE_WINDOW_SIZE,
+    active_sweep_base,
+    active_sweep_bases,
+    active_template_window,
+    resolve_active_scan_nuclei_options,
+)
+from scan.nuclei_template_index import nuclei_templates_directory
+from scan.work_manifests import (
+    build_canonical_nuclei_template_manifest,
+    build_endpoint_manifest,
+)
+
+TARGET = TargetBinding(
+    target_id="target-1", target_kind="web", canonical_host="app.example.test",
+    allowed_origins=("https://app.example.test",), allowed_addresses=("192.0.2.10",),
+    allowed_root_domains=("example.test",),
+)
+AUTHORIZED = ScanPolicy(active_testing=True, allow_state_changing_http=True, approval_receipt_id="approval-1")
+GET_ONLY = ScanPolicy(active_testing=True, approval_receipt_id="approval-1")
+POSITION = {"http_requests": 120, "state_changing_requests": 120, "tool_wall_seconds": 45}
+
+
+# --- adapter -------------------------------------------------------------------------------
+
+
+def _template(index: int, method: str) -> str:
+    return (
+        f"id: synthetic-{method.lower()}-{index:04d}\n\ninfo:\n  name: Synthetic {index}\n"
+        "  author: test\n  severity: high\n  tags: exposure\n\nhttp:\n"
+        f"  - method: {method}\n    path:\n      - \"{{{{BaseURL}}}}/probe-{index}\"\n"
+        f"    matchers:\n      - type: word\n        words:\n          - \"synthetic-{index}\"\n"
+    )
+
+
+@pytest.fixture(scope="module")
+def bundle(tmp_path_factory):
+    """A synthetic bundle shaped like the pinned one: 1,146 permitted, 1,000 of them GET."""
+    root = tmp_path_factory.mktemp("nuclei-bundle")
+    folder = root / "http" / "exposures"
+    folder.mkdir(parents=True)
+    for index in range(1_000):
+        (folder / f"get-{index:04d}.yaml").write_text(_template(index, "GET"))
+    for index in range(146):
+        (folder / f"post-{index:04d}.yaml").write_text(_template(index, "POST"))
+    return str(root)
+
+
+class _Backend:
+    def __init__(self, manifests):
+        self.manifests = dict(manifests)
+        self.attempts: dict = {}
+
+    async def load_work_manifest(self, _action_id, reference):
+        return self.manifests[reference.manifest_id]
+
+    async def load_batch_attempts(self, action_id):
+        return tuple(self.attempts.get(action_id, {}).values())
+
+    async def checkpoint_batch_attempt(self, action_id, attempt):
+        self.attempts.setdefault(action_id, {})[attempt["attempt_id"]] = dict(attempt)
+
+    async def load_observations(self, action_id):
+        return tuple(getattr(self, "observations", {}).get(action_id, ()))
+
+
+class _Host:
+    """One endpoint manifest and template manifest; slices of it run through the adapter."""
+
+    def __init__(self, paths, sources=None, *, target=None, target_url="https://app.example.test/"):
+        self.target = TARGET if target is None else target
+        self.target_url = target_url
+        self.scan_id = str(uuid.uuid4())
+        located = [
+            ("https", 443, item) if not isinstance(item, tuple)
+            else item if len(item) == 3 else ("https", *item)
+            for item in paths
+        ]
+        self.endpoints = build_endpoint_manifest(
+            scan_id=self.scan_id, target_binding_digest=self.target.digest,
+            surface_manifest={
+                "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+                "endpoints": [{
+                    "method": "GET", "scheme": scheme, "host": "app.example.test", "port": port,
+                    "normalized_path": path, "concrete_path": path, "query_keys": [],
+                    "source": (sources or {}).get(path, "web.crawl"),
+                } for scheme, port, path in located],
+            },
+            source_action_ids=("discover.web_crawl",),
+        )
+        self.templates = build_canonical_nuclei_template_manifest(
+            scan_id=self.scan_id, target_binding_digest=self.target.digest,
+        )
+        self.backend = _Backend({
+            self.endpoints.manifest_id: self.endpoints, self.templates.manifest_id: self.templates,
+        })
+        self.calls: list[dict] = []
+
+    def action(self, action_id, *, start, count, windows=True, policy=AUTHORIZED):
+        spec = CAPABILITY_REGISTRY.require("templates.active_batch")
+        endpoints = len(self.endpoints.entries)
+        hold = {
+            name: amount * count for name, amount in POSITION.items()
+            if name != "state_changing_requests" or policy.allow_state_changing_http
+        }
+        return ScanAction(
+            action_id=action_id, stage="deterministic_active", ordinal=0,
+            capability_name="templates.active_batch",
+            capability_args={
+                "target_manifest_ref": self.endpoints.reference().canonical_dict(),
+                "template_manifest_ref": self.templates.reference().canonical_dict(),
+                "slice": {"start": start, "count": count},
+                "manifest_entries": ACTIVE_TEMPLATE_PLANNED_WINDOWS if windows else endpoints,
+                **({"endpoint_entries": endpoints} if windows else {}),
+                "profile": "thorough_batch_v1",
+                "proof_policy": "deterministic_proof_contract_required",
+            },
+            target_binding_digest=self.target.digest, input_binding_digest="1" * 64,
+            requested_budget=hold,
+            placement={
+                "schema_version": "scan-action-placement/v1",
+                "eligible_backends": ["local", "broker"],
+                "requirements": dict(spec.placement_requirements),
+                "adapter_name": spec.adapter, "adapter_version": spec.adapter_version,
+            },
+            dependencies=(), required=False, supporting=False, output_schema=spec.output_schema,
+        )
+
+    def run(
+        self, monkeypatch, bundle_dir, action, *, policy=AUTHORIZED, statuses=None, options=None,
+        before=(),
+    ):
+        plan = ScanActionPlan(
+            scan_id=self.scan_id, execution_plan_digest="a" * 64,
+            target_binding_digest=self.target.digest, actions=(*before, action),
+        )
+        calls = self.calls
+
+        async def execute(_self, context, adapter, **_kwargs):
+            payload = adapter._process_payload
+            calls.append({
+                "action_id": action.action_id,
+                "url": payload["execution_target"],
+                "template_ids": payload["scanner_options"]["template_ids"],
+            })
+            return CapabilityAdapterResult(
+                status=(statuses or {}).get(len(calls) - 1, "success"),
+                actual_budget={name: 1 for name in context.requested_budget},
+                observations=(), execution_started=True, parser_version="nuclei-jsonl/v1",
+            )
+
+        monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+        monkeypatch.setattr(action_adapter_module, "nuclei_templates_directory", lambda: bundle_dir)
+
+        async def process_runner(*_a, **_k):
+            raise AssertionError("process runner must not be used")
+
+        async def heartbeat():
+            return None
+
+        dispatcher = DatabaseNeutralScanActionDispatcher(
+            target_url=self.target_url, options=dict(options or {}), target=self.target, policy=policy,
+            scan_id=plan.scan_id, job_id="job-1", worker_id="broker:worker-1", plan=plan,
+            backend=self.backend, process_runner=process_runner, cancelled=lambda: False,
+        )
+        lease = ActionLease(
+            lease_id=str(uuid.uuid4()), lease_token="x" * 32, scan_id=plan.scan_id,
+            plan_digest=plan.plan_digest, execution_plan_digest=plan.execution_plan_digest,
+            target_binding_digest=plan.target_binding_digest, action=action,
+            backend="broker", worker_id="broker:worker-1", lease_seconds=60, attempt=1,
+        )
+        return asyncio.run(dispatcher(action, lease, heartbeat))
+
+    def attempt_id(self, position):
+        endpoints = len(self.endpoints.entries)
+        entry = self.endpoints.entries[position % endpoints]
+        candidate = _batch_candidate_id(entry, position % endpoints)
+        if position >= endpoints:
+            candidate = f"{candidate}:window:{position}"
+        digest = self.endpoints.reference().manifest_digest
+        return hashlib.sha256(f"{digest}:nuclei_active:{candidate}".encode()).hexdigest()
+
+
+def _allowlist(bundle_dir, *, state_changing):
+    resolved = resolve_active_scan_nuclei_options(
+        {"severity": "high,critical"}, templates_dir=bundle_dir,
+        allow_state_changing_http=state_changing, allow_exploit_classes=state_changing,
+    )
+    return str(resolved.worker_options["template_ids"])
+
+
+def _windows_record(receipt):
+    return next(item for item in receipt.observations if item.get("kind") == "active_template_windows")
+
+
+def test_each_position_runs_its_window_on_endpoint_o_mod_e(monkeypatch, bundle):
+    host = _Host(("/", "/a"))
+    receipts = [
+        host.run(monkeypatch, bundle, host.action("active.templates.r01", start=0, count=2)),
+        host.run(monkeypatch, bundle, host.action("active.templates.r02", start=2, count=33)),
+        host.run(monkeypatch, bundle, host.action("active.templates.r03", start=35, count=4)),
+    ]
+    assert [receipt.status for receipt in receipts] == ["success"] * 3
+    allowlist = _allowlist(bundle, state_changing=True)
+    assert math.ceil(len(allowlist.split(",")) / ACTIVE_TEMPLATE_WINDOW_SIZE) == 39
+    assert len(host.calls) == 39
+    # Every window runs at the host's base URL (no seed here: the origin's root).
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
+    assert [call["template_ids"] for call in host.calls] == [
+        active_template_window(allowlist, position).template_ids for position in range(39)
+    ]
+    # Every permitted template ran exactly once on the host.
+    ran = [item for call in host.calls for item in call["template_ids"].split(",")]
+    assert sorted(ran) == sorted(allowlist.split(","))
+    windows = [_windows_record(receipt) for receipt in receipts]
+    assert [record["windows_run"] for record in windows] == [
+        [0, 1], list(range(2, 35)), list(range(35, 39)),
+    ]
+    assert {record["window_count"] for record in windows} == {39}
+
+
+def test_every_window_runs_at_the_scans_seed_url_not_a_discovered_endpoints_path(monkeypatch, bundle):
+    """A window's templates address the host from nuclei's base URL ({{BaseURL}}/images/json; a
+    raw ``GET /version`` is joined to the base path too). Zoo docker (0d8c38011): its endpoints
+    were /version, /info and /, so window 3 ran misconfigured-docker at /version/images/json and
+    window 37 ran docker-daemon-exposed under /info: both got 404, both windows counted as run,
+    and the host's two critical findings were lost. Every window now runs at the scan's seed."""
+    host = _Host(("/version", "/info", "/"), sources={"/": "seed"})
+    for number, (start, count) in enumerate(((0, 3), (3, 33), (36, 3)), start=1):
+        host.run(monkeypatch, bundle, host.action(f"active.templates.r{number:02d}", start=start, count=count))
+    assert len(host.calls) == 39
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
+    # Each window still ran exactly once, under its own planned position's attempt.
+    allowlist = _allowlist(bundle, state_changing=True)
+    assert [call["template_ids"] for call in host.calls] == [
+        active_template_window(allowlist, position).template_ids for position in range(39)
+    ]
+
+
+@pytest.mark.parametrize(("target_url", "base"), [
+    ("https://app.example.test/", "https://app.example.test/"),
+    ("https://app.example.test/app/login.php", "https://app.example.test/app/"),
+    ("https://app.example.test/app/?page=1#top", "https://app.example.test/app/"),
+    ("https://app.example.test/app/", "https://app.example.test/app/"),
+    ("https://app.example.test/app", "https://app.example.test/"),
+    ("https://app.example.test/index.php?page=1", "https://app.example.test/"),
+    ("https://APP.example.test:443/a/b/c.html", "https://app.example.test/a/b/"),
+])
+def test_the_sweep_base_is_the_target_urls_directory(target_url, base):
+    entries = [{"scheme": "https", "host": "app.example.test", "port": 443}]
+    assert active_sweep_bases(target_url, entries) == (base,)
+
+
+def test_other_origins_follow_the_target_base_at_their_roots_in_a_stable_order():
+    entries = [
+        {"scheme": "https", "host": "app.example.test", "port": 8443},
+        {"scheme": "https", "host": "app.example.test", "port": 443},
+        {"scheme": "http", "host": "app.example.test", "port": 8080},
+        {"scheme": "https", "host": "app.example.test", "port": 8443},
+    ]
+    assert active_sweep_bases("https://app.example.test/app/login.php", entries) == (
+        "https://app.example.test/app/",
+        "http://app.example.test:8080/",
+        "https://app.example.test:8443/",
+    )
+
+
+def test_the_215_endpoint_scenario_runs_no_base_and_window_pair_twice():
+    """The invariance fixture's thorough host has 215 endpoints on one origin: every position
+    used to run window p % 39 at the same URL, about 176 repeats, mutating templates included."""
+    bases = ("https://app.example.test/",)
+    pairs = [
+        (active_sweep_base(position, bases=bases, window_count=39), position % 39)
+        for position in range(215)
+    ]
+    run = [pair for pair in pairs if pair[0] is not None]
+    assert len(run) == len(set(run)) == 39
+    assert sum(1 for pair in pairs if pair[0] is None) == 215 - 39
+
+
+@pytest.mark.parametrize(("target_url", "base"), [
+    ("https://app.example.test/app/login.php", "https://app.example.test/app/"),
+    ("https://app.example.test/app/?page=1", "https://app.example.test/app/"),
+    ("https://app.example.test/app/", "https://app.example.test/app/"),
+    ("https://app.example.test/", "https://app.example.test/"),
+])
+def test_every_window_runs_at_the_target_urls_directory(monkeypatch, bundle, target_url, base):
+    host = _Host(("/app/login.php", "/app/x", "/app/y"), target_url=target_url)
+    host.run(monkeypatch, bundle, host.action("active.templates.r01", start=0, count=3))
+    host.run(monkeypatch, bundle, host.action("active.templates.r02", start=3, count=4))
+    assert {call["url"] for call in host.calls} == {base}
+
+
+def test_a_shard_without_the_seed_entry_still_runs_at_the_scans_base(monkeypatch, bundle):
+    host = _Host(("/app/x", "/app/y"), target_url="https://app.example.test/app/login.php")
+    host.run(monkeypatch, bundle, host.action("active.templates.r01", start=0, count=2, windows=False))
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/app/"}
+
+
+def test_fifty_endpoints_on_one_origin_run_39_distinct_pairs_and_send_nothing_else(monkeypatch, bundle):
+    host = _Host(tuple(f"/p{index}" for index in range(50)))
+    receipt = host.run(
+        monkeypatch, bundle, host.action("active.templates.r01", start=0, count=50, windows=False),
+    )
+    pairs = [(call["url"], call["template_ids"]) for call in host.calls]
+    assert len(pairs) == len(set(pairs)) == 39
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
+    beyond = [item for item in receipt.observations if item.get("kind") == "candidate_inapplicable"]
+    assert len(beyond) == 11
+    assert {item["reason"] for item in beyond} == {"template_window_past_bases"}
+    assert receipt.status == "success"
+    assert receipt.redacted_execution["unattempted_count"] == 0
+    assert receipt.redacted_execution["inapplicable_count"] == 11
+    assert _windows_record(receipt)["windows_run"] == list(range(39))
+
+
+def test_a_second_origin_runs_the_windows_past_the_first_origins_at_its_root(monkeypatch, bundle):
+    target = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "https://app.example.test:8443"),
+        allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+    )
+    paths = tuple(f"/p{index}" for index in range(30)) + tuple(
+        (8443, f"/q{index}") for index in range(20)
+    )
+    host = _Host(paths, target=target)
+    receipt = host.run(
+        monkeypatch, bundle, host.action("active.templates.r01", start=0, count=50, windows=False),
+    )
+    urls = [call["url"] for call in host.calls]
+    assert urls == ["https://app.example.test/"] * 39 + ["https://app.example.test:8443/"] * 11
+    pairs = [(call["url"], call["template_ids"]) for call in host.calls]
+    assert len(set(pairs)) == 50
+    assert receipt.redacted_execution["inapplicable_count"] == 0
+
+
+def test_a_slice_without_planned_windows_runs_its_windows_at_the_seed_too(monkeypatch, bundle):
+    """Fast, balanced, a host with as many endpoints as windows and a parallel shard plan and hold
+    one position per endpoint exactly as before, with the same attempts and the same window per
+    position; only the URL each attempt targets is the seed (or, in a shard's slice of the
+    endpoints with no seed, the origin's root) instead of the endpoint's path."""
+    host = _Host(("/version", "/info", "/"), sources={"/": "seed"})
+    action = host.action("active.templates.r01", start=0, count=3, windows=False)
+    host.run(monkeypatch, bundle, action)
+    assert "endpoint_entries" not in action.capability_args
+    assert [call["url"] for call in host.calls] == ["https://app.example.test/"] * 3
+    allowlist = _allowlist(bundle, state_changing=True)
+    assert [call["template_ids"] for call in host.calls] == [
+        active_template_window(allowlist, position).template_ids for position in range(3)
+    ]
+    assert set(host.backend.attempts["active.templates.r01"]) == {
+        host.attempt_id(position) for position in range(3)
+    }
+    shard = _Host(("/version", "/info"))
+    shard.run(monkeypatch, bundle, shard.action("active.templates.r01", start=0, count=2, windows=False))
+    assert [call["url"] for call in shard.calls] == ["https://app.example.test/"] * 2
+
+
+def test_an_endpoints_own_position_keeps_its_identity_and_later_ones_are_their_own(monkeypatch, bundle):
+    windowed = _Host(("/", "/a"))
+    windowed.run(monkeypatch, bundle, windowed.action("active.templates.r01", start=0, count=2))
+    windowed.run(monkeypatch, bundle, windowed.action("active.templates.r02", start=2, count=4))
+    # The same endpoints planned as 2.11.0 did, without positions past them.
+    legacy = _Host(("/", "/a"))
+    legacy.endpoints, legacy.templates, legacy.backend = (
+        windowed.endpoints, windowed.templates, _Backend(windowed.backend.manifests),
+    )
+    legacy.run(monkeypatch, bundle, legacy.action("active.templates.r01", start=0, count=2, windows=False))
+    first = set(windowed.backend.attempts["active.templates.r01"])
+    assert first == set(legacy.backend.attempts["active.templates.r01"])
+    assert first == {windowed.attempt_id(0), windowed.attempt_id(1)}
+    later = windowed.backend.attempts["active.templates.r02"]
+    assert set(later) == {windowed.attempt_id(position) for position in range(2, 6)}
+    assert all(
+        str(item["candidate_id"]).endswith(f":window:{item['template_window']['index']}")
+        for item in later.values()
+    )
+    # Resumed, the slice re-sends nothing and keeps the same attempts and windows.
+    calls = len(windowed.calls)
+    resumed = windowed.run(monkeypatch, bundle, windowed.action("active.templates.r02", start=2, count=4))
+    assert len(windowed.calls) == calls
+    assert set(windowed.backend.attempts["active.templates.r02"]) == set(later)
+    assert resumed.redacted_execution["resumed_count"] == 4
+    assert _windows_record(resumed)["windows_run"] == [2, 3, 4, 5]
+
+
+def test_a_position_past_a_get_only_allowlist_runs_nothing(monkeypatch, bundle):
+    host = _Host(("/",))
+    allowlist = _allowlist(bundle, state_changing=False)
+    get_windows = math.ceil(len(allowlist.split(",")) / ACTIVE_TEMPLATE_WINDOW_SIZE)
+    assert get_windows == 34 < ACTIVE_TEMPLATE_PLANNED_WINDOWS
+    receipts = [
+        host.run(monkeypatch, bundle, host.action("active.templates.r01", start=0, count=1, policy=GET_ONLY), policy=GET_ONLY),
+        host.run(monkeypatch, bundle, host.action("active.templates.r02", start=1, count=33, policy=GET_ONLY), policy=GET_ONLY),
+        host.run(monkeypatch, bundle, host.action("active.templates.r03", start=34, count=5, policy=GET_ONLY), policy=GET_ONLY),
+    ]
+    assert len(host.calls) == get_windows
+    pairs = [(call["url"], call["template_ids"]) for call in host.calls]
+    assert len(set(pairs)) == len(pairs), "no endpoint runs the same window twice"
+    beyond = [
+        item for receipt in receipts for item in receipt.observations
+        if item.get("kind") == "candidate_inapplicable"
+    ]
+    assert len(beyond) == ACTIVE_TEMPLATE_PLANNED_WINDOWS - get_windows
+    assert {item["reason"] for item in beyond} == {"template_window_beyond_allowlist"}
+    # The last slice ran nothing at all: settled without traffic and without unattempted work.
+    last = receipts[-1]
+    assert last.status == "success"
+    assert last.redacted_execution["unattempted_count"] == 0
+    assert last.redacted_execution["inapplicable_count"] == 5
+    assert sum(int(amount) for amount in last.budget_consumed.values()) == 0
+    assert _windows_record(receipts[1])["window_count"] == get_windows
+
+
+def test_only_windows_whose_attempt_finished_are_reported_run(monkeypatch, bundle):
+    """A window whose attempt timed out or failed did not run its templates; the slice's record
+    (and so ``nuclei_active.template_windows``) leaves it out."""
+    host = _Host(("/", "/a"))
+    receipt = host.run(
+        monkeypatch, bundle, host.action("active.templates.r02", start=2, count=4),
+        statuses={1: "timed_out", 2: "failed"},
+    )
+    assert [call["template_ids"] for call in host.calls[:4]] == [
+        active_template_window(_allowlist(bundle, state_changing=True), position).template_ids
+        for position in range(2, 6)
+    ]
+    assert _windows_record(receipt)["windows_run"] == [2, 5]
+
+
+def test_a_slice_whose_declared_endpoints_disagree_with_its_manifest_fails_closed(monkeypatch, bundle):
+    host = _Host(("/", "/a"))
+    action = host.action("active.templates.r02", start=2, count=4)
+    args = dict(action.capability_args)
+    args["endpoint_entries"] = 3
+    with pytest.raises(action_adapter_module.ScanActionAdapterError):
+        host.run(monkeypatch, bundle, replace(action, capability_args=args, action_digest=None))
+
+
+# --- the pinned bundle ------------------------------------------------------------------------
+
+
+def _pinned_bundle() -> str | None:
+    directory = nuclei_templates_directory()
+    return directory if (Path(directory) / "http").is_dir() and os.access(directory, os.R_OK) else None
+
+
+@pytest.mark.skipif(_pinned_bundle() is None, reason="runs in the scanner image (pinned template bundle)")
+def test_the_planned_windows_match_the_pinned_bundle():
+    directory = _pinned_bundle()
+    state_changing = _allowlist(directory, state_changing=True).split(",")
+    get_only = _allowlist(directory, state_changing=False).split(",")
+    assert ACTIVE_TEMPLATE_PLANNED_WINDOWS == math.ceil(len(state_changing) / ACTIVE_TEMPLATE_WINDOW_SIZE)
+    assert ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS == math.ceil(len(get_only) / ACTIVE_TEMPLATE_WINDOW_SIZE)
+    assert ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS <= ACTIVE_TEMPLATE_PLANNED_WINDOWS
+
+
+# The template bundle both planned window counts were measured on (1,146 permitted templates
+# with state-changing HTTP; 636 GET-only once login attempts, state-changing GETs and
+# exploit-class templates need that permission), in the scanner image built from it.
+MEASURED_BUNDLE_COMMIT = "2935d63aebd1f5f4a3c8e87c6e7f5c47f689b115"
+MEASURED_BUNDLE_SHA256 = "20aff7085b5c1771a8f7a28624009359a1cedab924c9ad7836078ca07e28de39"
+
+
+def test_the_planned_windows_were_measured_on_the_bundle_the_image_pins():
+    """The test above re-measures the windows, but only where the bundle is installed. A bundle
+    bump whose allowlist splits into more windows would leave the extra ones unplanned while the
+    family read complete, so the bump fails here, on any host, until they are re-measured."""
+    dockerfile = (Path(__file__).parents[1] / "scanner" / "Dockerfile").read_text()
+    assert f"ARG NUCLEI_TEMPLATES_COMMIT={MEASURED_BUNDLE_COMMIT}" in dockerfile
+    assert f"ARG NUCLEI_TEMPLATES_SHA256={MEASURED_BUNDLE_SHA256}" in dockerfile
+    assert (ACTIVE_TEMPLATE_PLANNED_WINDOWS, ACTIVE_TEMPLATE_PLANNED_GET_ONLY_WINDOWS) == (39, 22)
+
+
+def test_a_scheme_inferred_scans_unselected_origin_is_not_a_sweep_base():
+    entries = [
+        {"scheme": "https", "host": "app.example.test", "port": 443},
+        {"scheme": "http", "host": "app.example.test", "port": 80},
+        {"scheme": "http", "host": "app.example.test", "port": 8080},
+    ]
+    assert active_sweep_bases(
+        "https://app.example.test/", entries, exclude_origins=("http://app.example.test",),
+    ) == ("https://app.example.test/", "http://app.example.test:8080/")
+    assert active_sweep_bases("https://app.example.test/", entries) == (
+        "https://app.example.test/", "http://app.example.test/", "http://app.example.test:8080/",
+    )
+
+
+def test_a_scheme_inferred_scan_sweeps_only_the_origin_it_runs_at(monkeypatch, bundle):
+    target = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "http://app.example.test"),
+        allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+        inferred_origins=("https://app.example.test", "http://app.example.test"),
+    )
+    host = _Host(
+        tuple(f"/p{index}" for index in range(30)) + tuple(("http", 80, f"/q{index}") for index in range(20)),
+        target=target, target_url="app.example.test",
+    )
+    receipt = host.run(
+        monkeypatch, bundle, host.action("active.templates.r01", start=0, count=50, windows=False),
+    )
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
+    assert receipt.redacted_execution["inapplicable_count"] == 11
+
+
+def _shard(index, count=2):
+    return {"canonical_shard_authority": {
+        "shard_index": index, "shard_count": count, "shard_label": f"work:anonymous[{index}]",
+        "parallel_discovery": False,
+    }}
+
+
+def _window_index(bundle_dir):
+    allowlist = _allowlist(bundle_dir, state_changing=True)
+    return {active_template_window(allowlist, index).template_ids: index for index in range(39)}
+
+
+def _run_shards(monkeypatch, bundle_dir, children, *, target=None):
+    """Endpoint children at shard indices 1..n behind the global child at index 0."""
+    receipts = []
+    for index, paths in enumerate(children, start=1):
+        child = _Host(paths, target=target)
+        receipts.append((child, child.run(
+            monkeypatch, bundle_dir,
+            child.action("active.templates.r01", start=0, count=len(child.endpoints.entries), windows=False),
+            options=_shard(index, len(children) + 1),
+        )))
+    return receipts
+
+
+def test_two_endpoint_children_start_apart_around_the_windows(monkeypatch, bundle):
+    """Child 1 starts at window 0, child 2 at window 19 (39 // 2)."""
+    index_of = _window_index(bundle)
+    receipts = _run_shards(monkeypatch, bundle, [("/a", "/b", "/c"), ("/d", "/e")])
+    ran = [
+        (call["url"], index_of[call["template_ids"]])
+        for child, _receipt in receipts for call in child.calls
+    ]
+    assert [window for _url, window in ran] == [0, 1, 2, 19, 20]
+    assert len(ran) == len(set(ran))
+    assert {url for url, _window in ran} == {"https://app.example.test/"}
+    records = [_windows_record(receipt) for _child, receipt in receipts]
+    assert [record["shard_part"] for record in records] == [
+        {"index": 1, "count": 3}, {"index": 2, "count": 3},
+    ]
+
+
+def test_each_child_alone_runs_its_endpoints_worth_and_children_may_overlap(monkeypatch, bundle):
+    """Three children of 20 endpoints start at 0, 13 and 26: each runs 20 distinct windows (as
+    2.11.0 gave it), together they run all 39, and 21 pairs ran twice."""
+    index_of = _window_index(bundle)
+    children = [tuple(f"/s{shard}-{index}" for index in range(20)) for shard in range(3)]
+    receipts = _run_shards(monkeypatch, bundle, children)
+    per_child = [[index_of[call["template_ids"]] for call in child.calls] for child, _ in receipts]
+    assert all(len(windows) == len(set(windows)) == 20 for windows in per_child)
+    union = set().union(*per_child)
+    assert union == set(range(39))
+    assert sum(map(len, per_child)) - len(union) == 21
+    assert per_child[2][:3] == [26, 27, 28] and per_child[2][13] == 0
+
+
+def test_shards_map_over_the_bindings_origins_whatever_endpoints_each_holds(monkeypatch, bundle):
+    """With two origins there are 78 pairs: child 1 starts at the first origin's window 0, child 2
+    at the second origin's. Both map over the binding's allowed origins, so both list the same
+    bases whatever part of the endpoints each holds."""
+    target = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "https://app.example.test:8443"),
+        allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+    )
+    first = tuple(f"/a{index}" for index in range(30))
+    second = tuple((8443, f"/b{index}") for index in range(30))
+    receipts = _run_shards(monkeypatch, bundle, [first, second], target=target)
+    index_of = _window_index(bundle)
+    ran = [(call["url"], index_of[call["template_ids"]]) for child, _ in receipts for call in child.calls]
+    assert len(ran) == len(set(ran)) == 60
+    assert {url for url, _ in ran[:30]} == {"https://app.example.test/"}
+    assert {url for url, _ in ran[30:]} == {"https://app.example.test:8443/"}
+    assert [record["base"] for record in _windows_record(receipts[0][1])["bases"]] == [
+        "https://app.example.test/", "https://app.example.test:8443/",
+    ] == [record["base"] for record in _windows_record(receipts[1][1])["bases"]]
+
+
+def test_the_parallel_discovery_child_and_a_direct_scan_hold_no_shard_part(monkeypatch, bundle):
+    direct = _Host(("/a", "/b"))
+    plain = direct.run(monkeypatch, bundle, direct.action("active.templates.r01", start=0, count=2, windows=False))
+    assert "shard_part" not in _windows_record(plain)
+    discovery = _Host(("/a",))
+    found = discovery.run(
+        monkeypatch, bundle, discovery.action("active.templates.r01", start=0, count=1, windows=False),
+        options={"canonical_shard_authority": {"shard_index": -1, "shard_count": 0, "parallel_discovery": True}},
+    )
+    assert "shard_part" not in _windows_record(found)
+
+
+def _legacy_checkpoint(host, action, position, window, *, base=None):
+    """An attempt a 2.11.0 worker checkpointed: its window, no base (it ran at the endpoint)."""
+    attempt_id = host.attempt_id(position)
+    host.backend.attempts.setdefault(action.action_id, {})[attempt_id] = {
+        "attempt_id": attempt_id,
+        "candidate_id": "legacy",
+        "template_window": {"index": window, "count": 39, "templates": 30, **({"base": base} if base else {})},
+        "status": "success", "timed_out": False,
+        "budget_consumed": {"http_requests": 60, "state_changing_requests": 60, "tool_wall_seconds": 30},
+        "observations": ({
+            "kind": "template_match", "template_id": f"legacy-{window}",
+            "matched_at": "https://app.example.test/p45/images/json", "attempt_id": attempt_id,
+        },),
+        "errors": (), "proof_state": "unproven",
+    }
+
+
+def test_a_2_11_0_attempt_past_the_bases_is_resumed_with_its_finding_never_dropped(monkeypatch, bundle):
+    """Position 45 of a 50-endpoint slice now maps past the bases. A 2.11.0 worker had already
+    run it (window 6 at its endpoint's path) and found something: the resume keeps the record and
+    sends nothing, and the window is listed as run by an earlier mapping, not credited to a base."""
+    host = _Host(tuple(f"/p{index}" for index in range(50)))
+    action = host.action("active.templates.r01", start=0, count=50, windows=False)
+    _legacy_checkpoint(host, action, 45, 6)
+    receipt = host.run(monkeypatch, bundle, action)
+    assert len(host.calls) == 39
+    assert any(item.get("template_id") == "legacy-6" for item in receipt.observations)
+    record = _windows_record(receipt)
+    assert record["legacy_windows_run"] == [6]
+    assert receipt.redacted_execution["resumed_count"] == 1
+    assert receipt.redacted_execution["inapplicable_count"] == 10
+
+
+def test_a_2_11_0_attempt_at_an_endpoints_path_is_not_credited_to_the_base(monkeypatch, bundle):
+    host = _Host(("/version", "/info", "/"))
+    action = host.action("active.templates.r01", start=0, count=3, windows=False)
+    _legacy_checkpoint(host, action, 1, 1)
+    receipt = host.run(monkeypatch, bundle, action)
+    assert len(host.calls) == 2
+    record = _windows_record(receipt)
+    assert record["bases"] == [{"base": "https://app.example.test/", "windows_run": [0, 2]}]
+    assert record["legacy_windows_run"] == [1]
+    # The same attempt checkpointed by this release, at the base it maps to, is credited.
+    fresh = _Host(("/version", "/info", "/"))
+    again = fresh.action("active.templates.r01", start=0, count=3, windows=False)
+    _legacy_checkpoint(fresh, again, 1, 1, base="https://app.example.test/")
+    record = _windows_record(fresh.run(monkeypatch, bundle, again))
+    assert record["bases"] == [{"base": "https://app.example.test/", "windows_run": [0, 1, 2]}]
+    assert "legacy_windows_run" not in record
+
+
+def test_a_shard_slice_in_flight_across_the_upgrade_resumes_and_never_resends(monkeypatch, bundle):
+    """Endpoint child 2 of 2 had run its position 0 as window 0 (the 2.11.0 mapping); it now maps
+    to window 19. The attempt is resumed, nothing is re-sent for it, and its window counts as
+    legacy, not as window 19 at the base."""
+    host = _Host(("/d", "/e"))
+    action = host.action("active.templates.r01", start=0, count=2, windows=False)
+    _legacy_checkpoint(host, action, 0, 0)
+    receipt = host.run(monkeypatch, bundle, action, options=_shard(2, 3))
+    index_of = _window_index(bundle)
+    assert [index_of[call["template_ids"]] for call in host.calls] == [20]
+    record = _windows_record(receipt)
+    assert record["legacy_windows_run"] == [0]
+    assert record["bases"] == [{"base": "https://app.example.test/", "windows_run": [20]}]
+
+
+TWO_ORIGINS = TargetBinding(
+    target_id="target-1", target_kind="web", canonical_host="app.example.test",
+    allowed_origins=("https://app.example.test", "https://app.example.test:8443"),
+    allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+)
+
+
+def test_the_windows_record_names_what_each_base_finished(monkeypatch, bundle):
+    host = _Host(
+        tuple(f"/p{index}" for index in range(30)) + tuple((8443, f"/q{index}") for index in range(20)),
+        target=TWO_ORIGINS,
+    )
+    receipt = host.run(
+        monkeypatch, bundle, host.action("active.templates.r01", start=0, count=50, windows=False),
+    )
+    assert _windows_record(receipt)["bases"] == [
+        {"base": "https://app.example.test/", "windows_run": list(range(39))},
+        {"base": "https://app.example.test:8443/", "windows_run": list(range(11))},
+    ]
+
+
+def test_a_thorough_host_with_a_second_origin_records_that_origin_ran_no_window(monkeypatch, bundle):
+    """Fewer endpoints than windows plans 39 positions, all at the first base: the record says
+    the second origin finished none, so the report cannot read 39 of 39."""
+    host = _Host(("/", "/a", (8443, "/q")), target=TWO_ORIGINS)
+    receipts = [
+        host.run(monkeypatch, bundle, host.action(f"active.templates.r{number:02d}", start=start, count=count))
+        for number, (start, count) in enumerate(((0, 3), (3, 33), (36, 3)), start=1)
+    ]
+    assert {call["url"] for call in host.calls} == {"https://app.example.test/"}
+    assert _windows_record(receipts[0])["bases"][1] == {
+        "base": "https://app.example.test:8443/", "windows_run": [],
+    }
+
+
+def test_sweep_bases_do_not_depend_on_manifest_order():
+    entries = [
+        {"scheme": "https", "host": "app.example.test", "port": 9443},
+        {"scheme": "http", "host": "app.example.test", "port": 8080},
+        {"scheme": "https", "host": "app.example.test", "port": 443},
+        {"scheme": "https", "host": "app.example.test", "port": 8443},
+    ]
+    expected = (
+        "https://app.example.test/", "http://app.example.test:8080/",
+        "https://app.example.test:8443/", "https://app.example.test:9443/",
+    )
+    assert active_sweep_bases("https://app.example.test/", entries) == expected
+    assert active_sweep_bases("https://app.example.test/", list(reversed(entries))) == expected
+
+
+def test_a_resumed_slice_on_three_origins_maps_positions_to_the_same_bases(monkeypatch, bundle):
+    three = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=(
+            "https://app.example.test", "https://app.example.test:8443", "https://app.example.test:9443",
+        ),
+        allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+    )
+    paths = (
+        tuple(f"/p{index}" for index in range(30)) + tuple((9443, f"/r{index}") for index in range(10))
+        + tuple((8443, f"/q{index}") for index in range(10))
+    )
+    host = _Host(paths, target=three)
+    action = host.action("active.templates.r01", start=0, count=50, windows=False)
+    first = host.run(monkeypatch, bundle, action, statuses={45: "failed"})
+    sent = list(host.calls)
+    assert [call["url"] for call in sent[39:]] == ["https://app.example.test:8443/"] * 11
+    resumed = host.run(monkeypatch, bundle, action)
+    assert host.calls == sent
+    assert _windows_record(resumed)["bases"] == _windows_record(first)["bases"]
+
+
+def _origin_select_action(host):
+    spec = CAPABILITY_REGISTRY.require("scan.origin_select")
+    return ScanAction(
+        action_id="origin.select", stage="discovery", ordinal=0,
+        capability_name="scan.origin_select", capability_args={},
+        target_binding_digest=host.target.digest, input_binding_digest="2" * 64,
+        requested_budget={"http_requests": 2, "tool_wall_seconds": 20},
+        placement={
+            "schema_version": "scan-action-placement/v1", "eligible_backends": ["local", "broker"],
+            "requirements": dict(spec.placement_requirements),
+            "adapter_name": spec.adapter, "adapter_version": spec.adapter_version,
+        },
+        dependencies=(), required=True, supporting=False, output_schema=spec.output_schema,
+    )
+
+
+INFERRED = TargetBinding(
+    target_id="target-1", target_kind="web", canonical_host="app.example.test",
+    allowed_origins=("https://app.example.test", "http://app.example.test"),
+    allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+    inferred_origins=("https://app.example.test", "http://app.example.test"),
+)
+
+
+@pytest.mark.parametrize("options", [{}, {"canonical_shard_authority": {
+    "shard_index": 1, "shard_count": 2, "shard_label": "work:anonymous[1]", "parallel_discovery": False,
+}}])
+def test_a_scheme_inferred_sweep_runs_at_the_origin_the_scan_selected(monkeypatch, bundle, options):
+    """The origin selection chose http (https did not answer): the sweep, in a direct Scan and in
+    a parallel shard alike, runs there, not at the first inferred origin."""
+    host = _Host(
+        tuple(("http", 80, f"/p{index}") for index in range(3)),
+        target=INFERRED, target_url="app.example.test",
+    )
+    select = _origin_select_action(host)
+    host.backend.observations = {select.action_id: ({
+        "kind": "origin_selection_observation", "selected_origin": "http://app.example.test",
+        "attempts": [],
+    },)}
+    sweep = replace(
+        host.action("active.templates.r01", start=0, count=3, windows=False), ordinal=1,
+        action_digest=None,
+    )
+    host.run(monkeypatch, bundle, sweep, options=options, before=(select,))
+    assert {call["url"] for call in host.calls} == {"http://app.example.test/"}

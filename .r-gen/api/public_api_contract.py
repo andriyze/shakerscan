@@ -1,0 +1,723 @@
+"""Shared public V2 API contract and request-boundary helpers.
+
+The application has a large compatibility surface, but the release-critical V2
+products below are intentionally small enough to characterize exhaustively.
+This module is dependency-light so generation and contract tests can use the
+same surface classification and body limits as the running ASGI application.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import urllib.parse
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+PUBLIC_V2_SURFACE_PREFIXES: dict[str, tuple[str, ...]] = {
+    "scan": ("/scan/contracts", "/scans"),
+    "hunt": ("/hunts",),
+    "credentials": ("/credential-profiles", "/authenticated-scan-profiles"),
+    "collections": ("/request-collections",),
+    "evidence": ("/evidence",),
+    "model_intake": ("/model-intake",),
+}
+
+# JSON limits include structural overhead around the bounded fields declared by
+# each request model. Request collections deliberately allow large imported
+# documents; all other control-plane writes stay compact.
+PUBLIC_V2_WRITE_BODY_LIMITS: dict[str, int] = {
+    "scan": 2 * 1024 * 1024,
+    "hunt": 1024 * 1024,
+    "credentials": 1024 * 1024,
+    "collections": 64 * 1024 * 1024,
+    "evidence": 2 * 1024 * 1024,
+    "model_intake": 16 * 1024 * 1024,
+}
+
+SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# List responses. ``list/v1`` (api/list_contract.py: limit<=200, opaque keyset ``cursor``,
+# ``count=none|estimate|exact``, ``{items, next_cursor, has_more, total?, total_kind,
+# generated_at}``) is the contract for list endpoints from 2.11.0. The earlier per-endpoint
+# ``limit``/``offset`` responses keep their current shape for this minor line only.
+LIST_CONTRACT = "list/v1"
+LEGACY_LIST_CONTRACT: dict[str, Any] = {
+    "parameters": ("limit", "offset"),
+    "status": "deprecated",
+    "deprecated_in": "2.11.0",
+    "supported_through": "2.11.x",
+    "replacement": LIST_CONTRACT,
+}
+
+PUBLIC_V2_IDEMPOTENCY_HEADER = "idempotency-key"
+_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,199}$")
+_MAX_IDEMPOTENT_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+def public_v2_surface(path: str) -> str | None:
+    """Return the canonical product surface for one exact route path."""
+    normalized = str(path or "")
+    for surface, prefixes in PUBLIC_V2_SURFACE_PREFIXES.items():
+        if any(
+            normalized == prefix or normalized.startswith(prefix + "/")
+            for prefix in prefixes
+        ):
+            return surface
+    return None
+
+
+# A browser-capture batch is bounded far below a collection import: the recorder flushes before
+# a batch's JSON body reaches this, and the Enterprise gateway applies the same cap.
+CAPTURE_BATCH_BODY_LIMIT = 16 * 1024 * 1024
+_CAPTURE_BATCH_PATH = re.compile(r"^/request-collections/[^/]+/capture-batches$")
+
+
+def public_v2_write_body_limit(method: str, path: str) -> int | None:
+    if str(method or "GET").upper() in SAFE_HTTP_METHODS:
+        return None
+    surface = public_v2_surface(path)
+    if surface == "collections" and _CAPTURE_BATCH_PATH.match(str(path or "")):
+        return CAPTURE_BATCH_BODY_LIMIT
+    return PUBLIC_V2_WRITE_BODY_LIMITS.get(surface or "")
+
+
+@dataclass(frozen=True)
+class _RequestBodyTooLarge(Exception):
+    maximum: int
+
+
+class PublicV2BodyLimitMiddleware:
+    """Bound every release-critical public write before model validation.
+
+    The middleware checks both Content-Length and streamed/chunked request
+    bodies. Rejected content is never decoded, logged, or copied into the error
+    response, which matters for credential and collection payloads.
+    """
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    @staticmethod
+    async def _reject(send: Callable[[dict[str, Any]], Awaitable[None]], limit: int) -> None:
+        body = json.dumps({
+            "detail": {
+                "error": "request_body_too_large",
+                "message": "Request body exceeds the public API limit.",
+                "max_bytes": limit,
+            }
+        }, separators=(",", ":")).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = public_v2_write_body_limit(
+            str(scope.get("method") or "GET"), str(scope.get("path") or ""),
+        )
+        if limit is None:
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            bytes(key).decode("latin-1").lower(): bytes(value).decode("latin-1")
+            for key, value in scope.get("headers") or ()
+        }
+        raw_length = headers.get("content-length")
+        if raw_length:
+            try:
+                if int(raw_length) > limit:
+                    await self._reject(send, limit)
+                    return
+            except ValueError:
+                # Let the HTTP server/framework report malformed transport
+                # metadata; never trust it to bypass the streamed-byte check.
+                pass
+
+        messages: list[dict[str, Any]] = []
+        observed = 0
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message.get("type") == "http.request":
+                observed += len(message.get("body") or b"")
+                if observed > limit:
+                    await self._reject(send, limit)
+                    return
+                if not message.get("more_body", False):
+                    break
+            elif message.get("type") == "http.disconnect":
+                break
+
+        index = 0
+
+        async def replay_receive() -> dict[str, Any]:
+            nonlocal index
+            if index < len(messages):
+                message = messages[index]
+                index += 1
+                return message
+            # Replay the buffered body once, then preserve real disconnects.
+            # Synthetic empty requests here starve streaming response tasks.
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+
+class PublicV2IdempotencyMiddleware:
+    """Replay successful public V2 writes by an opaque client retry key.
+
+    The database stores only SHA-256 digests of the key and request body plus
+    the already-public response. Credential and collection request bodies are
+    never persisted here. A key is bound to one HTTP method, concrete route,
+    and exact body digest; reusing it for different input fails closed.
+    """
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    @staticmethod
+    async def _json_response(
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+        status: int,
+        detail: Mapping[str, Any],
+    ) -> None:
+        body = json.dumps(
+            {"detail": dict(detail)}, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    @staticmethod
+    async def _replay(send: Any, row: Mapping[str, Any]) -> None:
+        body = bytes(row.get("response_body") or b"")
+        raw_headers = row.get("response_headers") or {}
+        if isinstance(raw_headers, str):
+            try:
+                raw_headers = json.loads(raw_headers)
+            except json.JSONDecodeError:
+                raw_headers = {}
+        headers = [
+            (str(name).encode("latin-1"), str(value).encode("latin-1"))
+            for name, value in dict(raw_headers).items()
+            if str(name).lower() not in {"content-length", "idempotency-replayed"}
+        ]
+        headers.extend([
+            (b"content-length", str(len(body)).encode("ascii")),
+            (b"idempotency-replayed", b"true"),
+        ])
+        await send({
+            "type": "http.response.start",
+            "status": int(row.get("response_status") or 200),
+            "headers": headers,
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        method = str(scope.get("method") or "GET").upper()
+        path = str(scope.get("path") or "")
+        if (
+            scope.get("type") != "http"
+            or method in SAFE_HTTP_METHODS
+            or public_v2_surface(path) is None
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            bytes(key).decode("latin-1").lower(): bytes(value).decode("latin-1")
+            for key, value in scope.get("headers") or ()
+        }
+        key = headers.get(PUBLIC_V2_IDEMPOTENCY_HEADER)
+        if not key:
+            await self.app(scope, receive, send)
+            return
+        if not _IDEMPOTENCY_KEY_RE.fullmatch(key):
+            await self._json_response(send, 400, {
+                "error": "invalid_idempotency_key",
+                "message": (
+                    "Idempotency-Key must contain 8 to 200 safe characters and "
+                    "start with an alphanumeric character."
+                ),
+            })
+            return
+
+        messages: list[dict[str, Any]] = []
+        request_body = bytearray()
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message.get("type") == "http.request":
+                request_body.extend(message.get("body") or b"")
+                if not message.get("more_body", False):
+                    break
+            elif message.get("type") == "http.disconnect":
+                break
+
+        key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        request_digest = hashlib.sha256(bytes(request_body)).hexdigest()
+        app = scope.get("app")
+        pool = getattr(getattr(app, "state", None), "db_pool", None)
+        if pool is None:
+            # Startup and focused test applications may not own the production
+            # database. Fail closed rather than pretending the retry is durable.
+            await self._json_response(send, 503, {
+                "error": "idempotency_store_unavailable",
+                "message": "The public API retry store is unavailable.",
+            })
+            return
+
+        if (method, path) == ("POST", "/request-collections"):
+            try:
+                from public_retry_atomic import execute_atomic_write
+            except ModuleNotFoundError:
+                from api.public_retry_atomic import execute_atomic_write
+            await execute_atomic_write(
+                self, scope=scope, messages=messages, send=send, pool=pool,
+                key_digest=key_digest, request_digest=request_digest,
+                max_response_bytes=_MAX_IDEMPOTENT_RESPONSE_BYTES, receive_after_body=receive,
+            )
+            return
+
+        async with pool.acquire() as conn:
+            inserted = await conn.fetchrow(
+                """INSERT INTO public_api_idempotency (
+                       method, path, key_sha256, request_sha256, state
+                   ) VALUES ($1,$2,$3,$4,'processing')
+                   ON CONFLICT (method, path, key_sha256) DO NOTHING
+                   RETURNING method""",
+                method, path, key_digest, request_digest,
+            )
+            if not inserted:
+                row = await conn.fetchrow(
+                    """SELECT * FROM public_api_idempotency
+                       WHERE method=$1 AND path=$2 AND key_sha256=$3""",
+                    method, path, key_digest,
+                )
+                if row and str(row.get("request_sha256") or "") != request_digest:
+                    await self._json_response(send, 409, {
+                        "error": "idempotency_key_reused",
+                        "message": "Idempotency-Key was already used for different input.",
+                    })
+                    return
+                if row and row.get("state") == "completed":
+                    await self._replay(send, row)
+                    return
+                # Age cannot prove that execution did not occur. Preserve the
+                # original reservation until authoritative outcome recovery.
+                await self._json_response(send, 409, {
+                    "error": "idempotency_request_in_progress",
+                    "message": "This request is processing or its outcome is unconfirmed.",
+                })
+                return
+
+        index = 0
+
+        async def replay_receive() -> dict[str, Any]:
+            nonlocal index
+            if index < len(messages):
+                message = messages[index]
+                index += 1
+                return message
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        response_messages: list[dict[str, Any]] = []
+
+        async def capture_send(message: dict[str, Any]) -> None:
+            response_messages.append(message)
+
+        # An exception or cancellation may follow a committed/enqueued action.
+        # Do not erase its reservation and make a retry execute it again.
+        try:
+            from public_retry_context import retry_identity
+        except ModuleNotFoundError:
+            from api.public_retry_context import retry_identity
+
+        token = retry_identity.set((method, path, key_digest, request_digest))
+        try:
+            await self.app(scope, replay_receive, capture_send)
+        finally:
+            retry_identity.reset(token)
+
+        start = next((
+            item for item in response_messages
+            if item.get("type") == "http.response.start"
+        ), None)
+        response_body = b"".join(
+            bytes(item.get("body") or b"")
+            for item in response_messages
+            if item.get("type") == "http.response.body"
+        )
+        status = int((start or {}).get("status") or 500)
+        response_headers = {
+            bytes(name).decode("latin-1").lower(): bytes(value).decode("latin-1")
+            for name, value in (start or {}).get("headers") or ()
+            if bytes(name).decode("latin-1").lower() in {
+                "content-type", "location", "x-shakerscan-hunt-contract",
+            }
+        }
+        content_type = response_headers.get("content-type", "").lower()
+        cacheable = (
+            200 <= status < 300
+            and "json" in content_type
+            and len(response_body) <= _MAX_IDEMPOTENT_RESPONSE_BYTES
+        )
+        try:
+            rejection = json.loads(response_body)
+        except (ValueError, UnicodeError):
+            rejection = None
+        # A 409 is a refusal of this attempt too (a Hunt action waiting for a permission, a
+        # budget refusal, a state conflict): leaving its key "processing" turned every retry with
+        # the same key into an endless in-progress answer, even after the permission was granted.
+        definitive_rejection = (
+            status in {400, 401, 403, 404, 405, 409, 413, 415, 422, 429}
+            and isinstance(rejection, dict)
+            and not any(rejection.get(field) for field in ("scan_id", "retest_id", "job_id", "id"))
+        )
+        stored_body = response_body
+        if cacheable and isinstance(rejection, dict):
+            stored_body = _without_agent_values(rejection, response_body)
+        async with pool.acquire() as conn:
+            if cacheable:
+                await conn.execute(
+                    """UPDATE public_api_idempotency
+                       SET state='completed', response_status=$5,
+                           response_headers=$6::jsonb, response_body=$7,
+                           updated_at=NOW(), completed_at=NOW()
+                       WHERE method=$1 AND path=$2 AND key_sha256=$3
+                         AND request_sha256=$4 AND state='processing'""",
+                    method, path, key_digest, request_digest, status,
+                    json.dumps(response_headers, sort_keys=True), stored_body,
+                )
+            elif definitive_rejection:
+                await conn.execute(
+                    """DELETE FROM public_api_idempotency
+                       WHERE method=$1 AND path=$2 AND key_sha256=$3
+                         AND request_sha256=$4 AND state='processing'
+                         AND response_body IS NULL""",
+                    method, path, key_digest, request_digest,
+                )
+        for message in response_messages:
+            await send(message)
+
+
+def _without_agent_values(answer: dict[str, Any], body: bytes) -> bytes:
+    """The body a retry store keeps for an answer that carried discovered secret values (a Hunt
+    whose starting person let the agent see them): the same answer without the values, which
+    are shown once and never stored. Any other body is kept as it is."""
+    result = answer.get("result")
+    if not isinstance(result, dict) or result.get("values_in_this_answer_only") is not True:
+        return body
+    secrets = [
+        {key: value for key, value in item.items() if key != "value"}
+        for item in result.get("secrets") or () if isinstance(item, dict)
+    ]
+    stored = {**answer, "result": {
+        **result, "secrets": secrets, "secret_values_visible": False,
+        "values_in_this_answer_only": False,
+        "values_not_replayed": "The values were shown once; call secrets.inspect again to see them.",
+    }}
+    return json.dumps(stored, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def public_v2_write_paths(openapi: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return stable ``METHOD path`` keys for all characterized writes."""
+    writes: list[str] = []
+    for path, path_item in (openapi.get("paths") or {}).items():
+        if public_v2_surface(str(path)) is None or not isinstance(path_item, Mapping):
+            continue
+        for method in path_item:
+            if str(method).upper() in SAFE_HTTP_METHODS:
+                continue
+            if str(method).lower() in {"post", "put", "patch", "delete"}:
+                writes.append(f"{str(method).upper()} {path}")
+    return tuple(sorted(writes))
+
+
+def add_public_v2_idempotency_openapi(openapi: dict[str, Any]) -> dict[str, Any]:
+    """Declare the optional durable retry header on every public V2 write."""
+    for path, path_item in (openapi.get("paths") or {}).items():
+        if public_v2_surface(str(path)) is None or not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if (
+                str(method).upper() in SAFE_HTTP_METHODS
+                or str(method).lower() not in {"post", "put", "patch", "delete"}
+                or not isinstance(operation, dict)
+            ):
+                continue
+            parameters = operation.setdefault("parameters", [])
+            if not any(
+                isinstance(item, Mapping)
+                and item.get("in") == "header"
+                and str(item.get("name") or "").lower() == "idempotency-key"
+                for item in parameters
+            ):
+                parameters.append({
+                    "name": "Idempotency-Key",
+                    "in": "header",
+                    "required": False,
+                    "description": (
+                        "Opaque 8-200 character retry key. The key is bound to the "
+                        "exact method, concrete path, and request-body digest."
+                    ),
+                    "schema": {
+                        "type": "string", "minLength": 8, "maxLength": 200,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{7,199}$",
+                    },
+                })
+    return openapi
+
+
+def _header_hostname(value: str) -> str:
+    """The bare hostname from an Origin or a Host header, lowercased, port removed."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"//{raw}"
+    try:
+        hostname = urllib.parse.urlsplit(raw).hostname
+    except ValueError:
+        return ""
+    return (hostname or "").lower().strip(".")
+
+
+def _header_port(value: str) -> str:
+    """The explicit port in an Origin or Host header, or the scheme's default."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    scheme = raw.split("://", 1)[0].lower() if "://" in raw else ""
+    try:
+        port = urllib.parse.urlsplit(raw if scheme else f"//{raw}").port
+    except ValueError:
+        return ""
+    if port:
+        return str(port)
+    return {"https": "443", "http": "80"}.get(scheme, "")
+
+
+def _deployment_web_ports(request_host: str, request_scheme: str = "http") -> frozenset[str]:
+    """The ports this deployment serves its own UI and API on.
+
+    The API's own port comes from the request that arrived, so a non-default deployment needs
+    no extra configuration; the UI port is the one the launcher publishes.
+    """
+    ports = {str(os.environ.get("SHAKERSCAN_UI_PORT") or "3000").strip() or "3000"}
+    api_port = _header_port(request_host) or {"http": "80", "https": "443"}.get(request_scheme, "")
+    if api_port:
+        ports.add(api_port)
+    return frozenset(ports)
+
+
+def origin_is_same_deployment(origin: str, request_host: str, request_scheme: str = "http") -> bool:
+    """Whether this Origin is the same *address literal* the API itself was reached on.
+
+    The configured allowlist names one address, so every other route to the same engine was
+    refused: a LAN install answered only on the private IP the launcher picked, and the same UI
+    opened by public IP or through a tunnel lost its CORS headers on reads and got 403 on every
+    write. Reaching the API at an address means the UI served from that address is the same
+    deployment, so admitting it grants nothing new.
+
+    Both sides must be an IP literal, which is what keeps this from becoming a DNS-rebinding
+    hole. A name can be re-pointed: a page on ``evil.test`` whose DNS flips to an internal
+    address would present ``Origin: http://evil.test`` against ``Host: evil.test`` and match on
+    name equality alone, which would hand that page the API. An IP literal cannot be rebound,
+    because the browser connected to that address directly and an attacker cannot serve a page
+    from an address it does not hold. Names stay with the operator: list them in
+    ``SHAKERSCAN_CORS_ALLOW_ORIGINS``.
+
+    The port must be this deployment's own UI or API port. Comparing only the host admitted
+    every other service on that address: anything a person happens to run on the same machine
+    could serve a page that drives this API, which on a shared or multi-tenant host is exactly
+    the site a cross-origin boundary exists to keep out.
+    """
+    host = _header_hostname(request_host)
+    if not host or _header_hostname(origin) != host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return _header_port(origin) in _deployment_web_ports(request_host, request_scheme)
+
+
+def _origin_is_allowed(
+    origin: str,
+    allowed_origins: Sequence[str],
+    allow_origin_regex: str = "",
+    request_host: str = "",
+    request_scheme: str = "http",
+) -> bool:
+    """Apply the same exact/regex origin decision to actual unsafe requests as CORS preflights.
+
+    CORS response headers are not a CSRF boundary: browsers still dispatch simple cross-origin POSTs
+    and merely hide the response. ShakerScan intentionally remains friendly to curl/agents (which do
+    not send Origin), while browser requests that do carry Origin must come from the configured UI
+    or from the very host this request reached the API on.
+    """
+    normalized = str(origin or "").strip()
+    if not normalized:
+        return True
+    if "*" in allowed_origins:
+        return True
+    if normalized in allowed_origins:
+        return True
+    if request_host and origin_is_same_deployment(normalized, request_host, request_scheme):
+        return True
+    if allow_origin_regex:
+        try:
+            return re.fullmatch(allow_origin_regex, normalized) is not None
+        except re.error:
+            # Invalid security configuration fails closed for browser mutations.
+            return False
+    return False
+
+
+class SameHostCorsMiddleware:
+    """Answer CORS for a UI served from the same host this request reached the API on.
+
+    Registered outside the configured CORS middleware, so anything the operator listed keeps its
+    existing answer untouched and this only fills the gap that made every other route to the same
+    engine unusable. Credentials stay off, exactly as the configured policy has them.
+    """
+
+    _DEFAULT_ALLOW_HEADERS = "content-type, idempotency-key, authorization"
+
+    def __init__(self, app: Any, *, expose_headers: Sequence[str] = ()):
+        self.app = app
+        self.expose_headers = ", ".join(expose_headers)
+
+    def _headers(self, scope: dict[str, Any]) -> dict[str, str]:
+        return {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers") or []
+        }
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = self._headers(scope)
+        origin = headers.get("origin", "")
+        if not origin or not origin_is_same_deployment(
+            origin, headers.get("host", ""), str(scope.get("scheme") or "http"),
+        ):
+            await self.app(scope, receive, send)
+            return
+        encoded = origin.encode("latin-1")
+        if str(scope.get("method") or "").upper() == "OPTIONS" and headers.get(
+            "access-control-request-method"
+        ):
+            requested = headers.get("access-control-request-headers") or self._DEFAULT_ALLOW_HEADERS
+            response_headers = [
+                (b"access-control-allow-origin", encoded),
+                (b"access-control-allow-methods", b"DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"),
+                (b"access-control-allow-headers", requested.encode("latin-1")),
+                (b"access-control-max-age", b"600"),
+                (b"content-length", b"0"),
+                (b"vary", b"Origin"),
+            ]
+            await send({"type": "http.response.start", "status": 200, "headers": response_headers})
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        async def send_with_cors(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                existing = list(message.get("headers") or [])
+                names = {key.lower() for key, _value in existing}
+                # The configured policy answered first when it recognised this origin; never
+                # emit a second, conflicting allow-origin header.
+                if b"access-control-allow-origin" not in names:
+                    existing.append((b"access-control-allow-origin", encoded))
+                    existing.append((b"vary", b"Origin"))
+                    if self.expose_headers:
+                        existing.append((
+                            b"access-control-expose-headers",
+                            self.expose_headers.encode("latin-1"),
+                        ))
+                message = {**message, "headers": existing}
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
+
+
+class UnsafeOriginGuardMiddleware:
+    """Reject disallowed browser-origin mutations before endpoint code executes.
+
+    Safe/read-only methods retain ordinary CORS behavior, and non-browser clients remain compatible
+    because requests without an Origin header are accepted.
+    """
+
+    _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+    def __init__(self, app: Any, *, allow_origins: Sequence[str], allow_origin_regex: str = ""):
+        self.app = app
+        self.allow_origins = tuple(allow_origins)
+        self.allow_origin_regex = allow_origin_regex
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and str(scope.get("method") or "GET").upper() not in self._SAFE_METHODS:
+            headers = {
+                key.decode("latin-1").lower(): value.decode("latin-1")
+                for key, value in scope.get("headers") or []
+            }
+            origin = headers.get("origin", "")
+            if origin and not _origin_is_allowed(
+                origin, self.allow_origins, self.allow_origin_regex,
+                request_host=headers.get("host", ""),
+                request_scheme=str(scope.get("scheme") or "http"),
+            ):
+                body = json.dumps({"detail": "Cross-origin browser mutation is not allowed"}).encode("utf-8")
+                await send({
+                    "type": "http.response.start",
+                    "status": 403,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                        (b"vary", b"Origin"),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
+__all__ = [
+    "CAPTURE_BATCH_BODY_LIMIT",
+    "LEGACY_LIST_CONTRACT",
+    "LIST_CONTRACT",
+    "PUBLIC_V2_IDEMPOTENCY_HEADER",
+    "PUBLIC_V2_SURFACE_PREFIXES",
+    "PUBLIC_V2_WRITE_BODY_LIMITS",
+    "PublicV2BodyLimitMiddleware",
+    "SameHostCorsMiddleware",
+    "UnsafeOriginGuardMiddleware",
+    "origin_is_same_deployment",
+    "PublicV2IdempotencyMiddleware",
+    "add_public_v2_idempotency_openapi",
+    "public_v2_surface",
+    "public_v2_write_body_limit",
+    "public_v2_write_paths",
+]

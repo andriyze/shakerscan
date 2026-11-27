@@ -86,6 +86,7 @@ _ALLOWED_POLICY_KEYS = frozenset({
     "allow_state_changing_http",
     "network_discovery",
     "allow_oob_interactions",
+    "allow_account_creation",
     "allow_identity_headers",
     "allow_direct_origin",
     "authorization_confirmed",
@@ -544,6 +545,11 @@ class HuntStartPolicy:
     allow_state_changing_http: bool = False
     network_discovery: bool = False
     allow_oob_interactions: bool = False
+    # The operator's explicit decision that the engine may register accounts on the target where
+    # anyone can sign up, and use the application as them (writes included). Off by default: an
+    # account on a real system is permanent until someone deletes it, and a sign-up can send mail.
+    # It implies state-changing HTTP. Every account and write is listed in the debrief.
+    allow_account_creation: bool = False
     # The operator's explicit decision that forging a client-address header against this
     # target is in scope. Needed to test whether an origin trusts a client-suppliable
     # address, which is exploitable wherever that origin is reachable outside its edge.
@@ -572,6 +578,7 @@ class HuntStartPolicy:
             or self.allow_state_changing_http
             or self.network_discovery
             or self.allow_oob_interactions
+            or self.allow_account_creation
             or self.allow_identity_headers
             or self.allow_direct_origin
         )
@@ -589,10 +596,16 @@ class HuntStartPolicy:
                 ("allow_state_changing_http", self.allow_state_changing_http),
                 ("network_discovery", self.network_discovery),
                 ("allow_oob_interactions", self.allow_oob_interactions),
+                ("allow_account_creation", self.allow_account_creation),
                 ("allow_identity_headers", self.allow_identity_headers),
                 ("allow_direct_origin", self.allow_direct_origin),
             ) if requested
         ]
+        if self.allow_account_creation and not self.allow_state_changing_http:
+            # A sign-up is a write: asking for account creation is asking for state-changing HTTP.
+            resolved, notes = replace(self, allow_state_changing_http=True).implied()
+            return resolved, ("allow_state_changing_http was enabled because the policy asked for "
+                              "allow_account_creation", *notes)
         if self.active_testing or not implying:
             return self, ()
         return (
@@ -652,6 +665,7 @@ class HuntStartPolicy:
             "allow_state_changing_http": self.allow_state_changing_http,
             "network_discovery": self.network_discovery,
             "allow_oob_interactions": self.allow_oob_interactions,
+            "allow_account_creation": self.allow_account_creation,
             "allow_identity_headers": self.allow_identity_headers,
             "allow_direct_origin": self.allow_direct_origin,
             "authorization_confirmed": self.authorization_confirmed,
@@ -783,6 +797,7 @@ class HuntStartContract:
             ),
             "network_discovery": bool(self.policy.network_discovery and earned),
             "allow_oob_interactions": bool(self.policy.allow_oob_interactions and earned),
+            "allow_account_creation": bool(self.policy.allow_account_creation and earned),
             "allow_identity_headers": bool(self.policy.allow_identity_headers and earned),
             "allow_direct_origin": bool(self.policy.allow_direct_origin and earned),
             "direct_origin_addresses": (
@@ -942,6 +957,9 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         ),
         allow_oob_interactions=_boolean(
             policy_raw.get("allow_oob_interactions"), "allow_oob_interactions"
+        ),
+        allow_account_creation=_boolean(
+            policy_raw.get("allow_account_creation"), "allow_account_creation"
         ),
         allow_identity_headers=_boolean(
             policy_raw.get("allow_identity_headers"), "allow_identity_headers"

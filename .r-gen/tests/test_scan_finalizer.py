@@ -1,0 +1,1857 @@
+from __future__ import annotations
+
+from dataclasses import replace
+import hashlib
+import json
+import uuid
+
+import pytest
+
+from api.runtime.observation_manifests import ObservationManifest
+from api.scan.action_plan import ScanActionPlan
+from api.scan.capability_result import (
+    CapabilityResultReason,
+    CapabilityResultReference,
+    CapabilityResultStatus,
+)
+from api.scan.finalizer import finalize_scan_report
+from api.scan import finalizer as finalizer_module
+from api.scan.continuation import ScanPlanRevision
+from tests.test_scan_orchestrator import SCAN_ID, _action, _plan, _result
+
+
+def _results(plan):
+    return {
+        action.action_id: _result(action, status=CapabilityResultStatus.SUCCESS)
+        for action in plan.actions if action.action_id != "finalize.report"
+    }
+
+
+def _result_with_observation_count(action, count: int) -> CapabilityResultReference:
+    content = b"{}\n" * count
+    manifest = ObservationManifest(
+        manifest_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"finalizer:{action.action_id}:{count}")),
+        owner_id=SCAN_ID,
+        action_id=action.action_id,
+        capability_name=action.capability_name,
+        output_schema=action.output_schema,
+        observation_count=count,
+        content_sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        object_key=f"scans/{SCAN_ID}/{action.action_id}.jsonl",
+    ).reference()
+    base = _result(action, status=CapabilityResultStatus.SUCCESS)
+    return CapabilityResultReference(
+        **{
+            **base.digest_material(),
+            "receipt_ref": base.receipt_ref,
+            "observation_manifest_ref": manifest,
+        }
+    )
+
+
+def test_finalizer_is_a_pure_deterministic_projection_of_receipts():
+    plan = _plan()
+    results = _results(plan)
+    observations = {action.action_id: () for action in plan.actions}
+
+    first = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+    second = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert first == second
+    assert first["schema_version"] == "canonical-scan-report/v2"
+    assert first["coverage"]["status"] == "complete"
+    assert first["scan_metadata"]["finalizer"] == "pure_receipt_projection/v1"
+    assert first["canonical_action_execution"]["plan_revision"]["revision"] == 0
+    asserted_digest = first["report_digest"]
+    digest_material = dict(first)
+    digest_material.pop("report_digest")
+    assert asserted_digest == hashlib.sha256(json.dumps(
+        digest_material,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
+def test_failed_scheme_selection_does_not_claim_application_examination():
+    selection = _action("origin.select", 0, capability_name="scan.origin_select")
+    baseline = _action("baseline.http", 1, dependencies=(selection.action_id,))
+    final = _action("finalize.report", 2, dependencies=(selection.action_id, baseline.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(selection, baseline, final),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={
+            selection.action_id: replace(
+                _result_with_observation_count(selection, 1),
+                status=CapabilityResultStatus.FAILED,
+                reason_code=CapabilityResultReason.ADAPTER_FAILED,
+                result_digest=None,
+            ),
+            baseline.action_id: _result(
+                baseline, status=CapabilityResultStatus.SKIPPED,
+                reason=CapabilityResultReason.DEPENDENCY_FAILED,
+            ),
+        },
+        observations={selection.action_id: ({
+            "kind": "origin_selection_observation", "selected_origin": None,
+            "attempts": [
+                {"origin": "https://app.example.test", "reachable": False},
+                {"origin": "http://app.example.test", "reachable": False},
+            ],
+        },)},
+    )
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+    assert report["result"]["application_observed"] is False
+
+
+def test_http_selection_with_inapplicable_tls_keeps_examined_coverage():
+    selection = _action("origin.select", 0, capability_name="scan.origin_select")
+    baseline = _action("baseline.http", 1, dependencies=(selection.action_id,))
+    tls = _action("baseline.tls", 2, capability_name="tls.inspect",
+                  dependencies=(selection.action_id,))
+    final = _action("finalize.report", 3,
+                    dependencies=(selection.action_id, baseline.action_id, tls.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(selection, baseline, tls, final),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url="http://app.example.test:8080/",
+        action_results={
+            selection.action_id: _result_with_observation_count(selection, 1),
+            baseline.action_id: _result_with_observation_count(baseline, 1),
+            tls.action_id: _result(
+                tls, status=CapabilityResultStatus.SKIPPED,
+                reason=CapabilityResultReason.NOT_APPLICABLE,
+            ),
+        },
+        observations={
+            selection.action_id: ({
+                "kind": "origin_selection_observation",
+                "selected_origin": "http://app.example.test:8080",
+                "attempts": [{"origin": "https://app.example.test:8080", "reachable": False},
+                             {"origin": "http://app.example.test:8080", "reachable": True}],
+            },),
+            baseline.action_id: ({
+                "kind": "http_observation",
+                "request": {"origin": "http://app.example.test:8080"},
+                "response": {"status": 200},
+            },),
+        },
+    )
+    assert report["reachability"]["status"] == "reachable"
+    assert report["coverage"]["status"] == "complete"
+    assert "adapter_failed" not in report["coverage"]["reasons"]
+
+
+def test_finalizer_digest_binds_complete_plan_revision_chain():
+    plan = _plan()
+    results = _results(plan)
+    observations = {action.action_id: () for action in plan.actions}
+    amendment = ScanPlanRevision(
+        scan_id=plan.scan_id,
+        revision=1,
+        plan_digest=plan.plan_digest,
+        parent_plan_digest="a" * 64,
+        continuation_allocation_digest="b" * 64,
+        discovery_result_digest="c" * 64,
+        work_manifest_references=({
+            "schema_version": "scan-work-manifest-reference/v1",
+            "manifest_id": "55555555-5555-4555-8555-555555555555",
+            "kind": "candidate",
+            "content_schema": "candidate-manifest/v1",
+            "manifest_digest": "d" * 64,
+            "entry_count": 1,
+            "status": "complete",
+        },),
+        continuation_plan_digest="e" * 64,
+    )
+
+    root_report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+    amended_report = finalize_scan_report(
+        plan=plan,
+        plan_revision=amendment,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert amended_report["report_digest"] != root_report["report_digest"]
+    assert amended_report["canonical_action_execution"]["plan_revision"] == (
+        amendment.canonical_dict()
+    )
+
+
+def test_finalizer_projects_server_observed_principal_contexts():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "principal_context", "lane": "primary", "authenticated": True,
+        "binding_digest": "d" * 64, "source": "server_runtime",
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+
+    assert report["smart_coverage"] == {
+        "auth_states_tested": ["user1"],
+        "principal_contexts_exercised": ["primary"],
+        "principal_context_semantics": "server_observed_authenticated_target_traffic",
+    }
+    assert report["authentication_assurance"]["state"] == "unknown"
+    assert report["authentication_assurance"]["reason_code"] == "legacy_unverified"
+    assert report["authentication_assurance"]["coverage"] == "unverified"
+    assert report["authentication_assurance"]["continuous_authentication_proven"] is False
+
+
+def test_credential_interruption_is_inconclusive_and_preserves_earlier_findings():
+    plan = _plan()
+    baseline, blocked, _ = plan.actions
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {"origin": "https://app.example.test", "pinned_address": "192.0.2.10"},
+        "response": {"status": 200, "selected_headers": {"referrer-policy": ""}},
+    },), blocked.action_id: ()}
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1),
+        blocked.action_id: _result(blocked, status=CapabilityResultStatus.SUCCESS)}
+    before = finalize_scan_report(plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations)
+    results[blocked.action_id] = _result(blocked, status=CapabilityResultStatus.BLOCKED,
+        reason=CapabilityResultReason.AUTHENTICATION_UNCERTAIN)
+    after = finalize_scan_report(plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations)
+    assert after["findings"] == before["findings"] and after["findings"]
+    assert after["authentication_assurance"]["reason_code"] == "authentication_gap"
+    assert after["authentication_assurance"]["interrupted_action_count"] == 1
+    assert after["authentication_assurance"]["state"] == "unknown"
+    assert after["coverage"]["status"] == "partial"
+    # A simultaneous timeout keeps its own execution reason without hiding the
+    # separately recorded loss of identity authority.
+    observations[blocked.action_id] = ({"kind": "identity_authority_interruption", "reason_code": "authentication_uncertain"},)
+    results[blocked.action_id] = replace(_result_with_observation_count(blocked, 1),
+        status=CapabilityResultStatus.TIMED_OUT, reason_code=CapabilityResultReason.TIMED_OUT,
+        partial=True, timed_out=True, result_digest=None)
+    timed = finalize_scan_report(plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations)
+    assert timed["authentication_assurance"]["interrupted_action_count"] == 1
+    assert timed["findings"] == before["findings"]
+
+
+def test_finalizer_projects_content_free_runtime_destinations_from_observations():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {
+            "origin": "https://app.example.test",
+            "path": "/reset?token=<redacted>",
+            "pinned_address": "192.0.2.10",
+        },
+        "response": {
+            "final_url": "https://app.example.test/account?key=<redacted>",
+        },
+        "redirect_chain": [{"location": "https://app.example.test/account"}],
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert report["runtime_destinations"] == [{
+        "label": "baseline.http:0:0",
+        "url": "https://app.example.test",
+        "final_url": "https://app.example.test",
+        "source": "http.request",
+        "resolved_host": "app.example.test",
+        "resolved_ips": ["192.0.2.10"],
+    }]
+    assert "token" not in str(report["runtime_destinations"])
+
+
+def test_finalizer_projects_pinned_http_header_posture_findings():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {
+            "origin": "https://app.example.test",
+            "pinned_address": "192.0.2.10",
+        },
+        "response": {
+            "status": 200,
+            "selected_headers": {
+                "content-security-policy": "default-src 'self'",
+                "referrer-policy": "",
+                "permissions-policy": "",
+                "strict-transport-security": "",
+            },
+        },
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert {item["title"] for item in report["findings"]} == {
+        "Missing Referrer Policy header",
+        "Missing Permissions Policy header",
+        "Missing HTTP Strict Transport Security header",
+    }
+    assert all(item["verified"] is True for item in report["findings"])
+    assert all(
+        item["evidence"]["pinned_address"] == "192.0.2.10"
+        for item in report["findings"]
+    )
+
+
+def test_finalizer_does_not_grade_headers_from_an_auth_challenge():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {
+            "origin": "https://app.example.test",
+            "pinned_address": "192.0.2.10",
+        },
+        "response": {"status": 401, "security_headers": {}},
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert report["findings"] == []
+    assert report["http"]["posture_observed"] is False
+    assert report["http"]["missing_security_headers"] == []
+    assert report["result"]["posture_penalty"] == 0
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+    assert report["result"]["grade_reliable"] is False
+    assert report["result"]["grade"] is None
+    assert report["coverage"]["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["application_not_observed"],
+    }
+
+
+def test_finalizer_suppresses_missing_header_template_matches_from_auth_challenge():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    templates = _action(
+        "passive.templates", 1,
+        dependencies=(baseline.action_id,),
+        capability_name="templates.passive_batch",
+    )
+    final = _action(
+        "finalize.report", 2,
+        dependencies=(templates.action_id,),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, templates, final),
+    )
+    results = {
+        baseline.action_id: _result_with_observation_count(baseline, 1),
+        templates.action_id: _result_with_observation_count(templates, 2),
+    }
+    observations = {
+        baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"origin": "https://app.example.test"},
+            "response": {"status": 401, "security_headers": {}},
+        },),
+        templates.action_id: (
+            # The pack's attempt on the origin: the family did its work.
+            {"kind": "candidate_attempt", "attempt_id": "p" * 64, "candidate_id": "origin",
+             "status": "success"},
+            {
+            "kind": "template_match",
+            "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers",
+            "severity": "info",
+            "matched_at": "https://app.example.test/",
+            "matcher_name": "referrer-policy",
+        },),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert report["findings"] == []
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+    [passive] = [row for row in report["coverage"]["family_coverage"]
+                 if row["family"] == "nuclei_passive"]
+    assert passive["coverage_status"] == "complete"
+
+
+def test_finalizer_names_the_specific_header_reported_by_nuclei():
+    templates = _action(
+        "passive.templates", 0, capability_name="templates.passive_batch",
+    )
+    final = _action("finalize.report", 1, dependencies=(templates.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(templates, final),
+    )
+    results = {templates.action_id: _result_with_observation_count(templates, 1)}
+    observations = {templates.action_id: ({
+        "kind": "template_match",
+        "template_id": "http-missing-security-headers",
+        "name": "HTTP Missing Security Headers",
+        "severity": "info",
+        "matched_at": "https://app.example.test/",
+        "matcher_name": "x-content-type-options",
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert len(report["findings"]) == 1
+    finding = report["findings"][0]
+    assert finding["title"] == (
+        "Missing HTTP response header: X-Content-Type-Options"
+    )
+    assert finding["evidence"]["header_name"] == (
+        "x-content-type-options"
+    )
+
+
+
+def test_finalizer_reports_a_missing_header_once_per_origin_with_the_urls_as_evidence():
+    """A response header policy belongs to the origin, not to each crawled path.
+
+    Per-URL emission turned one missing header into one finding per page (1,032 findings for
+    8 headers over 129 URLs on a thorough scan) and buried the single proven finding.
+    """
+    templates = _action(
+        "passive.templates", 0, capability_name="templates.passive_batch",
+    )
+    more = _action(
+        "passive.templates.001", 1, capability_name="templates.passive_batch",
+    )
+    final = _action(
+        "finalize.report", 2, dependencies=(templates.action_id, more.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(templates, more, final),
+    )
+    results = {
+        templates.action_id: _result_with_observation_count(templates, 3),
+        more.action_id: _result_with_observation_count(more, 1),
+    }
+    def match(url, matcher="referrer-policy"):
+        return {
+            "kind": "template_match",
+            "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers",
+            "severity": "info",
+            "matched_at": url,
+            "matcher_name": matcher,
+        }
+    observations = {
+        templates.action_id: (
+            match("https://app.example.test/"),
+            match("https://app.example.test/about"),
+            match("https://app.example.test/about", matcher="content-security-policy"),
+        ),
+        # A later batch of the same sweep matches the same header again on another page.
+        more.action_id: (match("https://app.example.test/contact"),),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    by_title = {item["title"]: item for item in report["findings"]}
+    assert set(by_title) == {
+        "Missing HTTP response header: Referrer-Policy",
+        "Missing HTTP response header: Content-Security-Policy",
+    }, "one finding per header per origin, not per URL"
+    referrer = by_title["Missing HTTP response header: Referrer-Policy"]
+    assert referrer["url"] == "https://app.example.test"
+    assert referrer["evidence"]["matched_url_count"] == 3, "later batches fold into the first"
+    assert referrer["evidence"]["matched_urls"] == [
+        "https://app.example.test/", "https://app.example.test/about",
+        "https://app.example.test/contact",
+    ]
+    csp = by_title["Missing HTTP response header: Content-Security-Policy"]
+    assert csp["evidence"]["matched_url_count"] == 1
+
+def _baseline_and_header_matches(security_headers, matchers):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    templates = _action(
+        "passive.templates", 1, dependencies=(baseline.action_id,),
+        capability_name="templates.passive_batch",
+    )
+    final = _action("finalize.report", 2, dependencies=(templates.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(baseline, templates, final),
+    )
+    results = {
+        baseline.action_id: _result_with_observation_count(baseline, 1),
+        templates.action_id: _result_with_observation_count(templates, len(matchers)),
+    }
+    observations = {
+        baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"method": "GET", "origin": "https://app.example.test", "path": "/"},
+            "response": {
+                "status": 200,
+                "security_headers": security_headers,
+                "selected_headers": {"server": "nginx"},
+            },
+        },),
+        templates.action_id: tuple({
+            "kind": "template_match",
+            "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers",
+            "severity": "info",
+            "matched_at": "https://app.example.test/",
+            "matcher_name": matcher,
+        } for matcher in matchers),
+    }
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+    # A header the baseline itself proves absent is reported once, by the baseline finding
+    # (the template's duplicate is folded into it); the others remain template findings.
+    return {
+        (item["evidence"].get("header_name") or item["evidence"].get("header")): item
+        for item in report["findings"]
+        if item["evidence"].get("template_id") == "http-missing-security-headers"
+        or str(item["evidence"].get("check") or "").startswith("missing_header_")
+    }
+
+
+def test_a_missing_header_finding_carries_the_recorded_response_that_lacks_it():
+    """Missing-header findings stored no evidence beyond the template id: nuclei's passive pack
+    runs with -omit-raw. The baseline request to the same origin is the scan's own record of the
+    response headers, so the finding carries that request line, status and header set."""
+    by_header = _baseline_and_header_matches(
+        {"x-frame-options": "DENY", "server": "nginx"},
+        ["permissions-policy", "x-frame-options", "x-xss-protection"],
+    )
+    observed = by_header["permissions-policy"]["evidence"]["observed_response"]
+    assert observed == {
+        "request_line": "GET https://app.example.test/",
+        "response_status": 200,
+        "observed_headers": {"server": "nginx", "x-frame-options": "DENY"},
+        "source_action_id": "baseline.http",
+        "principal": "anonymous",
+        "header_absent": "permissions-policy",
+    }
+    # A header the baseline saw contradicts the match there: no contradicting response is attached.
+    assert "observed_response" not in by_header["x-frame-options"]["evidence"]
+    # A header the baseline never records cannot be claimed absent from it.
+    assert "observed_response" not in by_header["x-xss-protection"]["evidence"]
+
+
+def test_the_recorded_header_set_matches_what_the_http_capability_records():
+    from api.capabilities import http as http_capability
+
+    assert finalizer_module._BASELINE_RECORDED_HEADERS == frozenset(
+        http_capability._SECURITY_POSTURE_HEADERS
+    )
+
+
+def test_finalizer_promotes_only_deterministic_proof_contracts():
+    xss = _action("verify.xss", 0, capability_name="xss.verify")
+    sqli = _action(
+        "verify.sqli", 1, dependencies=(xss.action_id,), capability_name="sqli.verify",
+    )
+    final = _action(
+        "finalize.report", 2, dependencies=(xss.action_id, sqli.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(xss, sqli, final),
+    )
+    results = _results(plan)
+    results[xss.action_id] = _result_with_observation_count(xss, 2)
+    results[sqli.action_id] = _result_with_observation_count(sqli, 1)
+    observations = {action.action_id: () for action in plan.actions[:-1]}
+    observations[xss.action_id] = (
+        {"kind": "xss_alert", "proof_state": "verified", "url": "https://app.example.test/x", "param": "q"},
+        {"kind": "xss_alert", "proof_state": "candidate", "url": "https://app.example.test/no"},
+    )
+    observations[sqli.action_id] = (
+        {"kind": "sqli_finding", "url": "https://app.example.test/s", "param": "id"},
+    )
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert len(report["findings"]) == 2
+    xss = next(item for item in report["findings"] if item["tool"] == "dalfox")
+    sqli = next(item for item in report["findings"] if item["tool"] == "sqlmap")
+    assert xss["verified"] is True
+    assert sqli["verified"] is False and sqli["suspected"] is True
+    assert report["verification_summary"] == {
+        "verified": 1, "suspected": 1, "unproven_critical_high": 1,
+    }
+    result = report["result"]
+    # Two axes. One proven high caps risk at the C band rather than denting a 100 down to a
+    # still-passing 90; the suspected critical alongside it is real evidence but does not
+    # cap as if it were confirmed.
+    assert (result["risk_score"], result["risk_grade"]) == (70, "C")
+    assert result["score_policy"] == "risk_and_assurance/v9"
+    assert result["grade"] == "C*" and result["grade_reliable"] is False
+    assert result["score"] == result["risk_score"], "compatibility alias is the risk axis"
+    assert "proven_high:1" in result["score_reasons"]
+    # This plan ran two actions over no candidate slices, so almost nothing was examined.
+    # The old single number could not say that at all.
+    assert result["assurance_score"] < 60
+    assert result["assurance_band"] in {"none", "weak", "limited"}
+    assert report["coverage"]["grade_reliability"]["reasons"] == [
+        "unproven_critical_high"
+    ]
+
+
+def test_finalizer_marks_every_template_candidate_for_verification():
+    templates = _action(
+        "templates.passive", 0, capability_name="templates.passive_scan",
+    )
+    final = _action("finalize.report", 1, dependencies=(templates.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(templates, final),
+    )
+    results = _results(plan)
+    results[templates.action_id] = _result_with_observation_count(templates, 2)
+    observations = {
+        templates.action_id: (
+            {
+                "kind": "template_match",
+                "template_id": "medium-candidate",
+                "name": "Medium template candidate",
+                "severity": "medium",
+                "matched_at": "https://app.example.test/medium",
+            },
+            {
+                "kind": "template_match",
+                "template_id": "info-candidate",
+                "name": "Informational template candidate",
+                "severity": "info",
+                "matched_at": "https://app.example.test/info",
+            },
+        ),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert len(report["findings"]) == 2
+    assert all(finding["suspected"] is True for finding in report["findings"])
+    assert all(finding["verified"] is False for finding in report["findings"])
+    assert all(
+        finding["needs_verification"] is True
+        for finding in report["findings"]
+    )
+
+
+def test_finalizer_retains_request_verifier_candidates_as_suspected_findings():
+    request_xss = _action(
+        "verify.request_xss.0", 0, capability_name="xss.request_verify",
+    )
+    request_sqli = _action(
+        "verify.request_sqli.0", 1, dependencies=(request_xss.action_id,),
+        capability_name="sqli.request_verify",
+    )
+    final = _action(
+        "finalize.report", 2,
+        dependencies=(request_xss.action_id, request_sqli.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(request_xss, request_sqli, final),
+    )
+    results = _results(plan)
+    results[request_xss.action_id] = _result_with_observation_count(
+        request_xss, 2,
+    )
+    results[request_sqli.action_id] = _result_with_observation_count(
+        request_sqli, 1,
+    )
+    observations = {
+        request_xss.action_id: (
+            {
+                "kind": "request_body_verification",
+                "family": "xss",
+                "candidate_id": "candidate-xss",
+                "request_ref_id": "request-xss",
+                "method": "POST",
+                "origin": "https://app.example.test",
+                "resolved_ips": ["192.0.2.10"],
+                "field_path": "comment",
+                "proof_contract": "xss_reflection_differential/v1",
+                "proof_status": "reflected_candidate_only",
+                "finding_verdict": "suspected",
+            },
+            {
+                "kind": "request_body_verification",
+                "family": "xss",
+                "candidate_id": "safe-control",
+                "proof_status": "not_proven",
+                "finding_verdict": "not_proven",
+            },
+        ),
+        request_sqli.action_id: ({
+            "kind": "request_body_verification",
+            "family": "sqli",
+            "candidate_id": "candidate-sqli",
+            "request_ref_id": "request-sqli",
+            "method": "POST",
+            "origin": "https://app.example.test",
+            "resolved_ips": ["192.0.2.10"],
+            "field_path": "id",
+            "proof_contract": "sqli_error_differential/v1",
+            "proof_status": "db_error_candidate_only",
+            "finding_verdict": "suspected",
+        },),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert len(report["findings"]) == 2
+    by_tool = {item["tool"]: item for item in report["findings"]}
+    assert set(by_tool) == {
+        "request_xss_differential", "request_sqli_differential",
+    }
+    assert report["runtime_destinations"] == [{
+        "label": "verify.request_xss.0:0:0",
+        "url": "https://app.example.test",
+        "final_url": "https://app.example.test",
+        "source": "xss.request_verify",
+        "resolved_host": "app.example.test",
+        "resolved_ips": ["192.0.2.10"],
+    }, {
+        "label": "verify.request_sqli.0:0:0",
+        "url": "https://app.example.test",
+        "final_url": "https://app.example.test",
+        "source": "sqli.request_verify",
+        "resolved_host": "app.example.test",
+        "resolved_ips": ["192.0.2.10"],
+    }]
+    assert all(item["suspected"] is True for item in by_tool.values())
+    assert all(item["verified"] is False for item in by_tool.values())
+    assert by_tool["request_xss_differential"]["evidence"][
+        "canonical_capability"
+    ] == "xss.request_verify"
+    assert by_tool["request_sqli_differential"]["evidence"][
+        "canonical_capability"
+    ] == "sqli.request_verify"
+
+
+def test_finalizer_promotes_only_repeated_deterministic_sqli_proof():
+    prove = _action(
+        "prove.sqli.0", 0, capability_name="sqli.prove_batch",
+    )
+    final = _action("finalize.report", 1, dependencies=(prove.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(prove, final),
+    )
+    results = {prove.action_id: _result_with_observation_count(prove, 1)}
+    observations = {prove.action_id: ({
+        "kind": "sqli_proof",
+        "candidate_id": "candidate-sqli",
+        "request_ref_id": "request-sqli",
+        "origin": "https://app.example.test",
+        "method": "POST",
+        "field_path": "email",
+        "request_class": "safe_authentication",
+        "proof_state": "verified",
+        "finding_verdict": "verified",
+        "proof_contract": "sqli_authentication_bypass/v1",
+        "technique": "authentication_bypass_repeated",
+        "repetitions": 2,
+        "response_pairs": [{
+            "control_response_sha256": "c" * 64,
+            "payload_response_sha256": "d" * 64,
+        }],
+        "session_state_discarded": True,
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+
+    assert len(report["findings"]) == 1
+    finding = report["findings"][0]
+    assert finding["tool"] == "shakerscan_sqli_proof"
+    assert finding["severity"] == "critical"
+    assert finding["verified"] is True
+    assert finding["evidence"]["canonical_capability"] == "sqli.prove_batch"
+    assert finding["evidence"]["origin"] == "https://app.example.test"
+
+
+def test_finalizer_keeps_the_site_a_nosqli_proof_was_proved_on():
+    prove = _action("prove.nosqli.0", 0, capability_name="nosqli.verify_batch")
+    final = _action("finalize.report", 1, dependencies=(prove.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(prove, final),
+    )
+    results = {prove.action_id: _result_with_observation_count(prove, 1)}
+    observation = {
+        "kind": "nosqli_proof", "canonical_path": "/api/users", "candidate_id": "candidate-nosqli",
+        "request_ref_id": None, "origin": "https://api.example.test", "method": "GET",
+        "field_path": "username", "request_class": "safe_read", "proof_state": "verified",
+        "finding_verdict": "verified", "proof_contract": "nosqli_operator_differential/v1",
+        "technique": "operator_equality_complement_differential", "operator": "$ne",
+        "repetitions": 2, "response_pairs": [], "session_state_discarded": False,
+    }
+    for recorded, origin in ((observation, "https://api.example.test"),
+                             ({k: v for k, v in observation.items() if k != "origin"}, None)):
+        report = finalize_scan_report(
+            plan=plan, target_url="https://app.example.test",
+            action_results=results, observations={prove.action_id: (recorded,)},
+        )
+        (finding,) = report["findings"]
+        assert finding["tool"] == "shakerscan_nosqli_verify" and finding["url"] == "/api/users"
+        # A proof recorded before the origin was kept has none, rather than a guessed one.
+        assert finding["evidence"].get("origin") == origin
+
+
+def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
+    prove = _action(
+        "prove.xss", 0, capability_name="xss.browser_prove_batch",
+    )
+    final = _action("finalize.report", 1, dependencies=(prove.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(prove, final),
+    )
+    results = {prove.action_id: _result_with_observation_count(prove, 1)}
+    observations = {prove.action_id: ({
+        "kind": "xss_browser_proof", "candidate_id": "candidate-xss",
+        "parameter_name": "q", "proof_state": "verified",
+        "finding_verdict": "verified", "proof_producer": "shakerscan",
+        "evidence_type": "dom_execution", "technique": "headless_xss_dom",
+        "payload_sha256": "c" * 64, "marker_sha256": "d" * 64,
+        "event_transcript": [{"signal": "console", "marker_match": True}],
+        "dom_marker_executed": True,
+        "sanitized_screenshot_sha256": "e" * 64,
+        "browser_build": "Chromium test",
+        "injection_location": "fragment",
+        "request_url": "https://app.example.test/#/search?q=",
+        "related_request_urls": [
+            "https://app.example.test/rest/products/search?q=%3Credacted%3E",
+        ],
+    },)}
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+    finding = report["findings"][0]
+    assert finding["tool"] == "shakerscan_browser_proof"
+    assert finding["verified"] is True
+    assert finding["url"] == "https://app.example.test/#/search?q="
+    assert finding["evidence"]["related_request_urls"] == [
+        "https://app.example.test/rest/products/search?q=%3Credacted%3E",
+    ]
+    assert finding["evidence"]["proof_producer"] == "shakerscan"
+    assert finding["evidence"]["sanitized_screenshot_sha256"] == "e" * 64
+    assert finding["evidence"]["browser_proof"] == {
+        "proven": True,
+        "proof_producer": "shakerscan",
+        "evidence_type": "dom_execution",
+        "technique": "headless_xss_dom",
+        "dom_marker_executed": True,
+        "verifier_build": "Chromium test",
+    }
+    # A proven execution carries an explicit CVSS (not the generic 6.1 reflection vector that
+    # capped browser-proven XSS at medium) and names the sink the verifier observed.
+    assert finding["severity"] == "high"
+    assert finding["cvss_score"] is None
+    assert finding["evidence"]["cvss"]["status"] == "not_assessed"
+    assert finding["evidence"]["execution_sink"] == {
+        "location": "fragment",
+        "parameter": "q",
+        "signal": "dom_marker",
+        "verifier": "Chromium test",
+        "dom_marker_executed": True,
+    }
+
+
+def test_a_browser_xss_finding_keeps_its_proof_pages_own_data_requests():
+    """Its retest judges the page's data requests against them (unit fixtures)."""
+    prove = _action("prove.xss", 0, capability_name="xss.browser_prove_batch")
+    final = _action("finalize.report", 1, dependencies=(prove.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(prove, final),
+    )
+
+    def response(path, status, resource, attempt="attempt-1"):
+        return {"kind": "browser_http_response", "method": "GET", "status_code": status,
+                "url": f"https://app.example.test{path}?q=%3Credacted%3E", "content_type": "",
+                "resource_type": resource, "attempt_id": attempt, "candidate_id": "candidate-xss"}
+
+    proof = {
+        "kind": "xss_browser_proof", "attempt_id": "attempt-1", "candidate_id": "candidate-xss",
+        "parameter_name": "q", "proof_state": "verified", "finding_verdict": "verified",
+        "proof_producer": "shakerscan", "evidence_type": "dom_execution",
+        "technique": "headless_xss_dom", "dom_marker_executed": True, "browser_build": "Chromium test",
+        "injection_location": "query", "request_url": "https://app.example.test/search?q=%3Credacted%3E",
+    }
+    recorded = (
+        {"kind": "candidate_attempt", "attempt_id": "attempt-1", "candidate_id": "candidate-xss",
+         "family": "xss_browser_proof", "status": "success", "proof_state": "verified"},
+        proof, response("/search", 200, "document"), response("/app.js", 200, "script"),
+        response("/api/me", 401, "fetch"), response("/api/search", 200, "xhr"),
+        response("/api/other", 200, "fetch", attempt="attempt-2"),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={prove.action_id: _result_with_observation_count(prove, len(recorded))},
+        observations={prove.action_id: recorded},
+    )
+    (finding,) = report["findings"]
+    assert finding["evidence"]["browser_proof"]["page_requests"] == [
+        {"method": "GET", "path": "/api/me", "query": "q=%3Credacted%3E", "resource_type": "fetch", "status": 401},
+        {"method": "GET", "path": "/api/search", "query": "q=%3Credacted%3E", "resource_type": "xhr", "status": 200},
+    ]
+
+
+def test_finalizer_explains_required_action_degradation():
+    plan = _plan()
+    results = _results(plan)
+    failed_action = plan.actions[0]
+    results[failed_action.action_id] = _result(
+        failed_action,
+        status=CapabilityResultStatus.FAILED,
+        reason=CapabilityResultReason.ADAPTER_FAILED,
+        charge_full=True,
+    )
+    observations = {action.action_id: () for action in plan.actions}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert report["coverage"]["status"] == "failed"
+    assert report["coverage"]["reasons"] == ["adapter_failed", "target_unreachable"]
+    assert report["error"]
+    assert report["result"]["score"] is None
+    assert report["result"]["grade"] is None
+    assert report["coverage"]["capability_coverage"] == {
+        "total": 2,
+        "required": 2,
+        "completed": 1,
+        "partial": 0,
+        "blocked": 0,
+        "failed": 1,
+        "skipped": 0,
+        "cancelled": 0,
+        "actions": [
+            {
+                "action_id": "baseline.http",
+                "capability_name": "http.request",
+                "required": True,
+                "status": "failed",
+                "reason_code": "adapter_failed",
+            },
+            {
+                "action_id": "baseline.security_txt",
+                "capability_name": "http.request",
+                "required": True,
+                "status": "success",
+                "reason_code": None,
+            },
+        ],
+    }
+    assert report["result"]["grade"] is None
+    assert report["result"]["grade_reliable"] is False
+    assert report["scan_metadata"]["grade_reliability_reasons"] == ["adapter_failed", "target_unreachable"]
+    row = report["canonical_action_execution"]["actions"][0]
+    assert row["status"] == "failed"
+    assert row["reason_code"] == "adapter_failed"
+
+
+def test_infrastructure_observations_never_affect_score_grade_or_coverage(monkeypatch):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    infrastructure = replace(
+        _action("baseline.infrastructure", 1, capability_name="infrastructure.inspect"),
+        capability_args={},
+        requested_budget={"hosts_attempted": 40, "tool_wall_seconds": 30},
+        required=False,
+        output_schema="infrastructure-intelligence/v1",
+        action_digest=None,
+    )
+    final = _action(
+        "finalize.report", 2,
+        dependencies=(baseline.action_id, infrastructure.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, infrastructure, final),
+    )
+    results = _results(plan)
+    results[infrastructure.action_id] = _result_with_observation_count(infrastructure, 1)
+    observations = {
+        baseline.action_id: (),
+        infrastructure.action_id: ({
+            "kind": "infrastructure_intelligence",
+            "informational_only": True,
+            "scoring_effect": "none",
+            "canonical_host": "app.example.test",
+            "registration_domain": "example.test",
+            "registration": {"registrar": {"name": "Example Registrar"}},
+            "addresses": [{"address": "192.0.2.10"}],
+            "related_names": [],
+            "limitations": [],
+            "errors": [],
+        },),
+    }
+    captured = {}
+
+    def score_scan(findings, coverage, *, smart_coverage, posture, grade_reliable):
+        captured["posture"] = posture
+        return {"score": 100, "grade": "A", "grade_reliable": grade_reliable}
+
+    monkeypatch.setattr(finalizer_module.scoring, "score_scan", score_scan)
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert "infrastructure" in report
+    assert "infrastructure" not in captured["posture"]
+    assert report["coverage"]["planned_action_count"] == 1
+    assert report["coverage"]["terminal_action_count"] == 1
+    assert report["coverage"]["capability_coverage"]["total"] == 1
+    assert report["coverage"]["optional_gaps"] == []
+    assert report["coverage"]["grade_reliability"] == {
+        "reliable": True, "reasons": [],
+    }
+    assert any(
+        row["capability_name"] == "infrastructure.inspect"
+        for row in report["canonical_action_execution"]["actions"]
+    )
+
+
+def test_finalizer_promotes_only_typed_pinned_tls_posture_issues():
+    tls = _action("baseline.tls", 0, capability_name="tls.inspect")
+    final = _action("finalize.report", 1, dependencies=(tls.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(tls, final),
+    )
+    results = _results(plan)
+    results[tls.action_id] = _result_with_observation_count(tls, 1)
+    observations = {
+        tls.action_id: ({
+            "kind": "tls_protocol",
+            "origin": "https://app.example.test",
+            "pinned_address": "192.0.2.10",
+            "port": 443,
+            "protocol": "TLSv1.3",
+            "cipher": "TLS_AES_256_GCM_SHA384",
+            "certificate_sha256": "c" * 64,
+            "certificate_expired": True,
+            "certificate_hostname_matches": False,
+            "certificate_trust": "untrusted",
+        },),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert {item["title"] for item in report["findings"]} == {
+        "TLS certificate is expired",
+        "TLS certificate hostname mismatch",
+        "TLS certificate chain is not trusted",
+    }
+    assert all(item["verified"] is True for item in report["findings"])
+    assert report["verification_summary"]["verified"] == 3
+
+
+def test_finalizer_degrades_when_candidates_receive_zero_active_attempts():
+    xss = _action("verify.xss.0", 0, capability_name="xss.verify")
+    final = _action("finalize.report", 1, dependencies=(xss.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(xss, final),
+    )
+    results = _results(plan)
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations={xss.action_id: ()},
+        work_manifest_references=({
+            "kind": "candidate",
+            "entry_count": 1,
+            "status": "complete",
+            "manifest_id": str(uuid.uuid4()),
+            "manifest_digest": "f" * 64,
+        },),
+    )
+
+    assert report["coverage"]["status"] == "partial"
+    assert report["coverage"]["active_zero_attempt_actions"] == ["verify.xss.0"]
+    assert report["coverage"]["grade_reliability"]["reliable"] is False
+    assert report["result"]["grade"] == "A*"
+
+
+def test_anonymous_equals_authenticated_is_not_a_verified_authorization_break():
+    """The differential proves the endpoint is public, not that a control broke.
+
+    On a privileged function, identical anonymous and authenticated responses
+    are broken access control. On a public one -- a product search, a list of
+    security questions -- they are the intended behaviour, and nothing in the
+    differential distinguishes the two. Claiming a verified break marked eight
+    ordinary public endpoints of one application as high-severity findings.
+    """
+    import pathlib
+
+    source = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "api" / "scan" / "finalizer.py"
+    ).read_text(encoding="utf-8")
+    block = source[source.index('kind == "authz_surface_proof"'):]
+    block = block[:block.index('kind == "authz_differential"')]
+
+    assert '"Verified broken function-level authorization"' not in block
+    assert '"verified": False' in block
+    assert '"suspected": True' in block
+    assert '"needs_verification": True' in block
+    assert '"severity="high"' not in block
+
+
+def test_finalizer_verified_findings_carry_the_universal_proof_envelope():
+    """Every finding the finalizer marks verified must satisfy the scorer's proof predicate.
+
+    The risk scorer trusts only the ``proof_contract_v2`` envelope. A verified finding without
+    it is scored as suspected (half weight, softer ceiling), so a proven critical SQL injection
+    graded C instead of capping the run at the proven-critical ceiling.
+    """
+    try:
+        from ai_verdict_policy import has_deterministic_exploit_proof
+    except ModuleNotFoundError:  # package import layout
+        from scanner.ai_verdict_policy import has_deterministic_exploit_proof
+
+    prove = _action("prove.sqli.0", 0, capability_name="sqli.prove_batch")
+    baseline = _action("baseline.http", 1, capability_name="http.request")
+    final = _action(
+        "finalize.report", 2, dependencies=(prove.action_id, baseline.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(prove, baseline, final),
+    )
+    results = {
+        prove.action_id: _result_with_observation_count(prove, 1),
+        baseline.action_id: _result_with_observation_count(baseline, 1),
+    }
+    observations = {
+        prove.action_id: ({
+            "kind": "sqli_proof",
+            "candidate_id": "candidate-sqli",
+            "request_ref_id": "request-sqli",
+            "method": "POST",
+            "field_path": "email",
+            "canonical_path": "/rest/user/login",
+            "request_class": "safe_authentication",
+            "proof_state": "verified",
+            "finding_verdict": "verified",
+            "proof_contract": "sqli_authentication_bypass/v1",
+            "technique": "authentication_bypass_repeated",
+            "repetitions": 2,
+            "response_pairs": [{
+                "control_response_sha256": "c" * 64,
+                "payload_response_sha256": "d" * 64,
+            }],
+            "session_state_discarded": True,
+        },),
+        baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"origin": "https://app.example.test", "pinned_address": "203.0.113.10"},
+            "response": {
+                "status": 200,
+                "selected_headers": {
+                    "content-security-policy": "",
+                    "referrer-policy": "strict-origin-when-cross-origin",
+                    "permissions-policy": "camera=()",
+                    "strict-transport-security": "max-age=63072000",
+                },
+            },
+        },),
+    }
+
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+
+    verified = [item for item in report["findings"] if item["verified"] is True]
+    assert {item["tool"] for item in verified} >= {"shakerscan_sqli_proof", "http_baseline"}
+    for finding in verified:
+        assert has_deterministic_exploit_proof(finding), finding["tool"]
+        envelope = finding["proof_contract_v2"]
+        assert envelope["schema_version"] == "proof-contract/v2"
+        assert envelope["contract_id"] == f"scan.{finding['evidence']['canonical_capability']}.{envelope['family']}"
+        assert envelope["reexecution"]["verifier_build"] == finding["evidence"]["canonical_capability"]
+        assert envelope["capability_receipt"] == finding["evidence"]["capability_receipt"]
+    reasons = report["result"]["score_reasons"]
+    assert "proven_critical:1" in reasons, reasons
+    assert not any(reason.startswith("suspected_critical") for reason in reasons), reasons
+
+
+def test_xss_execution_preserves_distinct_existing_impact_assessments():
+    vectors = [
+        (5.4, "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N"),
+        (8.2, "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N"),
+    ]
+    for score, vector in vectors:
+        assessment = {"score": score, "vector": vector, "basis": "separate impact assessment"}
+        finding = {"cvss_score": score, "proof_state": "verified", "evidence": {"cvss": assessment.copy()}}
+        finalizer_module._apply_xss_execution_evidence(
+            finding, location="request_parameter", parameter="q", signal="dialog", verifier="browser",
+        )
+        assert finding["cvss_score"] == score
+        assert finding["evidence"]["cvss"] == assessment
+        assert finding["proof_state"] == "verified"
+        assert finding["evidence"]["execution_sink"]["signal"] == "dialog"
+
+
+def _apex_redirect_report(*, status: int = 301, location: str = "https://www.app.example.test/"):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {
+            "origin": "https://app.example.test",
+            "pinned_address": "192.0.2.10",
+        },
+        "response": {
+            "status": status,
+            "location": location,
+            "bytes_observed": 0,
+            "security_headers": {
+                "content-security-policy": "default-src 'self'",
+                "referrer-policy": "strict-origin-when-cross-origin",
+                "permissions-policy": "camera=()",
+                "strict-transport-security": "max-age=31536000",
+            },
+        },
+    },)}
+    return finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+
+def test_an_origin_that_only_forwards_elsewhere_did_not_observe_the_application():
+    """A thorough Scan of an apex that 301s everywhere examined nothing.
+
+    Measured on a real static site: every path under the bound origin
+    permanently redirected to its www origin, so the only body the run ever
+    retrieved was empty -- and it still reported grade A*, "0 issue(s) found"
+    and application_observed true. The redirect's own headers are real posture
+    and stay reported; the application behind it was never reached.
+    """
+    report = _apex_redirect_report()
+
+    assert report["http"]["application_origin_redirect"] == "https://www.app.example.test"
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+    assert report["result"]["application_observed"] is False
+    assert report["result"]["grade_reliable"] is False
+    assert "bound_origin_redirects_off_origin" in report["coverage"]["reasons"]
+    assert "bound_origin_redirects_off_origin" in (
+        report["coverage"]["grade_reliability"]["reasons"]
+    )
+    # Header posture observed on the redirect is still published, not discarded.
+    assert report["http"]["observed_headers"]["referrer-policy"]
+
+
+def test_a_same_host_redirect_is_not_a_forwarded_origin():
+    """A relative/same-origin move is not an off-origin redirect."""
+    report = _apex_redirect_report(location="https://app.example.test/home")
+
+    assert "application_origin_redirect" not in report["http"]
+    assert "bound_origin_redirects_off_origin" not in report["coverage"]["reasons"]
+
+
+def test_the_report_keeps_which_tls_versions_the_server_accepts():
+    """The probe handshakes every version; the report kept one of them.
+
+    tls.inspect records supported_protocols and a per-protocol attempt table, so
+    a report can say whether a deprecated version is still enabled and which
+    cipher the server chose for each. The projection kept eight fields and threw
+    the rest away, so the report could no longer answer either question and the
+    UI's protocol panel rendered nothing.
+    """
+    baseline = _action("baseline.tls", 0, capability_name="tls.inspect")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "tls_protocol",
+        "status": "success",
+        "origin": "https://app.example.test/",
+        "port": 443,
+        "protocol": "TLSv1.2",
+        "cipher": "ECDHE-RSA-AES128-GCM-SHA256",
+        "cipher_bits": 128,
+        "supported_protocols": ["TLSv1.2", "TLSv1.3"],
+        "protocol_attempts": [
+            {"protocol": "TLSv1.2", "supported": True, "cipher": "ECDHE-RSA-AES128-GCM-SHA256",
+             "cipher_bits": 128, "alpn_protocol": "h2"},
+            {"protocol": "TLSv1.3", "supported": True, "cipher": "TLS_AES_128_GCM_SHA256",
+             "cipher_bits": 128, "alpn_protocol": "h2"},
+            {"protocol": "TLSv1.0", "supported": False},
+        ],
+        "legacy_protocol_negotiated": False,
+        "certificate_subject": "CN=app.example.test",
+        "certificate_public_key_bits": 2048,
+        "certificate_public_key_type": "RSAPublicKey",
+        "certificate_signature_hash": "sha256",
+        "certificate_signature_algorithm": "sha256WithRSAEncryption",
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    tls = report["tls"]
+    assert tls["supported_protocols"] == ["TLSv1.2", "TLSv1.3"]
+    assert [item["protocol"] for item in tls["protocol_attempts"]] == [
+        "TLSv1.2", "TLSv1.3", "TLSv1.0",
+    ]
+    assert tls["legacy_protocol_negotiated"] is False
+    # The certificate detail the same panel reads keeps its report-facing names.
+    assert tls["certificate"]["key_size"] == 2048
+    assert tls["certificate"]["key_algo"] == "RSAPublicKey"
+    assert tls["certificate"]["sig_algo"] == "sha256"
+
+
+def test_a_missing_header_the_baseline_application_response_lacks_is_verified():
+    """The matched header is one the baseline always records and the origin's pinned 2xx response
+    lacked it: that response is the proof, so the template match is promoted. A header the
+    baseline saw, or one it never records, stays a candidate."""
+    by_header = _baseline_and_header_matches(
+        {"x-frame-options": "DENY", "server": "nginx"},
+        ["permissions-policy", "x-frame-options", "x-xss-protection"],
+    )
+    proven = by_header["permissions-policy"]
+    assert proven["proof_state"] == "verified" and proven["verified"] is True
+    assert proven["proof_contract_v2"]["predicate"]["satisfied"] is True
+    assert proven["proof_contract_v2"]["contract_id"] == "scan.http.request.http_observation"
+    for header in ("x-frame-options", "x-xss-protection"):
+        assert by_header[header]["proof_state"] == "candidate", header
+        assert by_header[header]["verified"] is False
+
+
+def test_a_redirect_baseline_does_not_verify_a_missing_header(monkeypatch):
+    original = finalizer_module._baseline_header_responses
+
+    def as_redirect(observations):
+        return {origin: {**row, "response_status": 302}
+                for origin, row in original(observations).items()}
+
+    monkeypatch.setattr(finalizer_module, "_baseline_header_responses", as_redirect)
+    # Isolate the template-attachment rule: keep the template finding instead of folding it.
+    monkeypatch.setattr(finalizer_module, "_fold_duplicate_header_findings", lambda findings: [
+        item for item in findings if item.get("tool") != "http_baseline"])
+    by_header = _baseline_and_header_matches({"server": "nginx"}, ["permissions-policy"])
+    finding = by_header["permissions-policy"]
+    assert finding["evidence"]["observed_response"]["response_status"] == 302
+    assert finding["proof_state"] == "candidate"
+
+
+def _baseline_cookie_report(origin: str, cookies: list[dict], status: int = 200):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url=origin,
+        action_results={baseline.action_id: _result_with_observation_count(baseline, 1)},
+        observations={baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"method": "GET", "origin": origin, "path": "/"},
+            "response": {"status": status, "security_headers": {},
+                         "set_cookie_metadata": cookies},
+        },)},
+    )
+    return [item for item in report["findings"] if item["evidence"].get("cookie_name")]
+
+
+def test_session_cookies_set_without_httponly_or_secure_are_verified_by_the_baseline():
+    cookies = [
+        {"name": "PHPSESSID", "secure": False, "httponly": False, "samesite": None},
+        {"name": "security", "secure": False, "httponly": False, "samesite": None},
+        {"name": "connect.sid", "secure": True, "httponly": True, "samesite": "lax"},
+    ]
+    https = _baseline_cookie_report("https://app.example.test", cookies)
+    assert sorted((f["evidence"]["cookie_name"], f["title"], f["cwe"]) for f in https) == [
+        ("PHPSESSID", "Session cookie without HttpOnly flag", "CWE-1004"),
+        ("PHPSESSID", "Session cookie without Secure flag", "CWE-614"),
+    ]
+    assert all(f["proof_state"] == "verified" for f in https)
+    # Over plain HTTP a Secure flag could not be honoured; only HttpOnly is reported.
+    http = _baseline_cookie_report("http://app.example.test", cookies, status=302)
+    assert [f["title"] for f in http] == ["Session cookie without HttpOnly flag"]
+    # A failed response proves nothing; a cookie with no recorded name is not classified.
+    assert _baseline_cookie_report("https://app.example.test", cookies, status=500) == []
+    assert _baseline_cookie_report(
+        "https://app.example.test",
+        [{"secure": False, "httponly": False, "samesite": None}],
+    ) == []
+
+
+def test_a_stored_baseline_observation_still_proves_a_session_cookie_flag():
+    # Observations are persisted through receipt redaction; the cookie metadata must reach the
+    # finalizer intact (it read "***" before, so no Scan ever reported the flag).
+    from api.runtime.receipts import redact_receipt_value
+    origin = "http://dvwa.example.test"
+    stored = redact_receipt_value({
+        "kind": "http_observation",
+        "request": {"method": "GET", "origin": origin, "path": "/"},
+        "response": {"status": 302, "security_headers": {}, "set_cookie_metadata": [
+            {"name": "PHPSESSID", "secure": False, "httponly": False, "samesite": None},
+        ]},
+    })
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url=origin,
+        action_results={baseline.action_id: _result_with_observation_count(baseline, 1)},
+        observations={baseline.action_id: (stored,)},
+    )
+    found = [item for item in report["findings"] if item["evidence"].get("cookie_name")]
+    assert [(f["evidence"]["cookie_name"], f["title"]) for f in found] == [
+        ("PHPSESSID", "Session cookie without HttpOnly flag"),
+    ]
+
+
+def _redirecting_origin_report(
+    landing_url: str, *, origin: str = "http://dvwa.example.test",
+    root_principal: str | None = None, matcher: str = "x-frame-options",
+):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    landing = _action("baseline.http_redirect", 1, dependencies=(baseline.action_id,),
+                      capability_name="http.request")
+    templates = _action("passive.templates", 2, dependencies=(baseline.action_id,),
+                        capability_name="templates.passive_batch")
+    final = _action("finalize.report", 3, dependencies=(templates.action_id, landing.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(baseline, landing, templates, final),
+    )
+    results = {
+        baseline.action_id: _result_with_observation_count(baseline, 1),
+        landing.action_id: _result_with_observation_count(landing, 1),
+        templates.action_id: _result_with_observation_count(templates, 2),
+    }
+    observations = {
+        baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"method": "GET", "origin": origin, "path": "/",
+                        **({"as_principal": root_principal} if root_principal else {})},
+            "response": {"status": 302, "security_headers": {}, "selected_headers": {}},
+        },),
+        landing.action_id: ({
+            "kind": "http_observation",
+            # baseline.http_redirect always starts at the plain-HTTP root, anonymously.
+            "request": {"method": "GET", "origin": "http://" + origin.split("://", 1)[1],
+                        "path": "/", "as_principal": "anonymous"},
+            "response": {"status": 200, "final_url": landing_url, "security_headers": {},
+                         "selected_headers": {"server": "Apache"}},
+        },),
+        templates.action_id: (
+            # The pack's attempt on the origin: the family did its work.
+            {"kind": "candidate_attempt", "attempt_id": "p" * 64, "candidate_id": "origin",
+             "status": "success"},
+            {
+            "kind": "template_match", "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers", "severity": "info",
+            "matched_at": f"{origin}/", "matcher_name": matcher,
+        },),
+    }
+    return finalize_scan_report(plan=plan, target_url=origin, action_results=results,
+                                observations=observations)
+
+
+def _redirecting_origin_header_matches(landing_url: str, **kwargs):
+    report = _redirecting_origin_report(landing_url, **kwargs)
+    return [item for item in report["findings"]
+            if item["evidence"].get("template_id") == "http-missing-security-headers"]
+
+
+@pytest.mark.parametrize("origin,landing", [
+    ("http://dvwa.example.test", "http://dvwa.example.test/login.php"),
+    ("https://app.example.test", "https://app.example.test/login"),
+])
+def test_a_redirected_origin_reports_a_missing_baseline_header_once(origin, landing):
+    # The root answers 302 without CSP, so the baseline proves the header missing; the passive
+    # template reports the same header and the redirect landing would verify it too. The origin
+    # gets ONE CSP finding -- the baseline's, carrying the template's matched pages -- never a
+    # baseline finding beside a separately verified nuclei twin.
+    report = _redirecting_origin_report(landing, origin=origin, matcher="content-security-policy")
+    csp = [
+        item for item in report["findings"]
+        if item["evidence"].get("header_name") == "content-security-policy"
+        or item["evidence"].get("check") == "missing_header_content-security-policy"
+    ]
+    assert len(csp) == 1
+    [finding] = csp
+    assert finding["tool"] == "http_baseline"
+    assert finding["evidence"]["also_reported_by"] == "nuclei:http-missing-security-headers"
+    # The folded template finding no longer belongs to the passive family; its attempt does.
+    [passive] = [row for row in report["coverage"]["family_coverage"]
+                 if row["family"] == "nuclei_passive"]
+    assert passive["coverage_status"] == "complete"
+
+
+def test_a_root_redirect_is_proven_from_the_same_origin_landing_page():
+    # DVWA answers / with 302 -> login.php; its headers are proven on the page it lands on.
+    [finding] = _redirecting_origin_header_matches("http://dvwa.example.test/login.php")
+    assert finding["proof_state"] == "verified"
+    observed = finding["evidence"]["observed_response"]
+    assert observed["source_action_id"] == "baseline.http_redirect"
+    assert observed["request_line"] == "GET http://dvwa.example.test/login.php"
+    assert observed["principal"] == "anonymous"
+
+
+def test_an_https_root_redirect_is_proven_through_the_scheme_upgrade():
+    # http://host/ -> https://host/ -> https://host/login: the landing is a 2xx of the HTTPS
+    # origin whose root answered 3xx, reached within the capability's redirect limit.
+    [finding] = _redirecting_origin_header_matches(
+        "https://app.example.test/login", origin="https://app.example.test",
+    )
+    assert finding["proof_state"] == "verified"
+    observed = finding["evidence"]["observed_response"]
+    assert observed["request_line"] == "GET https://app.example.test/login"
+    assert observed["principal"] == "anonymous"
+
+
+def test_an_anonymous_landing_does_not_prove_an_authenticated_root():
+    # The root was requested as the scan's primary principal; the anonymous login page the
+    # redirect probe lands on does not describe the page that principal is sent to.
+    [finding] = _redirecting_origin_header_matches(
+        "https://app.example.test/login", origin="https://app.example.test",
+        root_principal="primary",
+    )
+    assert finding["proof_state"] == "candidate"
+    assert finding["evidence"]["observed_response"]["principal"] == "primary"
+
+
+def test_a_redirect_landing_on_another_origin_proves_nothing():
+    [finding] = _redirecting_origin_header_matches("https://sso.example.test/login")
+    assert finding["proof_state"] == "candidate"
+
+
+def _hsts_template_findings(origin: str):
+    templates = _action("passive.templates", 0, capability_name="templates.passive_batch")
+    final = _action("finalize.report", 1, dependencies=(templates.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(templates, final),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url=origin,
+        action_results={templates.action_id: _result_with_observation_count(templates, 2)},
+        observations={templates.action_id: tuple({
+            "kind": "template_match", "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers", "severity": "info",
+            "matched_at": f"{origin}/", "matcher_name": matcher,
+        } for matcher in ("strict-transport-security", "x-frame-options"))},
+    )
+    return sorted(item["evidence"].get("header_name") for item in report["findings"]
+                  if item["evidence"].get("template_id") == "http-missing-security-headers")
+
+
+def test_no_hsts_finding_on_a_plain_http_origin():
+    # Lab UI audit (wrongsecrets on http://...:8090): HSTS is ignored over HTTP, so its
+    # absence there is not a finding; other headers still are.
+    assert _hsts_template_findings("http://app.example.test") == ["x-frame-options"]
+    assert _hsts_template_findings("https://app.example.test") == [
+        "strict-transport-security", "x-frame-options",
+    ]
+
+
+def test_a_template_match_on_a_proven_exposure_joins_that_finding():
+    # Lab UI audit (honey): nuclei "Git Configuration - Detect" stood beside the proven
+    # exposure of the same /.git/config as a second finding still to verify.
+    proven = {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified",
+        "title": "Sensitive exposure: version control exposure", "severity": "high",
+        "url": "http://honey.test/.git/config",
+        "evidence": {"exposure_class": "version_control_exposure"},
+    }
+    template = {
+        "tool": "nuclei", "proof_state": "candidate", "title": "Git Configuration - Detect",
+        "severity": "medium", "url": "http://honey.test/.git/config",
+        "evidence": {"template_id": "git-config", "matcher_name": None},
+    }
+    elsewhere = {**template, "url": "http://honey.test/app/.git/config"}
+    header = {**template, "url": "http://honey.test/.git/config",
+              "evidence": {"template_id": "http-missing-security-headers",
+                           "header_name": "x-frame-options"}}
+    kept = finalizer_module._merge_template_candidates_into_exposure_proofs(
+        [proven, template, elsewhere, header],
+    )
+    assert kept == [proven, elsewhere, header]
+    assert proven["evidence"]["corroborating_templates"] == [{
+        "template_id": "git-config", "matcher_name": None,
+        "title": "Git Configuration - Detect", "severity": "medium",
+    }]
+    assert proven["evidence"]["corroborating_template_count"] == 1
+
+
+def _console_proof() -> dict:
+    return {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified", "severity": "medium",
+        "title": "Sensitive exposure: debug interface exposure", "url": "https://app.test/console",
+        "evidence": {"exposure_class": "debug_interface_exposure"},
+    }
+
+
+def test_an_unrelated_template_at_a_proven_exposure_path_stays_its_own_finding():
+    # Review of the merge: a critical RCE template at /console, or GraphQL batching at
+    # /graphql, matches the URL of a proven exposure but reports something else.
+    proof = _console_proof()
+    rce = {
+        "tool": "nuclei", "proof_state": "candidate", "title": "Werkzeug Debug Console - RCE",
+        "severity": "critical", "url": "https://app.test/console",
+        "evidence": {"template_id": "werkzeug-debugger-rce", "matcher_name": None},
+    }
+    graphql_proof = {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified", "severity": "low",
+        "title": "GraphQL introspection enabled", "url": "https://app.test/graphql",
+        "evidence": {"exposure_class": "graphql_introspection_enabled"},
+    }
+    batching = {**rce, "title": "GraphQL batching", "severity": "medium",
+                "url": "https://app.test/graphql",
+                "evidence": {"template_id": "graphql-alias-batching"}}
+    findings = [proof, rce, graphql_proof, batching]
+    assert finalizer_module._merge_template_candidates_into_exposure_proofs(findings) == findings
+    assert "corroborating_templates" not in proof["evidence"]
+    assert "corroborating_templates" not in graphql_proof["evidence"]
+
+
+def test_a_mapped_template_folds_only_into_its_class_and_not_above_the_proof_severity():
+    proof = {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified", "severity": "low",
+        "title": "Sensitive exposure", "url": "https://app.test/.git/config",
+        "evidence": {"exposure_class": "version_control_exposure"},
+    }
+    template = {
+        "tool": "nuclei", "proof_state": "candidate", "title": "Git Configuration - Detect",
+        "severity": "medium", "url": "https://app.test/.git/config",
+        "evidence": {"template_id": "git-config"},
+    }
+    other_class = {**_console_proof(), "url": "https://app.test/.git/config"}
+    findings = [other_class, template]
+    # Same URL, wrong class: kept.
+    assert finalizer_module._merge_template_candidates_into_exposure_proofs(findings) == findings
+    # Right class, but the template is graver than the proof: kept.
+    findings = [proof, template]
+    assert finalizer_module._merge_template_candidates_into_exposure_proofs(findings) == findings
+
+
+def test_corroborating_templates_past_the_sample_cap_are_counted():
+    proof = {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified", "severity": "high",
+        "title": "Sensitive exposure", "url": "https://app.test/.git/config",
+        "evidence": {"exposure_class": "version_control_exposure"},
+    }
+    templates = [{
+        "tool": "nuclei", "proof_state": "candidate", "title": f"Git Configuration {index}",
+        "severity": "medium", "url": "https://app.test/.git/config",
+        "evidence": {"template_id": "git-config", "matcher_name": str(index)},
+    } for index in range(13)]
+    assert finalizer_module._merge_template_candidates_into_exposure_proofs(
+        [proof, *templates],
+    ) == [proof]
+    assert len(proof["evidence"]["corroborating_templates"]) == 10
+    assert proof["evidence"]["corroborating_template_count"] == 13
+
+
+def test_a_url_with_an_unreadable_port_does_not_fail_finalization():
+    """Tool output can carry a URL whose port is not a number (a masked or malformed URL);
+    comparing it must not raise, which failed the whole Scan and lost its results."""
+    assert finalizer_module._observed_url_key("http://10.10.10.103:***8999/login") is None
+    assert finalizer_module._observed_url_key("http://10.10.10.103:18999/login/") == (
+        "http://10.10.10.103:18999/login"
+    )
+
+
+def _destinations_of(observation):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+                          target_binding_digest="a" * 64, actions=(baseline, final))
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={baseline.action_id: _result_with_observation_count(baseline, 1)},
+        observations={baseline.action_id: (observation,)})
+    return sorted(item["url"] for item in report["runtime_destinations"])
+
+
+def test_an_unfollowed_off_host_redirect_is_not_a_destination():
+    # A live host answering 302 to an identity provider failed the whole Scan with
+    # "Runtime destination failed scope re-check: host_out_of_allowed_scope": the Location
+    # the client refused to follow was counted as a place it went.
+    assert _destinations_of({
+        "kind": "http_observation",
+        "request": {"origin": "https://app.example.test", "pinned_address": "192.0.2.10"},
+        "response": {"status": 302, "final_url": "https://app.example.test/",
+                     "location": "https://login.idp.example.net/authorize"},
+        "redirect_chain": [{"status": 302, "location": "https://login.idp.example.net/authorize",
+                            "followed": False, "stopped": "cross_origin"}],
+    }) == ["https://app.example.test"]
+
+
+def test_a_followed_redirect_and_a_hop_record_without_its_state_stay_destinations():
+    # Where a request actually went is still checked (a followed off-origin hop stays, so the
+    # runtime guard still blocks it), and older hop records without "followed" count as before.
+    assert _destinations_of({
+        "kind": "http_observation",
+        "request": {"origin": "https://app.example.test"},
+        "redirect_chain": [
+            {"status": 301, "location": "https://www.app.example.test/", "followed": True},
+            {"location": "https://legacy.example.test/"},
+        ],
+    }) == ["https://app.example.test", "https://legacy.example.test", "https://www.app.example.test"]
