@@ -429,7 +429,11 @@ def test_artifact_inspect_takes_a_session_and_capture_bindings_in_its_schema():
     CAPABILITY_REGISTRY.validate_hunt_input("artifact.inspect", {"path": "/hub/admin", "as_principal": "primary"})
     CAPABILITY_REGISTRY.validate_hunt_input("artifact.inspect", {
         "path": "/hub/admin", "session_ref": "11111111-2222-4333-8444-555555555555"})
+    # A value this Hunt withheld from an answer (a sign-in's token) is a login too.
+    withheld = {"withheld_ref": f"withheld://hunt/{ACTION}/1", "header": "Authorization", "prefix": "Bearer "}
+    CAPABILITY_REGISTRY.validate_hunt_input("artifact.inspect", {"path": "/hub/admin", "request_bindings": [withheld]})
     for bad in ({**binding, "withheld_ref": "withheld://hunt/x/1"}, {"capture_name": "session", "header": "Cookie"},
+                {**binding, "withheld_ref": withheld["withheld_ref"]}, {"source_action_id": ACTION, "header": "Cookie"},
                 {**binding, "body_pointer": "/x"}):
         with pytest.raises(CapabilityInputContractError):
             CAPABILITY_REGISTRY.validate_hunt_input("artifact.inspect", {"path": "/", "request_bindings": [bad]})
@@ -649,3 +653,36 @@ def test_artifact_inspect_sends_only_a_long_session_cookie(capture, cookies, hea
             pool=Pool(), run={"id": HUNT}, hunt_id=HUNT, context={}, target=TARGET, policy=None,
             hunt_policy={"active_testing": True}, target_url="http://app.test:8000", values=values,
             stack=None, session_store=None))
+
+
+def test_a_captured_login_token_is_sent_as_the_identity_of_a_read_or_request_check():
+    # A bearer token this Hunt's own login returned (JSON capture), long enough to withhold exactly.
+    from hunt.artifact_identity import resolve_artifact_identity
+    token = "eyJhbGciOiJSUzI1NiJ9." + "p" * 40 + ".sig"
+    state = HttpWorkflowExchange(HUNT, ACTION, TARGET, ({"name": "token", "json_pointer": "/authentication/token"},))
+    state.capture_response(SimpleNamespace(
+        status_code=200, headers=lambda: {"content-type": "application/json"},
+        body=lambda: json.dumps({"authentication": {"token": token}}).encode(), cookies=lambda: {},
+        final_url="http://app.test:8000/rest/user/login"))
+    assert state.encrypted_result
+
+    class Pool:
+        def acquire(self):
+            class Acquired:
+                async def __aenter__(self):
+                    async def fetchrow(*_):
+                        return {"private_http_result": state.encrypted_result}
+                    return SimpleNamespace(fetchrow=fetchrow)
+
+                async def __aexit__(self, *_):
+                    return None
+            return Acquired()
+
+    values = {"path": "/rest/basket/1", "request_bindings": [
+        {"source_action_id": ACTION, "capture_name": "token", "header": "Authorization", "prefix": "Bearer "}]}
+    headers, bound, slot = asyncio.run(resolve_artifact_identity(
+        pool=Pool(), run={"id": HUNT}, hunt_id=HUNT, context={}, target=TARGET, policy=None,
+        hunt_policy={"active_testing": True}, target_url="http://app.test:8000", values=values,
+        stack=None, session_store=None, capability="request.verify"))
+    assert slot == "workflow_binding" and headers == {"Authorization": f"Bearer {token}"}
+    assert token in bound  # every echo of it is withheld

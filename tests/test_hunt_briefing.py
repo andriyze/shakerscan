@@ -233,6 +233,13 @@ def test_a_web_hunt_names_its_first_calls_ready_to_send():
     assert calls[0]["input"] == {"method": "GET", "path": "/", "follow_redirects": True}
     assert all(call["why"] for call in calls)
     assert result["next_action"].startswith("Map first, then verify")
+    # A Hunt the engine maps and tests itself: the planner starts on the landing page and is told
+    # what is left to it, not to repeat the engine's discovery.
+    engine = public_hunt_run(_policy_row({"active_testing": True, "approval_receipt_id": str(uuid.uuid4()),
+                                          "allowed_capabilities": allowed}))
+    assert [call["capability"] for call in engine["next_calls"]] == ["http.request"]
+    assert engine["next_action"].startswith("The engine maps this target")
+    assert f"/hunts/{engine['hunt_id']}/coverage" in engine["next_action"] and "authz.verify" in engine["next_action"]
     # Only what the policy allows is offered.
     narrow = public_hunt_run(_policy_row({"allowed_capabilities": ["http.request"]}))
     assert [call["capability"] for call in narrow["next_calls"]] == ["http.request"]

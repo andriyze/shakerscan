@@ -81,7 +81,9 @@ def _degraded(status: Any, error: Any) -> tuple[bool, bool]:
 
 def assess(rows: Iterable[Mapping[str, Any]], *, baseline_ms: float | None = None) -> PacingDecision:
     """The pacing state for an origin from its recent answers (newest first or any order)."""
-    samples = list(rows)
+    # A row with neither a status nor an error is a request whose answer was never read (an
+    # encrypted tunnel's request line): no evidence either way, not a degraded answer.
+    samples = [row for row in rows if row.get("status_code") is not None or row.get("error")]
     if len(samples) < MIN_SAMPLES:
         return NORMAL
     flags = [_degraded(row.get("status_code"), row.get("error")) for row in samples]
@@ -135,6 +137,7 @@ def origin_prefixes(url: str) -> tuple[str, ...]:
 _RECENT_SQL = """
 SELECT status_code, elapsed_ms, error FROM http_transactions
  WHERE scan_id = $1 AND started_at >= NOW() - make_interval(secs => $3)
+   AND (status_code IS NOT NULL OR error IS NOT NULL)
    AND (url = ANY($2::text[]) OR url LIKE ANY(ARRAY(SELECT p || '/%' FROM unnest($2::text[]) p))
         OR url LIKE ANY(ARRAY(SELECT p || '?%' FROM unnest($2::text[]) p)))
  ORDER BY started_at DESC LIMIT $4"""

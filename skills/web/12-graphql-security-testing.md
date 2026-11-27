@@ -174,19 +174,32 @@ evidence, not authority. See the [scope guide](core/00-engagement-scope-policy.m
 - Test nested fields separately from top-level object access.
 - Check mutations, aliases, batch entries, node/global-ID lookups, and property assignment.
 
-### 4. Test parser and operation variants
+### 4. Test resolver arguments as inputs
+
+- Every string argument reaches a resolver that may build SQL, a shell command, a file path, a
+  URL or a template from it. Rank them by name and purpose (`filter`, `search`, `cmd`, `arg`,
+  `host`, `path`, `url`, `template`) and by what introspection says the field does.
+- Probe one argument at a time with a harmless break (a quote, `; echo <marker>`), compare with a
+  control, and read `errors[].message`: a database or shell error there is the lead.
+- Prove it with `candidate.verify`: family `sqli`, `command_injection`, `path_traversal`, `ssrf`
+  or `ssti`, locus `{method: POST, route: <endpoint>, operation: <the minimal GraphQL document>,
+  parameter: <the argument>}`. The server sends that document and rewrites only that argument.
+  A query is a read; a mutation needs the state-changing permission.
+- A fetch argument (`host`, `url`) must never name the application itself (see the SSRF skill).
+
+### 5. Test parser and operation variants
 
 - Compare named versus anonymous operations, GET versus POST, JSON versus GraphQL body, persisted versus full query, fragments, aliases, and batched requests.
 - Change one variant at a time.
 - Verify authentication, CSRF, rate, logging, and authorization remain consistent.
 
-### 5. Test complexity safely
+### 6. Test complexity safely
 
 - Increase depth, breadth, aliases, batch count, and expensive resolver combinations in small bounded steps.
 - Measure server-reported cost, latency, response size, errors, and health signals.
 - Stop far below service-degradation thresholds.
 
-### 6. Test subscriptions and uploads
+### 7. Test subscriptions and uploads
 
 - Verify handshake identity, channel/event authorization, object filters, reconnect, logout, token expiry, and tenant isolation.
 - For uploads, hand off file processing while retaining GraphQL-specific authorization and multipart parsing checks.

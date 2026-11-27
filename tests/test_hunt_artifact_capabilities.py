@@ -349,3 +349,44 @@ def test_a_whole_javascript_bundle_fits_the_private_body_read():
     from api.capabilities.http import MAX_PRIVATE_BODY_BYTES
 
     assert MAX_PRIVATE_BODY_BYTES >= MAX_JAVASCRIPT_BYTES >= 2 * 1_207_722
+
+
+def test_javascript_analysis_reads_api_paths_kept_without_a_leading_slash_or_under_a_service():
+    """A bundle's API path constants are often relative (joined to a base URL at runtime) or sit
+    under a service prefix; the analysis read none of them from a real application's bundle."""
+    from api.capabilities.artifact import analyze_javascript_bytes
+
+    body = (b'var u={LOGIN:"identity/api/auth/login",VEH:"identity/api/v2/vehicle/vehicles",'
+            b'POSTS:"/community/api/v2/community/posts/recent",SHOP:`workshop/api/shop/products`,'
+            b'Q:"v1/graphql/query"};var notes="see api docs";var mod="./api/client";'
+            b'var ext="https://cdn.example.com/api/x";var old="/api/Users";')
+    routes = analyze_javascript_bytes(body)["routes"]
+    assert {"/identity/api/auth/login", "/identity/api/v2/vehicle/vehicles",
+            "/community/api/v2/community/posts/recent", "/workshop/api/shop/products",
+            "/v1/graphql/query", "/api/Users"} <= set(routes)
+    assert not any("example.com" in r or r.startswith("/./") or " " in r for r in routes)
+
+
+def test_relative_api_paths_are_also_reported_under_each_base_the_bundle_names():
+    from api.capabilities.artifact import analyze_javascript_bytes
+
+    body = (b'var fg="identity/",pg="workshop/",hg={LOGIN:"api/auth/login",'
+            b'SHOP:"api/shop/products",ABS:"/api/v1/health"};')
+    routes = set(analyze_javascript_bytes(body)["routes"])
+    assert {"/api/auth/login", "/identity/api/auth/login", "/workshop/api/auth/login",
+            "/identity/api/shop/products", "/workshop/api/shop/products", "/api/v1/health"} <= routes
+    assert "/identity/api/v1/health" not in routes  # an absolute path is not joined to a base
+
+
+def test_an_api_description_returns_the_routes_it_declares_and_a_script_returns_none():
+    from api.capabilities.artifact import _api_description_routes
+
+    spec = json.dumps({"openapi": "3.0.1", "paths": {
+        "/users/v1/login": {"post": {"requestBody": {"content": {"application/json": {"schema": {
+            "type": "object", "properties": {"username": {"type": "string"}, "password": {"type": "string"}}}}}}}},
+        "/books/v1/{book_title}": {"get": {}}}}).encode()
+    routes = _api_description_routes("http://app.example.test:5002", "/openapi.json", spec, "application/json")
+    by = {(r["method"], r["path"].split("?")[0]): r for r in routes}
+    assert ("POST", "/users/v1/login") in by and set(by[("POST", "/users/v1/login")]["body_field_names"]) == {"username", "password"}
+    assert any(method == "GET" and path.startswith("/books/v1/") for method, path in by)
+    assert _api_description_routes("http://app.example.test", "/x.js", b"!function(){var openapi=1}()", None) is None

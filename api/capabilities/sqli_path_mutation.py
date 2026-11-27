@@ -6,6 +6,9 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 _VALUES = {
     '{int}': re.compile(r'[0-9]+\Z'),
     '{uuid}': re.compile(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z'),
+    # A segment a Hunt planner marked with ``*`` for sqli.verify (a user name, a slug): any one
+    # non-empty segment. The Scan's own candidates still come only from {int}/{uuid} routes.
+    '{segment}': re.compile(r'[^/]+\Z'),
 }
 
 

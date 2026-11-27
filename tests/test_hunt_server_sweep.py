@@ -67,11 +67,17 @@ class _Engine:
             raise Refused("not in this Hunt's capabilities")
         if capability != "http.request":
             return {"action_id": f"x{len(self.calls)}", "action_result": {"status": "success", "observations": []}}
+        if values["method"] == "POST" and not values.get("request_bindings"):
+            # An application that echoes what it is sent (the XSS screen's marker comes back).
+            return _answer(200, " ".join(str(v) for v in (values.get("form_body") or values.get("json_body") or {}).values()))
         if values["method"] == "POST":
             pair = values["request_bindings"][0]["default_credential"]
             return _answer(303, login_attempt="accepted" if pair == self.accept_pair else "rejected",
                            action=f"login-{pair}")
         path = values["path"]
+        if "zsk" in path:  # the XSS screen's marker request: this application reflects its query
+            import urllib.parse as _parse
+            return _answer(200, _parse.unquote_plus(path.split("?", 1)[1]))
         if path == "/.env":
             return _answer(200, "DB_PASSWORD=[withheld:1]", action="env")
         if path == "/backup/":
@@ -100,6 +106,18 @@ def test_helpers():
     assert exposure_signal({"status": 200, "body_sample": "<p>Forgot your password? Contact IT</p>",
                             "html": {"title": "Sign in"}}) is None
     assert exposure_signal({"status": 200, "body_sample": '{"status": "ok", "version": "1.2"}'}) is None
+    # Listings of other stacks than Apache/nginx: Node serve-index, Python http.server, Tomcat.
+    for title in ("listing directory /encryptionkeys", "Directory listing for /files/",
+                  "Directory Listing For [/files/]"):
+        assert exposure_signal({"status": 200, "body_sample": "", "html": {"title": title}}) == "a directory index"
+    assert exposure_signal({"status": 200, "body_sample": "our business directory listing",
+                            "html": {"title": "Partners"}}) is None
+    # A sign-in page's withheld anti-forgery token is not an exposure; a key on a page still is.
+    page = {"title": "Sign in", "forms": [{"method": "POST", "action": "/login", "fields": []}]}
+    assert exposure_signal({"status": 200, "body_sample": '<input name="_csrf" value="[withheld:1]">',
+                            "html": page}) is None
+    assert exposure_signal({"status": 200, "body_sample": "[withheld:1] AKIAABCDEFGHIJKLMNOP",
+                            "html": page}) == "credential-shaped values"
     assert login_form({"html": {"forms": [{"method": "POST", "action": "/login", "fields": [
         {"name": "email", "type": "email"}, {"name": "pw", "type": "password"}]}]}}) == ("/login", "email", "pw")
     assert sweep_key("read", "/a") == sweep_key("read", "/a") != sweep_key("read", "/b")
@@ -137,7 +155,8 @@ def test_the_sweep_reads_proves_logs_in_checks_authz_and_runs_injection_verifier
     assert ("sqli.verify", {"path": "/api/comment", "method": "POST", "body_field_names": ["body", "author"],
                             "injection_field": "body"}) in injections
     order = [cap for cap, _ in injections]
-    assert order.index("sqli.verify") >= order.count("xss.verify") - 1  # XSS (fast) first
+    # XSS runs after its reflection screen, so it is no longer ahead of SQL injection in the queue.
+    assert "xss.verify" in order and "sqli.verify" in order
     keys = [key for _cap, _v, key in engine.calls]
     assert len(keys) == len(set(keys)) and all(key.startswith("auto-sweep:") for key in keys)
     assert state["sweep"] == "done" and state["sweep_counts"]["sqli.verify"] >= 3
@@ -399,7 +418,11 @@ def test_route_names_are_tried_under_each_api_root_against_a_control():
     assert "GET /api/status" not in recorded or True  # the mapped route itself is already known
     assert "GET /api/search" not in recorded  # answered like the control
     tried = [v["path"] for cap, v, _ in engine.calls if cap == "http.request" and v["path"].startswith("/api/v1/")]
-    assert len([p for p in tried if p != "/api/v1/chat/health"]) == len(API_ROUTE_WORDS) + 1  # names + control
+    from api.hunt.server_sweep import destructive_route
+    names = [word for word in API_ROUTE_WORDS if not destructive_route(f"/api/v1/{word}")]
+    assert len(names) < len(API_ROUTE_WORDS)  # auth/logout and its kind are never guessed
+    assert len([p for p in tried if p != "/api/v1/chat/health"]) == len(names) + 1  # names + control
+    assert not any(destructive_route(p) for p in tried)
     assert state["sweep_stats"]["api_roots"] == ["/api", "/api/v1"]
     from pathlib import Path
     bundled = [line.strip() for line in (Path(__file__).resolve().parents[1] / "scanner" / "wordlists" /
@@ -543,3 +566,371 @@ def test_html_pages_the_reads_found_are_analyzed_for_routes_too():
                      load_report=None, record=record))
     analyzed = [v["path"] for cap, v, _ in engine.calls if cap == "javascript.analyze"]
     assert analyzed == ["/chat"] and "GET /api/chat/send" in recorded
+
+
+def test_the_sweep_follows_the_hunt_and_tests_what_the_planner_maps_until_it_finishes(monkeypatch):
+    # Its own rounds done, the sweep waits for the planner: a route the planner's request reached
+    # later, and an input a later request added to a route already tested, get the same checks;
+    # the sweep ends with a last look once the planner has finished.
+    monkeypatch.setattr(server_sweep, "FOLLOW_POLL_SECONDS", 0.01)
+    engine = _Engine()
+    state = {}
+    first = {"open": [{"endpoint": "GET /search", "untested": ["sqli", "xss", "review"], "params": ["q"]}]}
+    later = {"open": first["open"] + [
+        {"endpoint": "GET /track", "untested": ["sqli", "xss"], "params": ["id"]}]}
+    more = {"open": [{"endpoint": "GET /search", "untested": ["sqli", "xss"], "params": ["q", "sort"]},
+                     later["open"][1]]}
+    last = {"open": more["open"] + [{"endpoint": "GET /late", "untested": ["xss", "sqli"], "params": ["x"]}]}
+    looks = []
+    finished = {"value": False}
+
+    async def reload():
+        looks.append(state.get("sweep"))
+        if len(looks) < 3:
+            return first  # nothing new yet: the sweep keeps following
+        if len(looks) == 3:
+            return later
+        if len(looks) < 6:
+            return more
+        if not finished["value"]:
+            finished["value"] = True  # the planner finishes; its last request mapped /late
+            return more
+        return last
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(allowed=["http.request", "xss.verify"]), first, load_report=reload,
+                     planner_finished=lambda: finished["value"]))
+    xss = [v["path"] for cap, v, _ in engine.calls if cap == "xss.verify"]
+    assert xss == ["/search?q=1", "/track?id=1", "/search?q=1&sort=1", "/late?x=1"]
+    assert "following" in looks and state["sweep"] == "done"
+    reads = [v["path"] for cap, v, _ in engine.calls if cap == "http.request"]
+    assert reads.count("/search") == 1  # back for its new input, never read again
+
+
+def test_without_a_planner_signal_the_sweep_ends_when_a_round_finds_nothing_new():
+    engine = _Engine()
+    state = {}
+    report = {"open": [{"endpoint": "GET /search", "untested": ["xss"], "params": ["q"]}]}
+
+    async def reload():
+        return report
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(allowed=["http.request", "xss.verify"]), report, load_report=reload))
+    assert state["sweep"] == "done" and state["sweep_stats"]["rounds"] == 1
+
+
+def test_one_sign_in_under_several_mounts_gets_the_default_pairs_once():
+    form = [{"method": "POST", "action": "", "fields": [
+        {"name": "pma_username", "type": "text"}, {"name": "pma_password", "type": "password"}]}]
+
+    class Mounts(_Engine):
+        async def call(self, capability, values, key):
+            self.calls.append((capability, dict(values), key))
+            if capability == "http.request" and values["method"] == "GET":
+                mount = values["path"].split("/")[1]
+                page = [dict(form[0], action=f"/{mount}/index.php")]
+                title = "Other app" if mount == "crm" else "phpMyAdmin"
+                return {"action_id": "r", "action_result": {"status": "success", "observations": [
+                    {"response": {"status": 200, "body_sample": "", "html": {"forms": page, "title": title}}}]}}
+            if capability == "http.request":
+                return _answer(200, login_attempt="rejected")
+            return {"action_id": "x", "action_result": {"status": "success", "observations": []}}
+
+    engine = Mounts()
+    report = {"open": [{"endpoint": f"GET /{mount}/", "untested": ["review"], "params": []}
+                       for mount in ("pma", "phpmyadmin", "dbadmin", "crm")]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request"]), report))
+    tried = {v["path"] for cap, v, _ in engine.calls if cap == "http.request" and v["method"] == "POST"}
+    assert tried == {"/pma/index.php", "/crm/index.php"}
+
+
+def test_a_route_that_asks_for_http_basic_gets_the_default_pairs_once_per_first_segment():
+    class Tomcat(_Engine):
+        async def call(self, capability, values, key):
+            self.calls.append((capability, dict(values), key))
+            if capability != "http.request":
+                return {"action_id": "v", "action_result": {"status": "success", "observations": []}}
+            if values.get("request_bindings"):
+                pair = values["request_bindings"][0]["default_credential"]
+                return _answer(200 if pair == "dc-15" else 401,
+                               login_attempt="accepted" if pair == "dc-15" else "rejected", action=f"basic-{pair}")
+            return {"action_id": "r", "action_result": {"status": "success", "observations": [
+                {"response": {"status": 401, "body_sample": "", "challenge_schemes": ["basic"]}}]}}
+
+    engine = Tomcat()
+    report = {"open": [{"endpoint": f"GET {path}", "untested": ["review"], "params": []}
+                       for path in ("/manager/html", "/manager/status", "/host-manager/html")]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request", "candidate.verify"], slots=()), report))
+    attempts = [v for cap, v, _ in engine.calls if cap == "http.request" and v.get("request_bindings")]
+    assert {v["path"] for v in attempts} == {"/manager/html", "/host-manager/html"}
+    assert all(v["method"] == "GET" and v["request_bindings"] == [
+        {"default_credential": v["request_bindings"][0]["default_credential"], "credential_field": "basic",
+         "header": "Authorization"}] for v in attempts)
+    assert [c["locus"] for c in engine.candidates] == [
+        {"method": "GET", "path": "/manager/html"}, {"method": "GET", "path": "/host-manager/html"}]
+    assert all(c["family"] == "default_credentials" and c["evidence_refs"] == ["action:basic-dc-15"]
+               for c in engine.candidates)
+
+
+def test_each_principals_bearer_token_gets_the_jwt_check_once():
+    class SignedIn(_Engine):
+        async def call(self, capability, values, key):
+            self.calls.append((capability, dict(values), key))
+            if capability == "http.request":
+                return _answer(200 if values.get("as_principal") else 401, "{}")
+            return {"action_id": "v", "action_result": {"status": "success", "observations": []}}
+
+    engine = SignedIn()
+    report = {"open": [{"endpoint": f"GET /api/{name}", "untested": ["review"], "params": []}
+                       for name in ("me", "orders")]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request", "request.verify"]), report))
+    jwt = [v for cap, v, _ in engine.calls if cap == "request.verify" and v["check"] == "jwt"]
+    assert sorted(v["as_principal"] for v in jwt) == ["primary", "secondary"]
+    assert all(v["method"] == "GET" and v["path"].startswith("/api/") for v in jwt)
+
+
+class _ParamApp(_Engine):
+    """/search reflects q; /items filters on category (no reflection, a different answer)."""
+
+    async def call(self, capability, values, key):
+        if capability == "http.request" and values.get("method") == "GET":
+            import urllib.parse as parse
+            parts = parse.urlsplit(values["path"])
+            query = dict(parse.parse_qsl(parts.query))
+            if parts.path == "/search":
+                self.calls.append((capability, dict(values), key))
+                return _answer(200, f"<p>results for {query.get('q', '')}</p>")
+            if parts.path == "/items":
+                self.calls.append((capability, dict(values), key))
+                return _answer(200, '[{"id":1},{"id":2},{"id":3}]' if "category" not in query else "[]")
+        return await super().call(capability, values, key)
+
+
+def test_parameters_of_mapped_routes_are_discovered_by_reflection_and_by_halving():
+    from api.hunt.server_sweep import COMMON_PARAMETERS, MAX_PARAMETER_REQUESTS
+    engine = _ParamApp()
+    recorded = []
+
+    async def record(worklist):
+        recorded.extend(worklist)
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(), {"open": [{"endpoint": "GET /search", "untested": ["review"], "params": []},
+                                       {"endpoint": "GET /items", "untested": ["review"], "params": []}]},
+                     load_report=None, record=record))
+    assert "GET /search?q=1" in recorded and "GET /items?category=1" in recorded
+    items_requests = [v for cap, v, _ in engine.calls if cap == "http.request" and v["path"].startswith("/items?")]
+    assert 1 < len(items_requests) <= MAX_PARAMETER_REQUESTS
+    assert "category" in COMMON_PARAMETERS
+
+
+def test_a_recognised_products_inputs_get_the_long_tools_only_when_flagged():
+    class Product(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and values.get("path", "").startswith("/jenkins/search?"):
+                self.calls.append((capability, dict(values), key))
+                import urllib.parse as parse
+                q = dict(parse.parse_qsl(parse.urlsplit(values["path"]).query)).get("q", "")
+                return _answer(200, f"found {q}")
+            return await super().call(capability, values, key)
+
+    engine = Product()
+    state = {"products": ["jenkins"]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state=state, live=engine.live)
+                .run(_run(), {"open": [
+                    {"endpoint": "GET /jenkins/search", "untested": ["sqli", "xss"], "params": ["q"]},
+                    {"endpoint": "GET /shop/search", "untested": ["sqli", "xss"], "params": ["q"]}]}))
+    tools = [(cap, v["path"]) for cap, v, _ in engine.calls if cap in {"xss.verify", "sqli.verify"}]
+    assert ("xss.verify", "/shop/search?q=1") in tools and ("sqli.verify", "/shop/search?q=1") in tools
+    # The product's input reflected the marker unencoded: xss.verify follows; sqlmap does not.
+    assert ("xss.verify", "/jenkins/search?q=1") in tools
+    assert ("sqli.verify", "/jenkins/search?q=1") not in tools
+
+
+def test_the_sweep_sends_its_checks_as_the_login_the_planner_reached_a_route_with(monkeypatch):
+    monkeypatch.setattr(server_sweep, "FOLLOW_POLL_SECONDS", 0.01)
+    login = [{"source_action_id": "11111111-1111-4111-8111-111111111111", "capture_name": "token",
+              "header": "Authorization", "prefix": "Bearer "}]
+    engine = _Engine()
+    anonymous = {"open": [{"endpoint": "GET /rest/basket/{id}", "untested": ["sqli", "object_authz"],
+                           "params": ["coupon"]}]}
+    signed_in = {"open": [dict(anonymous["open"][0], identity=login)]}
+    finished = {"value": False}
+    looks = []
+
+    async def reload():
+        looks.append(1)
+        if len(looks) >= 2:
+            finished["value"] = True
+        return signed_in
+
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request", "request.verify", "sqli.verify"], slots=()), anonymous,
+                     load_report=reload, planner_finished=lambda: finished["value"]))
+    checks = [v for cap, v, _ in engine.calls if cap == "request.verify"]
+    as_login = [v for v in checks if v.get("request_bindings") == login]
+    assert {v["check"] for v in as_login} >= {"jwt", "sql_injection", "command_injection"}
+    assert sum(1 for v in as_login if v["check"] == "jwt") == 1
+    # The same input was also checked anonymously in the first round; both are kept apart.
+    assert any(v["check"] == "sql_injection" and "request_bindings" not in v for v in checks)
+    # The long tools take a managed principal, never a captured login.
+    assert not any(cap == "sqli.verify" and v.get("request_bindings") for cap, v, _ in engine.calls)
+
+
+def test_the_priority_gate_lets_the_lowest_rank_waiter_go_first():
+    async def scenario():
+        gate = server_sweep.PriorityGate(1)
+        order = []
+        await gate.acquire(5)
+
+        async def job(name, rank):
+            await gate.acquire(rank)
+            order.append(name)
+            gate.release()
+
+        tasks = [asyncio.create_task(job(name, rank)) for name, rank in
+                 (("generic-1", 2), ("generic-2", 2), ("signed-in", -1), ("named", 0))]
+        await asyncio.sleep(0)
+        gate.release()
+        await asyncio.gather(*tasks)
+        return order
+
+    assert asyncio.run(scenario()) == ["signed-in", "named", "generic-1", "generic-2"]
+
+
+def test_signed_in_routes_with_nothing_open_and_template_artifacts():
+    login = [{"withheld_ref": "withheld://hunt/11111111-1111-4111-8111-111111111111/1",
+              "header": "Authorization", "prefix": "Bearer "}]
+    engine = _Engine()
+    report = {"open": [{"endpoint": "GET /{{href}}", "untested": ["sqli", "xss"], "params": ["id"]}],
+              "signed_in": [{"endpoint": "GET /rest/basket/{id}", "untested": [], "params": ["coupon"],
+                             "identity": login}]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request", "request.verify"], slots=()), report))
+    checks = [v for cap, v, _ in engine.calls if cap == "request.verify"]
+    basket = [v for v in checks if v["path"] == "/rest/basket/1"]
+    assert basket and all(v["request_bindings"] == login for v in basket)
+    assert {"jwt", "sql_injection"} <= {v["check"] for v in basket}
+    assert not any("{{" in v["path"] for v in checks)  # an unrendered template is not a route
+
+
+def test_the_xss_tool_runs_only_where_the_reflection_screen_saw_the_marker():
+    class Mixed(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and "zsk" in values.get("path", "") and values["path"].startswith("/plain"):
+                self.calls.append((capability, dict(values), key))
+                return _answer(200, "results for &lt;encoded&gt;")  # encodes what it is sent
+            return await super().call(capability, values, key)
+
+    engine = Mixed()
+    report = {"open": [{"endpoint": "GET /echo", "untested": ["xss"], "params": ["q"]},
+                       {"endpoint": "GET /plain", "untested": ["xss"], "params": ["q"]}]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=["http.request", "xss.verify"]), report))
+    xss = [v["path"] for cap, v, _ in engine.calls if cap == "xss.verify"]
+    assert xss == ["/echo?q=1"]
+
+
+def test_the_engine_never_sends_its_own_request_to_a_destructive_route():
+    """On VAmPI the engine read GET /createdb (mapped from the spec) 66 times; each recreated the
+    application's database. A route naming a destructive operation is never the engine's target."""
+    from api.hunt.server_sweep import destructive_route
+
+    for path in ("/createdb", "/api/reset", "/admin/db_reset?x=1", "/users/logout", "/cache/flush",
+                 "/api/v1/users/7/delete", "/setup", "/install.php"):
+        assert destructive_route(path), path
+    for path in ("/users/v1/{id}", "/books/v1", "/api/products?q=reset", "/resetting-guide",
+                 "/deleted-items", "/api/settings", "/runtime/status", "/install-guide/intro"):
+        assert not destructive_route(path), path
+
+
+SCHEMA = {"data": {"__schema": {"queryType": {"fields": [
+    {"name": "pastes", "type": {"kind": "LIST", "name": None, "ofType": {"kind": "OBJECT", "name": "Paste"}},
+     "args": [{"name": "public", "type": {"kind": "SCALAR", "name": "Boolean"}},
+              {"name": "limit", "type": {"kind": "SCALAR", "name": "Int"}},
+              {"name": "filter", "type": {"kind": "SCALAR", "name": "String"}}]},
+    {"name": "systemDebug", "type": {"kind": "SCALAR", "name": "String"},
+     "args": [{"name": "arg", "type": {"kind": "SCALAR", "name": "String"}}]},
+    {"name": "paste", "type": {"kind": "OBJECT", "name": "Paste"},
+     "args": [{"name": "id", "type": {"kind": "NON_NULL", "name": None, "ofType": {"kind": "SCALAR", "name": "Int"}}},
+              {"name": "title", "type": {"kind": "SCALAR", "name": "String"}}]},
+    {"name": "deleteAllPastes", "type": {"kind": "SCALAR", "name": "Boolean"},
+     "args": [{"name": "reason", "type": {"kind": "SCALAR", "name": "String"}}]},
+    {"name": "lookup", "type": {"kind": "SCALAR", "name": "String"},
+     "args": [{"name": "where", "type": {"kind": "NON_NULL", "name": None, "ofType": {"kind": "INPUT_OBJECT", "name": "W"}}},
+              {"name": "q", "type": {"kind": "SCALAR", "name": "String"}}]},
+]}}}}
+
+
+def test_each_string_argument_of_a_query_field_becomes_a_graphql_locus():
+    """In a driven DVGA Hunt the engine verified introspection yet never probed one argument."""
+    from api.hunt import graphql_sweep
+
+    loci = {(item["field"], item["argument"]): item["operation"]
+            for item in graphql_sweep.argument_loci(json.dumps(SCHEMA), "/graphql")}
+    assert loci == {
+        ("pastes", "filter"): 'query{pastes(filter:"1"){__typename}}',
+        ("systemDebug", "arg"): 'query{systemDebug(arg:"1")}',
+        ("paste", "title"): 'query{paste(title:"1",id:1){__typename}}',  # the required id filled in
+    }  # deleteAllPastes is destructive; lookup needs an input object no placeholder fills
+    assert graphql_sweep.destructive_field("deleteAllPastes") and graphql_sweep.destructive_field("resetDB")
+    assert not graphql_sweep.destructive_field("deletedItems") and not graphql_sweep.destructive_field("pastes")
+    assert graphql_sweep.argument_loci("not json", "/graphql") == []
+
+
+def test_the_sweep_reads_a_graphql_schema_and_proves_its_arguments():
+    class GraphQLApp(_Engine):
+        async def call(self, capability, values, key):
+            if capability == "http.request" and values.get("path") == "/graphql":
+                self.calls.append((capability, dict(values), key))
+                return _answer(200, json.dumps(SCHEMA), action="schema")
+            return await super().call(capability, values, key)
+
+    engine = GraphQLApp()
+    report = {"open": [{"endpoint": "POST /graphql", "untested": ["graphql"], "params": []}]}
+    asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+                .run(_run(allowed=[*ALL, "request.verify"]), report))
+    graphql = [c for c in engine.candidates if c["locus"].get("operation")]
+    assert {(c["locus"]["parameter"], c["family"]) for c in graphql} == {
+        ("filter", "injection"), ("arg", "injection"), ("title", "injection")}
+    assert all(c["locus"]["method"] == "POST" and c["locus"]["route"] == "/graphql"
+               and c["evidence_refs"] == ["action:schema"] for c in graphql)
+    schema_reads = [v for cap, v, _ in engine.calls if cap == "http.request" and v.get("path") == "/graphql"]
+    assert len(schema_reads) == 1 and "__schema" in schema_reads[0]["json_body"]["query"]
+    verified = {v["candidate_id"] for cap, v, _ in engine.calls if cap == "candidate.verify"}
+    assert len(verified) >= 3
+
+
+def test_a_call_the_engine_dropped_unsent_is_sent_once_more_and_a_lost_one_is_not_a_success():
+    """Two Hunts on one engine: 34 sweep calls waited past their reservation lease, were recovered
+    unsent and counted as done. A call dropped before it ran is requeued once (a new key); a worker
+    timeout, which may have run, is counted lost and never resent."""
+    dropped = {"result": {"error": "stale_reservation_recovered", "execution_started": None, "budget_consumed": {}}}
+    timeout = {"status": "timeout", "error": "worker_result_timeout"}
+
+    class Flaky(_Engine):
+        def __init__(self, first):
+            super().__init__()
+            self.first = first
+
+        async def call(self, capability, values, key):
+            if not self.calls:
+                self.calls.append((capability, dict(values), key))
+                return self.first
+            return await super().call(capability, values, key)
+
+    engine = Flaky(dropped)
+    sweep = Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+    result = asyncio.run(sweep._safe("http.request", {"method": "GET", "path": "/a"}, "auto-sweep:read:x"))
+    assert [key for _c, _v, key in engine.calls] == ["auto-sweep:read:x", "auto-sweep:read:x:requeue"]
+    assert result is not None and sweep.counts["http.request:requeued"] == 1
+
+    engine = Flaky(timeout)
+    sweep = Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
+    assert asyncio.run(sweep._safe("http.request", {"method": "GET", "path": "/a"}, "auto-sweep:read:y")) is None
+    assert len(engine.calls) == 1 and sweep.counts == {"http.request:lost": 1}
+    assert server_sweep.MAX_CALLS_IN_FLIGHT >= 1

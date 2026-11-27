@@ -68,7 +68,7 @@ SQL_CHECK = "sql_injection"
 # endpoint is sent: the Scan never sends its injection probes to the credential profile's own
 # login, and neither does a Hunt.
 SIGN_IN_CHECKS = frozenset({"rate_limit", "ldap_injection", "nosql_injection", "csrf", "open_redirect",
-                            "cors", "security_headers", "host_header_injection"})
+                            "cors", "security_headers", "host_header_injection", "mass_assignment"})
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _XML_TYPES = ("application/xml", "text/xml")
@@ -116,10 +116,22 @@ def admission_refusal(values: Mapping[str, Any], policy: Mapping[str, Any]) -> s
             return "file_upload needs POST or PUT and retrieve_path, a same-origin path with {filename}"
         if "json_body" in values or "xml_body" in values:
             return "file_upload sends a multipart form; give other form fields in form_body"
-    if check == "jwt" and not (values.get("as_principal") or values.get("session_ref")):
-        return "jwt tests the token a principal signs in with: send as_principal or session_ref"
-    if check in {"unauthenticated_api", "exposure"} and (method != "GET" or values.get("as_principal") or values.get("session_ref")):
-        return f"{check} tests an anonymous GET: send no as_principal or session_ref"
+    if check == "mass_assignment":
+        if method != "POST" or not any(key in values for key in ("json_body", "form_body")):
+            return "mass_assignment needs the sign-up POST with its fields in json_body or form_body"
+        if not values.get("login_path") or not values.get("profile_path"):
+            return "mass_assignment needs login_path (where a new account signs in) and profile_path (its own profile)"
+        if policy.get("allow_account_creation") is not True:
+            return ("mass_assignment signs up three accounts and needs this Hunt's allow_account_creation "
+                    "permission")
+    if check == "jwt" and not (values.get("as_principal") or values.get("session_ref")
+                               or values.get("request_bindings")):
+        return ("jwt tests the token a principal signs in with: send as_principal, session_ref, or "
+                "request_bindings with the token this Hunt's own login captured (header Authorization, "
+                "prefix \"Bearer \")")
+    if check in {"unauthenticated_api", "exposure"} and (method != "GET" or values.get("as_principal") or values.get("session_ref")
+                                                        or values.get("request_bindings")):
+        return f"{check} tests an anonymous GET: send no as_principal, session_ref or request_bindings"
     if check in {"rate_limit", "ldap_injection"} and method not in WRITE_METHODS:
         return f"{check} tests a sign-in request (POST)"
     if is_authentication_path(values.get("path")) and check not in SIGN_IN_CHECKS:
@@ -261,6 +273,8 @@ def verifier_adapter(
         )
     options = {
         "retrieve_path": values.get("retrieve_path"), "token_field": values.get("token_field"),
+        "login_path": values.get("login_path"), "profile_path": values.get("profile_path"),
+        "privilege_value": values.get("privilege_value"),
         "allow_identity_headers": allow_identity_headers,
         "form_fields": [
             (str(name), str(value)) for name, value in dict(values.get("form_body") or {}).items()
@@ -468,6 +482,9 @@ REQUEST_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
                             "An anonymous request to a self-hosted product's management route was "
                             "answered with that product's data twice; a sibling route that does not "
                             "exist was not"),
+    "mass_assignment": ("Verified mass assignment at sign-up (privileged field stored)", "high", "CWE-915",
+                        "Two new accounts that sent the field at sign-up show the sent value in their own "
+                        "profile; an account signed up without it shows another value"),
     "jwt": ("JSON Web Token accepted without a valid signature", "critical", "CWE-347",
             "The principal's token was accepted forged (altered signature, alg none or a well-known "
             "secret), twice"),

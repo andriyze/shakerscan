@@ -138,8 +138,9 @@ async def prepare_http_operation(
             if carries_secret or default_pair:
                 wire_input['follow_redirects'] = False
             if default_pair:
-                from hunt.default_credentials import classify_response
+                from hunt.default_credentials import classify_response, is_basic_request
                 private_headers = (*private_headers, 'retry-after')
+                basic_attempt = is_basic_request(inputs)
 
                 def sink(private: Any) -> None:
                     try:
@@ -147,7 +148,7 @@ async def prepare_http_operation(
                             status=private.status_code, headers=private.headers(),
                             cookie_names=sorted(private.cookies()), body=private.body(),
                             location=private.headers().get('location'),
-                            login_path=str(inputs.get('path') or '/')))
+                            login_path=str(inputs.get('path') or '/'), basic=basic_attempt))
                     except Exception:  # noqa: BLE001 - target content never fails the attempt
                         verdicts.append('unclear')
                     exchange.capture_response(private)

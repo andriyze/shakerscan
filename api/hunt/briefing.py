@@ -72,7 +72,7 @@ HUNT_WRITTEN_ROLE = (
 )
 POLICY_PERMISSIONS = (
     "active_testing", "credential_access", "allow_state_changing_http", "network_discovery",
-    "allow_oob_interactions", "allow_identity_headers", "allow_direct_origin",
+    "allow_oob_interactions", "allow_account_creation", "allow_identity_headers", "allow_direct_origin",
 )
 INSTRUCTION_ROLE = (
     "Authoritative operator guidance for this target: follow it unless the current objective says "

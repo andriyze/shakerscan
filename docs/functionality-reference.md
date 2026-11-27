@@ -2077,7 +2077,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 434 | Python sources + Compose manifests |
+| Runtime environment keys | 435 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 140 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -3128,7 +3128,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `REDIS_IMAGE` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
+| `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/operations/router.py`, `api/runtime/target_backoff.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
 | `RESULTS_DIR` | `api/api.py`, `api/data_lifecycle/erasure.py`, `api/hunt/default_credential_proof.py`, `api/hunt/injection_proof.py`, `api/runtime/archive_blob_secrets.py`, `api/runtime/http_archive_reader.py`, `api/runtime/http_archive_router.py`, `api/secret_store.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
 | `RETEST_AI_BUDGET_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_COOLDOWN_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -3309,6 +3309,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_STREAM_SCANNER_LOGS` | `api/worker.py` |
 | `SHAKERSCAN_SUBFINDER_PROVIDERS` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_SWEEP_CALLS_IN_FLIGHT` | `api/hunt/server_sweep.py` |
 | `SHAKERSCAN_TRAFFIC_ATTRIBUTION` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_TRAFFIC_USER_AGENT_TOKEN` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_TRIVY_CACHE_DIR` | `scanner/scanner_tools/model_intake_scanners.py` |

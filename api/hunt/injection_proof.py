@@ -105,16 +105,65 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def graphql_locus(candidate: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
+    """``(route, field_path, document, operation_kind)`` of a GraphQL argument candidate.
+
+    A POST locus whose ``operation`` is a GraphQL document and whose ``parameter`` names one
+    string argument in it: the proofs send that document as ``{"query": ...}`` and rewrite only
+    that argument. None when the locus is not a POST with an operation.
+    """
+    try:
+        from capabilities import graphql_argument
+    except ModuleNotFoundError:  # package import layout
+        from ..capabilities import graphql_argument
+    locus = _mapping(candidate.get("canonical_locus"))
+    context = _mapping(candidate.get("verification_context"))
+    method = str(locus.get("method") or context.get("method") or "").strip().upper()
+    document = str(locus.get("operation") or context.get("operation") or "")
+    if method != "POST" or "{" not in document:
+        return None
+    parameter = str(locus.get("parameter") or context.get("parameter") or "").strip()
+    try:
+        field = graphql_argument.FIELD_PREFIX + graphql_argument.argument_name(parameter)
+        graphql_argument.argument_value(document, field)
+    except graphql_argument.GraphQLArgumentError as exc:
+        raise InjectionProofRefused(
+            "injection_proof_graphql_argument",
+            f"{exc}. Put the GraphQL document in the locus operation and name one of its string "
+            "arguments in parameter: {operation: 'query{search(keyword:\"a\"){id}}', parameter: keyword}.",
+        ) from None
+    kind = graphql_argument.operation_kind(document)
+    if kind == "subscription":
+        raise InjectionProofRefused("injection_proof_graphql_argument",
+                                    "A subscription is not sent over HTTP POST.")
+    raw = next((str(locus.get(key)).strip() for key in ("route", "url", "path") if locus.get(key)),
+               str(context.get("route") or "").strip())
+    parsed = urllib.parse.urlsplit(raw)
+    route = parsed.path if parsed.scheme else raw.split("?", 1)[0].split("#", 1)[0]
+    if not route.startswith("/") or any(ord(ch) < 33 for ch in route) or ".." in route.split("/"):
+        raise InjectionProofRefused(
+            "injection_proof_route_missing",
+            "Name the GraphQL endpoint's path in the candidate's locus (route: /graphql).",
+        )
+    return route, field, document, kind
+
+
 def proof_request(candidate: Mapping[str, Any], *, origin: str) -> tuple[str, str, str]:
-    """``(url, route, parameter)`` of the GET the proofs mutate, from the candidate's locus."""
+    """``(url, route, parameter)`` of the request the proofs mutate, from the candidate's locus:
+    a GET query parameter, or one string argument of a GraphQL document (``graphql_locus``)."""
+    graphql = graphql_locus(candidate)
+    if graphql is not None:
+        route, field, _document, _kind = graphql
+        return f"{origin}{route}", route, field
     locus = _mapping(candidate.get("canonical_locus"))
     context = _mapping(candidate.get("verification_context"))
     method = str(locus.get("method") or context.get("method") or "GET").strip().upper()
     if method != "GET":
         raise InjectionProofRefused(
             "injection_proof_get_only",
-            "This proof mutates one query parameter of a GET. For a request body call sqli.verify "
-            "or xss.verify with the body fields.",
+            "This proof mutates one query parameter of a GET, or one string argument of a GraphQL "
+            "document (method POST, the document in the locus operation, the argument in parameter). "
+            "For another request body call sqli.verify or xss.verify with the body fields.",
         )
     parameter = str(locus.get("parameter") or context.get("parameter") or "").strip()
     if not parameter or len(parameter) > 200 or any(ord(ch) < 33 for ch in parameter):
@@ -215,8 +264,9 @@ def finding_record(
     tool = {"sqli": "shakerscan_sqli_proof", "nosqli": "shakerscan_nosqli_verify"}.get(
         kind, "shakerscan_injection_verify")
     field = str(proof.get("field_path") or "")[:200]
+    method = str(proof.get("method") or "GET").upper()
     identity = templated_finding_identity({
-        "cwe": cwe, "tool": tool, "url": url, "evidence": {"method": "GET", "param": field},
+        "cwe": cwe, "tool": tool, "url": url, "evidence": {"method": method, "param": field},
     }) or f"{kind}|{url}|{field}"
     evidence = {
         "schema_version": "hunt-deterministic-finding/v1", "authoritative": True,
@@ -224,8 +274,8 @@ def finding_record(
         "canonical_capability": "candidate.verify",
         "proof_contract": proof.get("proof_contract"), "technique": proof.get("technique"),
         "hunt_id": str(hunt_id), "verification_action_id": str(action_id),
-        "url": url, "origin": proof.get("origin"), "method": "GET", "field_path": field,
-        "request_class": "safe_read", "candidate_id": proof.get("candidate_id"),
+        "url": url, "origin": proof.get("origin"), "method": method, "field_path": field,
+        "request_class": str(proof.get("request_class") or "safe_read"), "candidate_id": proof.get("candidate_id"),
         **({"injection_class": kind} if tool == "shakerscan_injection_verify" else {}),
         **{key: proof[key] for key in ("payload_shape", "file_signature", "timing_ms", "operator",
                                        "database_error_signatures") if proof.get(key)},
@@ -279,17 +329,31 @@ async def run_proof(
     parsed = urllib.parse.urlsplit(named or target_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     url, route, parameter = proof_request(candidate, origin=origin)
+    graphql = graphql_locus(candidate)
+    method, body, headers, request_class = "GET", b"", (), "safe_read"
+    if graphql is not None:
+        _route, _field, document, kind = graphql
+        if kind == "mutation" and not policy.get("allow_state_changing_http"):
+            raise InjectionProofRefused(
+                "injection_proof_write_not_permitted",
+                "A GraphQL mutation writes: proving its argument needs the Hunt's state-changing "
+                "permission (allow_state_changing_http).",
+            )
+        method, headers = "POST", (("Content-Type", "application/json"),)
+        body = json.dumps({"query": document}, separators=(",", ":")).encode("utf-8")
+        request_class = "state_changing" if kind == "mutation" else "safe_read"
     request = ReplayRequest(
         request_id=f"candidate:{candidate['id']}", ordinal=0, name="injection proof", folder="",
-        method="GET", url=url, headers=(), body=b"", body_mode="none", auth_type="none",
-        has_sensitive_material=False,
+        method=method, url=url, headers=headers, body=body, body_mode="raw" if body else "none",
+        auth_type="none", has_sensitive_material=False,
     )
     proof_candidate = {
         "candidate_id": hashlib.sha256(f"{candidate['id']}".encode()).hexdigest(),
-        "method": "GET", "field_path": parameter, "parameter_name": parameter,
-        "canonical_path": route, "request_class": "safe_read", "request_ref_id": None,
+        "method": method, "field_path": parameter, "parameter_name": parameter,
+        "canonical_path": route, "request_class": request_class, "request_ref_id": None,
         "body_field_names": [],
     }
+    writes = request_class != "safe_read"
     server = tuple(name for name in proofs if name not in {"sqli", "nosqli"})
     stages: list[tuple[str, Any]] = []
     if server:
@@ -323,7 +387,8 @@ async def run_proof(
         if share < 8:
             break
         try:
-            adapter = build({"http_requests": share, "tool_wall_seconds": PROOF_WALL_SECONDS // len(stages)})
+            adapter = build({"http_requests": share, "tool_wall_seconds": PROOF_WALL_SECONDS // len(stages),
+                             **({"state_changing_requests": share} if writes else {})})
             result = await adapter.execute(heartbeat=beat, cancelled=cancelled or (lambda: False))
         except ValueError as exc:  # the request does not fit this proof: try the next
             errors.append(f"proof_unconstructable:{exc}"[:200])
@@ -336,7 +401,7 @@ async def run_proof(
             if verified is None and item.get("proof_state") == "verified":
                 kind = str(item.get("injection_class") or (
                     "sqli" if str(item.get("proof_contract") or "").startswith("sqli_") else "nosqli"))
-                verified = {**item, "kind": kind}
+                verified = {**item, "kind": kind, "method": method, "request_class": request_class}
         if verified is not None:
             break
     refused = next((str(item.get("inconclusive_reason")) for item in observations
@@ -352,7 +417,7 @@ async def run_proof(
             for item in observations
         ][:16],
         "errors": errors[:5],
-        "traffic": {"http_requests": sent, "state_changing_requests": 0},
+        "traffic": {"http_requests": sent, "state_changing_requests": sent if writes else 0},
     }
 
 

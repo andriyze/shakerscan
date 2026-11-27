@@ -6702,9 +6702,20 @@ async def _auto_discovery_finish(hunt_id, **values):
     return await _hunt_run_service.finish(hunt_id, **values)
 
 
+async def _auto_discovery_permission(hunt_id, flag, routes):
+    try:
+        from hunt.engine_account_permission import request_account_creation
+    except ModuleNotFoundError:
+        from api.hunt.engine_account_permission import request_account_creation
+    if flag != "account-creation":
+        return "unavailable"
+    return await request_account_creation(db_pool, hunt_id, routes=routes)
+
+
 configure_auto_discovery(execute=_auto_discovery_execute, record=_auto_discovery_record,
                          load_run=_auto_discovery_run, load_report=_auto_discovery_report,
-                         create_candidate=_auto_discovery_candidate, finish=_auto_discovery_finish)
+                         create_candidate=_auto_discovery_candidate, finish=_auto_discovery_finish,
+                         request_permission=_auto_discovery_permission)
 
 
 @app.post("/scans/{scan_id}/cancel")

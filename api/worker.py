@@ -67,7 +67,7 @@ from retest_contract import (
     validate_retest_job_payload,
 )
 from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
-from runtime import target_pacing
+from runtime import target_backoff, target_pacing
 from runtime.nuclei_index import ensure_nuclei_template_index
 from runtime.heavy_slots import HeavyScannerSlot, HeavySlotUnavailable
 from runtime.scanner_cancel import ThrottledCancelCheck, shared_client
@@ -18333,6 +18333,8 @@ async def _execute_agent_scanner_process(
             int(reserved_budget.get("tcp_ports_attempted") or 0),
         )
         if name not in _DIRECT_ADDRESS_SCANNERS:
+            # The target's holds (429 Retry-After, a ban) are shared with every worker through Redis.
+            target_backoff.BACKOFF.share(redis_client)
             pinned_proxy = await PinnedSocksProxy(
                 hostname=str(parsed_execution.hostname or ""),
                 pinned_addresses=job_data.get("authorized_addresses") or (),
@@ -21824,12 +21826,28 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             primary_ref = str(capability_input.get("primary_session_ref") or "")
             secondary_ref = str(capability_input.get("secondary_session_ref") or "")
             uses_managed_principals = bool(capability_input.get("primary_principal"))
-            if not uses_managed_principals and primary_ref == secondary_ref:
+            uses_captured_logins = bool(capability_input.get("primary_bindings"))
+            captured_distinction = None
+            if uses_captured_logins:
+                # Two logins this Hunt made itself; refused unless they are provably two accounts.
+                # A captured cookie goes only to the origin that set it, so every route is on one
+                # origin, and that origin is the one each binding is resolved (and checked) for.
+                if len(set(selected_route_origins)) != 1:
+                    raise AuthSessionStoreError(
+                        "authz.verify with captured logins compares routes of one origin; send one call per origin")
+                from hunt.authz_captured import resolve_captured_principals
+                primary_headers, secondary_headers, captured_distinction = await resolve_captured_principals(
+                    pool=db_pool, run=run, hunt_id=hunt_id, context=context, target=target, policy=policy,
+                    hunt_policy=hunt_policy, target_url=selected_route_origins[0],
+                    values={**capability_input, "origin": selected_route_origins[0]},
+                    stack=credential_stack, session_store=session_store)
+                primary_profile_id, secondary_profile_id = "captured:primary", "captured:secondary"
+            elif not uses_managed_principals and primary_ref == secondary_ref:
                 raise AuthSessionStoreError(
                     "authorization proof requires two distinct session references"
                 )
             async with db_pool.acquire() as authority_conn:
-                authority = await validate_worker_credential_authority(
+                authority = None if uses_captured_logins else await validate_worker_credential_authority(
                     authority_conn,
                     owner_kind="hunt",
                     owner_id=str(hunt_id),
@@ -21838,7 +21856,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     scope_receipt_id=target.scope_receipt_id,
                     action_name="hunt.capability:authz.verify",
                 )
-                if uses_managed_principals:
+                if uses_captured_logins:
+                    pass
+                elif uses_managed_principals:
                     from hunt.authz_credentials import resolve_hunt_authz_principals
                     principals = await resolve_hunt_authz_principals(
                         authority_conn, context=context, target=target,
@@ -21882,8 +21902,25 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 raise AuthSessionStoreError(
                     "authorization proof requires distinct primary and secondary profiles"
                 )
+            planted = None
+            if capability_input.get("mode") == "planted_object":
+                # The value and its creator come from the server's records of the create request.
+                from hunt.authz_planted import PlantedObjectRefused, planted_source
+                async with db_pool.acquire() as planted_conn:
+                    try:
+                        planted = await planted_source(planted_conn, hunt_id=hunt_id, values=capability_input)
+                    except PlantedObjectRefused as exc:
+                        raise AuthSessionStoreError(f"planted_object: {exc}") from None
+
             async def execute_authz() -> dict[str, Any]:
                 from capabilities.authz_modes import verify_function_authorization
+                if planted is not None:
+                    from capabilities.authz_planted import verify_planted_object
+                    return await verify_planted_object(
+                        authz_base, routes, target=target, primary_headers=primary_headers,
+                        secondary_headers=secondary_headers, creator=planted[0],
+                        planted_field=str(capability_input.get("planted_field") or ""),
+                        planted_value=planted[1], transaction_recorder=_record_call)
                 return await (verify_function_authorization if capability_input.get("mode") == "function" else verify_target_bound_object_authorization)(
                     authz_base,
                     routes,
@@ -21901,7 +21938,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 "secondary_session_ref": secondary_ref,
                 "primary_profile_id": primary_profile_id,
                 "secondary_profile_id": secondary_profile_id,
-                "credential_source": "managed_principals" if uses_managed_principals else "sessions",
+                "credential_source": ("captured_logins" if uses_captured_logins
+                                      else "managed_principals" if uses_managed_principals else "sessions"),
+                **({"principal_distinction": captured_distinction} if captured_distinction else {}),
                 "routes": [redact_url(item) for item in routes],
                 "route_inventory_digest": authz_route_inventory_digest(routes),
                 "route_count": len(routes),

@@ -30,6 +30,7 @@ from runtime.archive_body_masking import (
     mask_public_http_urls,
 )
 from runtime import origin_pace
+from runtime.target_backoff import BACKOFF as TARGET_BACKOFF
 from runtime.models import TargetBinding
 from runtime.target_bound_socket import FrozenTargetSocketFactory
 
@@ -98,6 +99,7 @@ def cookie_metadata(set_cookie: str) -> dict[str, Any] | None:
 # The response headers that describe a target's security posture. Fixed and public: naming them
 # here rather than accepting a caller-supplied list keeps the capability's declared input contract
 # unchanged while making the posture observable.
+_CHALLENGE_SCHEMES = frozenset({"basic", "digest", "bearer", "negotiate", "ntlm"})
 _SECURITY_POSTURE_HEADERS: tuple[str, ...] = (
     "strict-transport-security",
     "content-security-policy",
@@ -630,6 +632,32 @@ async def execute_bound_http_request(
         if isinstance(args.get("form_body"), dict) else None
     )
     url = urllib.parse.urljoin(request_origin + "/", path.lstrip("/"))
+    prefetch_view: dict[str, Any] | None = None
+    if args.get("form_prefetch") is True and method == "POST" and form_body is not None:
+        # The form's own page first (runtime/form_prefetch): its hidden fields (an anti-CSRF
+        # token) and the page's cookies go with this POST; the request's own fields win.
+        from runtime import form_prefetch
+        page_path = agent_tools.validate_same_origin_path(args.get("form_page") or path)
+        seen: dict[str, Any] = {}
+
+        def keep(private: WorkerPrivateHTTPResponse) -> None:
+            seen["body"], seen["cookies"] = private.body(), dict(private.cookies() or {})
+
+        page = await execute_bound_http_request(
+            base_url, {"method": "GET", "path": page_path, "follow_redirects": False,
+                       **({"origin": args["origin"]} if args.get("origin") else {})},
+            target=target, trusted_headers=trusted_headers, allow_identity_headers=allow_identity_headers,
+            direct_origin_addresses=direct_origin_addresses, transaction_recorder=transaction_recorder,
+            cookies=cookies, principal_slot=principal_slot, timeout_seconds=timeout_seconds,
+            private_response_sink=keep, response_body_limit=MAX_PRIVATE_BODY_BYTES)
+        page_url = urllib.parse.urljoin(request_origin + "/", page_path.lstrip("/"))
+        hidden = form_prefetch.hidden_fields(
+            bytes(seen.get("body") or b"").decode("utf-8", "replace"), page_url=page_url, post_url=url)
+        added = {name: value for name, value in hidden.items() if name not in form_body}
+        form_body = {**form_body, **added}
+        cookies = {**dict(seen.get("cookies") or {}), **dict(cookies or {})}
+        prefetch_view = {"page": page_path, "status": (page.get("response") or {}).get("status"),
+                         "hidden_fields": sorted(added), "cookies": sorted(dict(seen.get("cookies") or {}))}
     request_view = {
         "method": method,
         "origin": request_origin,
@@ -686,6 +714,11 @@ async def execute_bound_http_request(
                 final_url = current_url
                 # The Hunt's aggregate rate at this origin (runtime/origin_pace; no-op outside Hunts).
                 await origin_pace.take(current_url)
+                # The target asked to wait (429 Retry-After) or banned us: wait it out, as the
+                # scanner tunnels do (runtime/target_backoff).
+                backoff_origin = origin_pace.origin_of(current_url)
+                if backoff_origin:
+                    await TARGET_BACKOFF.wait(backoff_origin)
                 hop_started = time.perf_counter()
                 hop_started_at = datetime.now(timezone.utc)
                 response = None
@@ -723,16 +756,30 @@ async def execute_bound_http_request(
                         # must never duplicate a state-changing request.
                         last_connect_error = exc
                         continue
+                    except httpx.TimeoutException:
+                        # Connected, never answered: a hung or overloaded target.
+                        if backoff_origin:
+                            TARGET_BACKOFF.observe_silence(backoff_origin)
+                        raise
                     pinned_address = candidate_address
                     connected_addresses.append(candidate_address)
                     break
                 if response is None:
+                    if backoff_origin:
+                        TARGET_BACKOFF.observe_silence(backoff_origin)
                     # Keep the real cause on the chain: a certificate the client will not
                     # trust is a different finding from a port nobody answers on.
                     raise httpx.ConnectError(
                         "all frozen target addresses failed before connect"
                     ) from last_connect_error
                 request_view["pinned_address"] = pinned_address
+                if backoff_origin:
+                    retry_after = response.headers.get("retry-after")
+                    TARGET_BACKOFF.observe(
+                        backoff_origin, int(response.status_code),
+                        {b"retry-after": retry_after.encode("latin-1", "replace")} if retry_after else {},
+                        {"method": str(current_method).upper(),
+                         "target": urllib.parse.urlsplit(current_url).path or "/"})
                 del body_lookahead[:]  # this hop's own
                 try:
                     (
@@ -923,6 +970,14 @@ async def execute_bound_http_request(
         for name in _SECURITY_POSTURE_HEADERS
         if name in response.headers
     }
+    if response.status_code == 401:
+        # Which sign-in a 401 asks for (scheme names from a fixed set; never the realm or a value).
+        schemes = sorted({
+            scheme.lower() for value in response.headers.get_list("www-authenticate")[:8]
+            for scheme in re.findall(r"(?:^|,)\s*([A-Za-z]{4,10})(?=\s|,|$)", str(value)[:1_000])
+        } & _CHALLENGE_SCHEMES)
+        if schemes:
+            summary["challenge_schemes"] = schemes
     summary["set_cookie_metadata"] = [
         cookie for cookie in (
             cookie_metadata(value) for value in response.headers.get_list("set-cookie")[:50]
@@ -941,6 +996,9 @@ async def execute_bound_http_request(
     if follow_redirects:
         result["redirect_chain"] = redirect_chain
         result["hops_followed"] = hops_followed
+    if prefetch_view is not None:
+        result["form_prefetch"] = prefetch_view
+        result["prefetch_requests"] = 1
     if active_withheld_values() is not None:
         # Inside a Hunt worker the result is the planner's view: every public URL field's secret
         # parameters become references (N56), for a plain GET as for a bound workflow request.

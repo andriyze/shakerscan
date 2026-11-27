@@ -250,7 +250,9 @@ class InjectionVerifyAdapter:
         self.requested_budget = {str(k): int(v) for k, v in requested_budget.items()}
         self.field = field
         self.classes = tuple(classes)
-        self.writes = self.request.method not in {"GET", "HEAD", "OPTIONS"}
+        # A GraphQL query sent by POST is a read; a mutation is not.
+        self.writes = self.request.method not in {"GET", "HEAD", "OPTIONS"} and not (
+            field.startswith("graphql:") and self.candidate.get("request_class") == "safe_read")
         self.seed = f"{self.candidate.get('candidate_id') or ''}:{field}"
 
     # -- request building -------------------------------------------------------------------

@@ -70,6 +70,7 @@ CAPABILITY_FLAGS: Mapping[str, tuple[str, ...]] = {
     "active-testing": ("active_testing",),
     "state-changing": ("active_testing", "allow_state_changing_http"),
     "oob": ("active_testing", "allow_oob_interactions"),
+    "account-creation": ("active_testing", "allow_state_changing_http", "allow_account_creation"),
     "tcp-discovery": ("active_testing", "network_discovery"),
     "active-replay": ("active_testing", "allow_state_changing_http"),
 }

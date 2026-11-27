@@ -180,8 +180,9 @@ def test_finish_guard_refuses_open_coverage_with_time_left_and_names_it():
 
 def test_finish_guard_lets_the_hunt_finish_when_it_should():
     report = build_coverage(actions=[], endpoints=[_endpoint("/search", params="q")])
-    # Forced with a reason after half the open pairs closed; refused when forced without one.
-    assert finish_guard(_run(), report, force=True, force_reason="the person asked to stop now", now=NOW) is None
+    # Forced with a reason once a third of the wall has passed; refused when forced without one.
+    later = _run(created_at=NOW - timedelta(minutes=40))
+    assert finish_guard(later, report, force=True, force_reason="the person asked to stop now", now=NOW) is None
     assert "force_reason" in finish_guard(_run(), report, force=True, force_reason=" ", now=NOW)
     # Wall nearly spent, HTTP budget spent, budget exhausted, not a web Hunt, nothing open.
     late = _run(created_at=NOW - timedelta(seconds=5400 - 30))
@@ -206,3 +207,124 @@ def test_an_exposure_closes_by_judgement_or_a_refusal_not_by_a_bare_request():
                                      "status": "negative"}])
     open_routes = {item["endpoint"]: item["untested"] for item in report["open"]}
     assert open_routes == {"GET /.env": ["exposure"]}
+
+
+def test_the_inputs_a_hunt_request_carried_become_the_routes_inputs():
+    report = build_coverage(endpoints=[], actions=[
+        _action("http.request", method="GET", path="/rest/track", query={"id": "1", "bad name!": "x"}),
+        _action("http.request", method="POST", path="/api/feedback", json_body={"comment": "x", "rating": 1}),
+        _action("http.request", method="POST", path="/profile", form_body={"bio": "x"}),
+        # A default-credential attempt names a sign-in's fields, which the sign-in checks cover.
+        _action("http.request", method="POST", path="/api/login", json_body={"username": "", "password": ""},
+                request_bindings=[{"default_credential": "dc-01", "credential_field": "username",
+                                   "body_pointer": "/username"}]),
+    ])
+    params = {item["endpoint"]: item["params"] for item in report["open"]}
+    assert params["GET /rest/track"] == ["id"]
+    assert params["POST /api/feedback"] == ["comment", "rating"]
+    assert params["POST /profile"] == ["bio"]
+    assert params.get("POST /api/login", []) == []
+    track = next(item for item in report["open"] if item["endpoint"] == "GET /rest/track")
+    assert {"sqli", "xss"} <= set(track["untested"])
+
+
+def test_a_following_sweep_is_not_pending_discovery():
+    running = build_coverage(endpoints=[], actions=[], discovery={"running": True, "sweep": "running"})
+    following = build_coverage(endpoints=[], actions=[], discovery={"running": True, "sweep": "following"})
+    assert "auto_discovery" in running["discovery"]["pending"]
+    assert following["discovery"]["pending"] == []
+    assert following["discovery"]["steps"]["sweep"] == "following"
+
+
+def test_a_request_check_closes_the_class_its_proof_covers():
+    endpoints = [_endpoint("/rest/user/security-question", params="email"), _endpoint("/backup/db.sql")]
+    before = build_coverage(endpoints=endpoints, actions=[])
+    opened = {item["endpoint"]: set(item["untested"]) for item in before["open"]}
+    assert "sqli" in opened["GET /rest/user/security-question"] and "exposure" in opened["GET /backup/db.sql"]
+    after = build_coverage(endpoints=endpoints, actions=[
+        _action("request.verify", check="sql_injection", method="GET", path="/rest/user/security-question",
+                query={"email": "1"}, parameter="email"),
+        _action("request.verify", check="exposure", method="GET", path="/backup/db.sql"),
+        _action("request.verify", check="cors", method="GET", path="/backup/db.sql"),
+    ])
+    closed = {item["endpoint"]: set(item["untested"]) for item in after["open"]}
+    assert "sqli" not in closed.get("GET /rest/user/security-question", set())
+    assert "xss" in closed["GET /rest/user/security-question"]  # only xss.verify settles it
+    assert "exposure" not in closed.get("GET /backup/db.sql", set())
+
+
+def test_a_route_reached_with_the_hunts_own_login_carries_that_identity_by_reference():
+    login = [{"source_action_id": "11111111-1111-4111-8111-111111111111", "capture_name": "token",
+              "header": "Authorization", "prefix": "Bearer "}]
+    report = build_coverage(endpoints=[], actions=[
+        _action("http.request", method="GET", path="/rest/basket/1", request_bindings=login),
+        _action("http.request", method="GET", path="/rest/refused/1", http_status=401, request_bindings=login),
+        # A managed credential or a default pair is not a captured login.
+        _action("http.request", method="GET", path="/rest/other/1",
+                request_bindings=[{"principal": "primary", "credential_field": "secret", "header": "X-Key"}]),
+    ])
+    items = {item["endpoint"]: item for item in report["open"]}
+    assert items["GET /rest/basket/{id}"]["identity"] == login
+    assert "identity" not in items["GET /rest/refused/{id}"] and "identity" not in items["GET /rest/other/{id}"]
+
+
+def test_a_signed_in_route_with_nothing_open_is_still_listed_for_the_sweep():
+    login = [{"withheld_ref": "withheld://hunt/11111111-1111-4111-8111-111111111111/1",
+              "header": "Authorization", "prefix": "Bearer "}]
+    report = build_coverage(endpoints=[], actions=[
+        _action("http.request", method="GET", path="/static/app.css", request_bindings=login),
+        _action("http.request", method="GET", path="/rest/basket/1", request_bindings=login),
+    ], candidates=[{"family": "bola", "canonical_locus": {"path": "/rest/basket/1", "method": "GET"}}])
+    opened = {item["endpoint"] for item in report["open"]}
+    signed = {item["endpoint"]: item for item in report.get("signed_in", [])}
+    assert set(signed) | opened >= {"GET /rest/basket/{id}", "GET /static/app.css"}
+    assert all(item["identity"] == login and item["untested"] == [] for item in signed.values())
+    assert report["pairs_open"] == sum(len(item["untested"]) for item in report["open"])
+
+
+def test_every_answer_names_ready_calls_and_an_early_forced_finish_gets_them_back():
+    report = build_coverage(actions=[], endpoints=[_endpoint("/search", params="q"), _endpoint("/.env"),
+                                                   _endpoint("/api/login", method="POST")])
+    calls = coverage_map.next_calls(report)
+    assert calls and len(calls) <= coverage_map.NEXT_CALLS
+    by_capability = {call["capability"] for call in calls}
+    assert by_capability <= {"request.verify", "xss.verify", "http.request"} and all(call["input"] for call in calls)
+    search = next(call for call in calls if "/search" in json.dumps(call))
+    assert search["input"]["parameter"] == "q" or search["capability"] == "xss.verify"
+    assert compact_open_coverage(report, "h1")["next_calls"] == calls
+    # Five minutes into a 90-minute Hunt a forced finish is refused with the calls to send.
+    early = finish_guard(_run(), report, force=True, force_reason="I think I am done here", now=NOW)
+    assert early and "Too early to finish" in early and calls[0]["capability"] in early
+    # Not once a third of the wall has passed, nor on a spent budget, nor with nothing concrete open.
+    assert finish_guard(_run(created_at=NOW - timedelta(minutes=31)), report, force=True,
+                        force_reason="I think I am done here", now=NOW) is None
+    assert finish_guard(_run(status="budget_exhausted"), report, force=True, force_reason="spent, stopping", now=NOW) is None
+    nothing = build_coverage(actions=[], endpoints=[])
+    assert finish_guard(_run(), nothing, force=True, force_reason="nothing left to do", now=NOW) is None
+    # The unforced refusal hands the same calls over.
+    assert "Send next (ready to send)" in finish_guard(_run(), report, force=False, force_reason=None, now=NOW)
+
+
+def test_next_calls_name_only_capabilities_the_hunt_may_run():
+    endpoints = [_endpoint("/search", params="q"), _endpoint("/.env")]
+    narrow = build_coverage(actions=[], endpoints=endpoints, allowed=["http.request"])
+    assert narrow["allowed"] == ["http.request"]
+    assert all(call["capability"] == "http.request" for call in coverage_map.next_calls(narrow))
+    # Nothing it may run is open: a forced finish is not held early.
+    none = build_coverage(actions=[], endpoints=endpoints, allowed=["web.crawl"])
+    assert coverage_map.next_calls(none) == []
+    assert finish_guard(_run(), none, force=True, force_reason="nothing I may run is left", now=NOW) is None
+
+
+def test_default_credential_calls_are_not_offered_when_the_check_is_off(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_HUNT_DEFAULT_CREDENTIALS", "false")
+    report = build_coverage(actions=[], endpoints=[_endpoint("/api/login", method="POST")])
+    assert not any("default credentials" in call["why"] for call in coverage_map.next_calls(report))
+
+
+def test_a_request_check_never_closes_a_class_it_does_not_prove():
+    endpoints = [_endpoint("/convert", params="file")]
+    report = build_coverage(endpoints=endpoints, actions=[
+        _action("request.verify", check="crlf_injection", method="GET", path="/convert", parameter="file")])
+    left = {k for item in report["open"] for k in item["untested"]}
+    assert {"sqli", "xss"} <= left  # only sql_injection (sqli) and xss.verify (xss) settle those

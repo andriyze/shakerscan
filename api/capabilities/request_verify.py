@@ -99,11 +99,11 @@ REQUEST_VERIFY_PARSER_VERSION = "request-verify/v1"
 REQUEST_CHECKS = (
     "open_redirect", "crlf_injection", "host_header_injection", "cors", "security_headers",
     "directory_listing", "graphql", "file_upload", "rate_limit", "csrf", "ldap_injection", "jwt",
-    "unauthenticated_api", "exposure",
+    "unauthenticated_api", "exposure", "mass_assignment",
 )
 # Checks that mutate one named input (``parameter``).
 FIELD_CHECKS = frozenset({
-    "open_redirect", "crlf_injection", "file_upload", "rate_limit", "ldap_injection",
+    "open_redirect", "crlf_injection", "file_upload", "rate_limit", "ldap_injection", "mass_assignment",
 })
 PROOF_CONTRACTS = {
     "open_redirect": "request_open_redirect_differential/v1",
@@ -127,6 +127,7 @@ PROOF_CONTRACTS = {
     "ldap_injection": "request_ldap_wildcard_differential/v1",
     "jwt": jwt_forgery.JWT_FORGERY_CONTRACT,
     "unauthenticated_api": "request_anonymous_product_api_repeated/v1",
+    "mass_assignment": "request_registration_privilege_readback/v1",
 }
 # ``exposure`` carries the Scan exposure class's own proof contract (exposure_signature_contract).
 MINIMUM_REQUESTS = 4
@@ -792,6 +793,11 @@ class RequestVerifier:
             )
         return self.observation(not_proven_reason="refusal_not_recognised")
 
+    async def _mass_assignment(self, baseline: ReplayTransportResult | None) -> dict[str, Any]:
+        """A sign-up that stores a privileged field its user chose (capabilities/registration_mass_assignment)."""
+        from .registration_mass_assignment import prove
+        return await prove(self)
+
     async def _csrf(self, baseline: ReplayTransportResult) -> dict[str, Any]:
         if not self.writes:
             raise RequestVerifyError("csrf needs a state-changing request (POST, PUT, PATCH or DELETE)")
@@ -961,8 +967,8 @@ class RequestVerifyAdapter:
         baseline = None
         classified_short = False
         try:
-            if self.check == "file_upload":
-                # An upload builds each request it sends; the bare request is never sent.
+            if self.check in {"file_upload", "mass_assignment"}:
+                # An upload or a sign-up builds each request it sends; the bare request is never sent.
                 observations.extend(await verifier.run(None))
             else:
                 baseline = await send(self.request)

@@ -21,6 +21,7 @@ try:
     from capabilities.authentication_proof import successful_token_signals
     from capabilities.request_mutation import (
         RequestMutationVerificationError,
+        graphql_field_value,
         replace_private_request_field,
     )
     from capabilities.sql_error_signatures import SQL_ERROR_PATTERNS
@@ -37,6 +38,7 @@ except ModuleNotFoundError:
     from .authentication_proof import successful_token_signals
     from .request_mutation import (
         RequestMutationVerificationError,
+        graphql_field_value,
         replace_private_request_field,
     )
     from .sql_error_signatures import SQL_ERROR_PATTERNS
@@ -132,9 +134,20 @@ def _replace_query_field(
     )))
 
 
+def _graphql_read(candidate: Mapping[str, Any]) -> bool:
+    """A GraphQL query sent by POST: a read (the GraphQL spec), unlike a mutation."""
+    return (str(candidate.get("field_path") or "").startswith("graphql:")
+            and candidate.get("request_class") == "safe_read")
+
+
 def _field_value(request: ReplayRequest, field_path: str, path_index: int | None = None) -> str:
     if path_index is not None:
         return path_field_value(request, path_index)
+    if field_path.startswith("graphql:"):
+        try:
+            return graphql_field_value(request, field_path)
+        except RequestMutationVerificationError:
+            return ""
     parsed = urllib.parse.urlsplit(request.url)
     values = [value for name, value in urllib.parse.parse_qsl(
         parsed.query, keep_blank_values=True,
@@ -217,7 +230,7 @@ class SQLiProofAdapter:
             raise SQLiProofError("SQLi proof capability is invalid")
         if int(requested_budget.get("http_requests") or 0) < 4:
             raise SQLiProofError("SQLi proof requires at least four HTTP requests")
-        if request.method not in {"GET", "HEAD", "OPTIONS"} and int(
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and not _graphql_read(candidate) and int(
             requested_budget.get("state_changing_requests") or 0
         ) < int(requested_budget.get("http_requests") or 0):
             raise SQLiProofError(

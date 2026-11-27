@@ -69,8 +69,10 @@ def _json(value: Any, default: Any) -> Any:
 
 
 def _uuid(value: Any) -> uuid.UUID | None:
+    """An evidence reference's action id: the bare id, or the ``action:<id>`` form candidates use
+    elsewhere (the engine's own sweep cites its attempts that way)."""
     try:
-        return uuid.UUID(str(value))
+        return uuid.UUID(str(value).strip().removeprefix("action:"))
     except (TypeError, ValueError):
         return None
 
@@ -110,6 +112,12 @@ def build_request(shape: Mapping[str, Any], *, username: str | None, secret: str
     """The login request for one proof step, from the recorded shape and the server's values."""
     url = urllib.parse.urlsplit(str(shape["login_url"]))
     origin = f"{url.scheme}://{url.netloc}"
+    if shape.get("body_kind") == dc.BASIC_FIELD:
+        import base64
+        token = base64.b64encode(f"{username or ''}:{secret}".encode()).decode("ascii")
+        # ``trusted_headers`` never reaches the wire input: the sender passes it beside the request.
+        return {"method": "GET", "origin": origin, "path": url.path or "/", "follow_redirects": False,
+                "trusted_headers": {"Authorization": f"Basic {token}"}}
     body_kind = "json_body" if shape.get("body_kind") == "json" else "form_body"
     body = copy.deepcopy(dict(shape.get("body") or {}))
     try:
@@ -119,8 +127,13 @@ def build_request(shape: Mapping[str, Any], *, username: str | None, secret: str
     if shape.get("user_pointer") and username is not None:
         pointer_set(body, str(shape["user_pointer"]), username)
     pointer_set(body, str(shape["secret_pointer"]), secret)
-    return {"method": "POST", "origin": origin, "path": url.path or "/", body_kind: body,
-            "follow_redirects": False}
+    request = {"method": "POST", "origin": origin, "path": url.path or "/", body_kind: body,
+               "follow_redirects": False}
+    if shape.get("form_prefetch") is True and body_kind == "form_body":
+        request["form_prefetch"] = True
+        if shape.get("form_page"):
+            request["form_page"] = str(shape["form_page"])
+    return request
 
 
 async def _admit(conn: Any, *, run: Mapping[str, Any], login_key: str, pair_id: str, reserve: int) -> None:
@@ -172,7 +185,7 @@ async def run_proof(
     pair = dc.pair(attempt["pair_id"])
     if pair is None:
         raise DefaultCredentialProofRefused("default_credentials_evidence_missing", "Unknown pair reference.")
-    username = pair[0] if shape.get("user_pointer") else None
+    username = pair[0] if shape.get("user_pointer") or shape.get("body_kind") == dc.BASIC_FIELD else None
     control_secret = "shakerscan-control-" + secrets.token_urlsafe(18)
     steps = (("pair", attempt["pair_id"], pair[1]), ("control", CONTROL_PAIR, control_secret))
     send = send or _worker_sender(pool, run=run, context=context, policy=policy, action_id=action_id)
@@ -337,6 +350,8 @@ def _worker_sender(pool: Any, *, run: Mapping[str, Any], context: Mapping[str, A
     target, target_url = web_hunt_target(run, context, policy)
 
     async def send(request: Mapping[str, Any]) -> str:
+        request = dict(request)
+        trusted = request.pop("trusted_headers", None)
         login_url = str(request["origin"]) + str(request["path"])
         archived, record = http_archive.hunt_run_call_recorder(
             run, action_id=action_id, capability_name="candidate.verify",
@@ -348,12 +363,14 @@ def _worker_sender(pool: Any, *, run: Mapping[str, Any], context: Mapping[str, A
                 verdicts.append(dc.classify_response(
                     status=private.status_code, headers=private.headers(),
                     cookie_names=sorted(private.cookies()), body=private.body(),
-                    location=private.headers().get("location"), login_path=str(request["path"])))
+                    location=private.headers().get("location"), login_path=str(request["path"]),
+                    basic=trusted is not None))
             except Exception:  # noqa: BLE001 - target content never fails the proof step
                 verdicts.append("unclear")
 
         await execute_bound_http_request(
-            login_url, dict(request), target=target, allow_write=True,
+            login_url, dict(request), target=target, allow_write=trusted is None,
+            **({"trusted_headers": trusted} if trusted is not None else {}),
             transaction_recorder=lambda captured: record({**captured, "workflow_values_private": True}),
             principal_slot="workflow_binding", timeout_seconds=30,
             allow_bound_origin_redirects=False, private_response_sink=sink,

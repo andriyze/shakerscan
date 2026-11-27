@@ -33,6 +33,10 @@ routing:
   - malformed_input
   - dependency_failure
   - logging_or_alerting_control
+  - Werkzeug_debugger
+  - Spring_Boot_Actuator
+  - debug_console
+  - stack_trace
   indicators:
   - exposed_configuration
   - fail_open

@@ -32,6 +32,10 @@ routing:
   - XML_parser
   - document_parser
   - filename_or_storage_key
+  - path_traversal
+  - local_file_inclusion
+  - LFI
+  - XXE
   indicators:
   - owner_canary_read
   - controlled_OOB_entity_resolution

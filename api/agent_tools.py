@@ -748,8 +748,10 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
 # Statuses content discovery reports. Every redirect status counts, as the path-lead readers
 # count them (corporate_identity, recon_active): a 303 to a sign-in page is how many applications
 # answer an unauthenticated request for their root. A host that redirects every path the same way
-# is caught by the negative-control probes (scan/negative_control.py), not by this list.
-FFUF_MATCH_CODES = "200,204,301,302,303,307,308,401,403,405"
+# is caught by the negative-control probes (scan/negative_control.py), not by this list. A 422 is a
+# route that exists and refused its missing or invalid input (the validation answer of many API
+# frameworks): measured, two routes whose inputs the 422 named were found and then dropped here.
+FFUF_MATCH_CODES = "200,204,301,302,303,307,308,401,403,405,422"
 
 
 def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:

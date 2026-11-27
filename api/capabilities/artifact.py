@@ -70,6 +70,16 @@ _JWT_RE = re.compile(r"(?<![A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,
 _ROUTE_RE = re.compile(
     r"[\"']((?:/api|/rest|/graphql|/rpc|/auth|/admin)(?:/[A-Za-z0-9._~!$&'()*+,;=:@%{}$-]*)*)[\"']"
 )
+# API paths a bundle keeps without a leading slash, or under a service prefix
+# (``"identity/api/v2/vehicle/vehicles"``, ``"/workshop/api/shop/products"``): an ``api``/``rest``/
+# ``graphql``/``rpc`` segment within the first four. Reported with a leading slash.
+_API_SEGMENT_ROUTE_RE = re.compile(
+    r"[\"'`](/?(?:[A-Za-z0-9_.~-]+/){0,3}(?:api|rest|graphql|rpc)(?:/[A-Za-z0-9._~!$&()*+,;=:@%{}-]*)+)[\"'`]"
+)
+# The bases a bundle joins relative API paths to at runtime: single-segment strings such as
+# ``"identity/"`` or ``"/workshop/"`` (crAPI keeps ``fg="identity/"`` beside ``LOGIN:"api/auth/login"``).
+_BASE_PREFIX_RE = re.compile(r"[\"'`]/?([a-z][a-z0-9_-]{1,30})/[\"'`]")
+MAX_BASE_PREFIXES = 8
 _SUPABASE_RE = re.compile(r"https://[a-z0-9-]{3,80}\.supabase\.co", re.I)
 _SOURCE_MAP_RE = re.compile(r"sourceMappingURL\s*=\s*([^\s*]+)")
 
@@ -177,7 +187,27 @@ def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[st
                        'query_parameter_names': [_masked_string(str(p), 80) for p in request.get('params', [])[:30]],
                        'body_parameter_names': [_masked_string(str(p), 80) for p in request.get('body_params', [])[:30]],
                        'reachability': 'unverified', 'provenance': 'static_http_call'})
-    routes = sorted({_masked_string(route, 500) for route in set(_ROUTE_RE.findall(text))}
+    found = set(_ROUTE_RE.findall(text))
+    relative: list[str] = []
+    for route in _API_SEGMENT_ROUTE_RE.findall(text):
+        if "//" not in route and not route.lstrip("/").startswith((".", "node_modules")):
+            found.add("/" + route.lstrip("/"))
+            if not route.startswith("/") and route not in relative:
+                relative.append(route)
+    # A relative path is joined to a base at runtime; each base the bundle names is a candidate
+    # (the sweep's own requests tell which answer).
+    bases = []
+    for base in _BASE_PREFIX_RE.findall(text):
+        if base not in bases and base not in {"api", "rest", "graphql", "rpc", "static", "assets"}:
+            bases.append(base)
+        if len(bases) >= MAX_BASE_PREFIXES:
+            break
+    for route in relative:
+        if route.split("/", 1)[0] in bases:
+            continue  # already under a base
+        for base in bases:
+            found.add(f"/{base}/{route}")
+    routes = sorted({_masked_string(route, 500) for route in found}
                     | {shape['url'] for shape in shapes})[:200]
     # A reference the bundle's end cuts is skipped as a cut token is: masked alone, a piece of a
     # userinfo password or a key in its path would show.
@@ -917,6 +947,12 @@ async def analyze_target_javascript(
         analysis["withheld_values"] = collector.entries(json.dumps(
             [analysis["jwt_observations"], analysis["routes"], analysis["source_maps"]],
             ensure_ascii=False))
+    spec_routes = _api_description_routes(target_url, path, body, private.headers().get("content-type"))
+    if spec_routes is not None:
+        # The document is an API description (OpenAPI/Swagger): the routes it declares, parsed
+        # here where the whole body is (a long spec passes a request's answer sample; a server
+        # that ignores byte ranges cannot be read in windows).
+        analysis["api_description_routes"] = spec_routes
     analysis.update({
         "kind": "javascript_analysis",
         "path": path,
@@ -930,6 +966,39 @@ async def analyze_target_javascript(
         "observation": analysis,
         "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
     }
+
+
+MAX_API_DESCRIPTION_ROUTES = 500
+
+
+def _api_description_routes(target_url: str, path: str, body: bytes, content_type: Any) -> list[dict[str, Any]] | None:
+    """``[{method, path, body_field_names, content_type}]`` of an OpenAPI/Swagger document, else None."""
+    start = body[:4096]
+    # Only a document that names itself as one near its start; a script bundle never reaches the parser.
+    if start.lstrip()[:1] not in {b"{", b"o", b"s", b"-", b"#"} or not (b"openapi" in start or b"swagger" in start):
+        return None
+    try:
+        from capabilities.spec_ingest import ingest_spec_bodies
+    except ModuleNotFoundError:  # package import layout
+        from api.capabilities.spec_ingest import ingest_spec_bodies
+    parts = urllib.parse.urlsplit(target_url)
+    origin = urllib.parse.urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+    try:
+        records = ingest_spec_bodies([(origin + path, body, str(content_type or "") or None)], origin=origin)
+    except Exception:  # noqa: BLE001 - untrusted document
+        return None
+    routes: list[dict[str, Any]] = []
+    for record in records[:MAX_API_DESCRIPTION_ROUTES]:
+        url = str(record.get("url") or "")
+        if not url.startswith(origin):
+            continue
+        routes.append({
+            "method": str(record.get("method") or "GET").upper(),
+            "path": _masked_string(url[len(origin):] or "/", 500),
+            "body_field_names": [_masked_string(str(name), 80) for name in record.get("body_field_names") or ()][:30],
+            "content_type": str(record.get("content_type") or "")[:100],
+        })
+    return routes or None
 
 
 __all__ = [

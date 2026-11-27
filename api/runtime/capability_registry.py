@@ -309,6 +309,7 @@ class CapabilityRegistry:
                 "capability input exceeds the 65536-byte limit"
             )
         _validate_schema_value(spec.input_schema, value, path="input", depth=0)
+        _validate_login_bindings(spec.name, value)
         if spec.name == "http.request":
             try:
                 validate_http_request_input(value)
@@ -343,18 +344,34 @@ class CapabilityRegistry:
                 validate_hunt_scanner_input(name, value)
             except HuntScannerInputError as exc:
                 raise CapabilityInputContractError(str(exc)) from exc
+        _validate_login_bindings(name, value)
         if name == "authz.verify":
             session_keys = {"primary_session_ref", "secondary_session_ref"}
             principal_keys = {"primary_principal", "secondary_principal"}
-            if not (session_keys <= value.keys()) and not (principal_keys <= value.keys()):
+            captured_keys = {"primary_bindings", "secondary_bindings"}
+            modes = [keys for keys in (session_keys, principal_keys, captured_keys) if keys & value.keys()]
+            if len(modes) != 1 or not (modes[0] <= value.keys()):
                 raise CapabilityInputContractError(
-                    "authz.verify requires both session refs or both managed principals"
-                )
-            if (session_keys & value.keys()) and (principal_keys & value.keys()):
-                raise CapabilityInputContractError(
-                    "authz.verify cannot mix sessions and managed principals"
+                    "authz.verify requires both session refs, both managed principals, or both "
+                    "captured logins (primary_bindings and secondary_bindings), and never a mix"
                 )
         return dict(value)
+
+
+def _validate_login_bindings(name: str, value: Mapping[str, Any]) -> None:
+    """A captured-login binding names its value one way: a response capture or a withheld value
+    (the bounded schema subset has no nested oneOf, so it is enforced here). ``http.request``
+    has its own binding contract."""
+    if name == "http.request":
+        return
+    for key in ("request_bindings", "primary_bindings", "secondary_bindings"):
+        entries = value.get(key)
+        for item in entries if isinstance(entries, (list, tuple)) else ():
+            if isinstance(item, Mapping) and (
+                    ("withheld_ref" in item) == ("source_action_id" in item)
+                    or ("source_action_id" in item) != ("capture_name" in item)):
+                raise CapabilityInputContractError(
+                    f"input.{key} entries name one value: source_action_id with capture_name, or withheld_ref")
 
 
 def _validate_schema_value(
@@ -472,8 +489,12 @@ _HTTP_PRINCIPAL_BINDING_PROPERTIES: Mapping[str, Any] = MappingProxyType({
 _ARTIFACT_REQUEST_BINDINGS: Mapping[str, Any] = {
     "type": "array", "maxItems": 4, "items": {
         "type": "object", "additionalProperties": False,
-        "required": ["source_action_id", "capture_name", "header"],
+        "required": ["header"],
+        "oneOf": [{"required": ["source_action_id", "capture_name"]}, {"required": ["withheld_ref"]}],
         "properties": {
+            # A value this Hunt withheld from an answer (withheld_values[].ref), e.g. a sign-in's token;
+            # its form (withheld://hunt/<action id>/<n>) is checked where it is resolved.
+            "withheld_ref": {"type": "string", "maxLength": 80},
             "source_action_id": {"type": "string", "maxLength": 36,
                 "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
             "capture_name": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$"},
@@ -1508,6 +1529,12 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
                 "follow_redirects": {"type": "boolean"},
+                "form_prefetch": {"type": "boolean", "description": (
+                    "A form POST (form_body) that first GETs its page (form_page, else its own path) "
+                    "and sends that form's hidden fields (an anti-CSRF token) and the page's cookies "
+                    "with it; the request's own fields win. Two requests.")},
+                "form_page": {"type": "string", "maxLength": 2048,
+                              "description": "The page holding the form, for form_prefetch."},
                 "session_ref": {
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -1720,8 +1747,13 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=True,
             hunt_executor="worker_http",
             planner_input_schema=_schema({
-                "mode":{"type":"string","enum":["object","selected_object","function"],"default":"object",
-                    "description":"selected_object compares two ordered owner/object references, including opaque slug IDs; access evidence alone never proves entitlement."},
+                "mode":{"type":"string","enum":["object","selected_object","function","planted_object"],"default":"object",
+                    "description":("selected_object compares two ordered owner/object references, including opaque slug IDs; access evidence alone never proves entitlement. "
+                        "planted_object: routes [object, its listing]; proves the other principal reads a private value one principal planted.")},
+                "create_action_id": {"type": "string", "maxLength": 36,
+                    "description": "planted_object: the http.request that created the object as one principal."},
+                "planted_field": {"type": "string", "maxLength": 120,
+                    "description": "planted_object: the private body field it planted."},
                 "origin": _SERVICE_ORIGIN_PROPERTY,
                 "primary_principal": {"type": "string", "enum": ["primary"]},
                 "secondary_principal": {"type": "string", "enum": ["secondary"]},
@@ -1733,6 +1765,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
                 },
+                # Two logins this Hunt made itself (two accounts it registered or signed in to), each
+                # by reference to what its sign-in captured. The server refuses them unless its own
+                # records show two different accounts.
+                "primary_bindings": _ARTIFACT_REQUEST_BINDINGS,
+                "secondary_bindings": _ARTIFACT_REQUEST_BINDINGS,
                 "routes": {
                     "type": "array",
                     "items": {"type": "string", "maxLength": 4_000},
@@ -1742,6 +1779,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             }, required=("routes",)) | {"oneOf": [
                 {"required": ["primary_session_ref", "secondary_session_ref"]},
                 {"required": ["primary_principal", "secondary_principal"]},
+                {"required": ["primary_bindings", "secondary_bindings"]},
             ]},
         ),
         CapabilitySpec(

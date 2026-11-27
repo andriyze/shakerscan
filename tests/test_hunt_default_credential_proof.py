@@ -99,3 +99,21 @@ def test_the_control_reference_is_never_a_pair_a_planner_can_bind():
     with pytest.raises(ValueError):
         dc.validate_request_shape({"method": "POST", "form_body": {"p": ""}, "request_bindings": [
             {"default_credential": proof.CONTROL_PAIR, "credential_field": "secret", "body_pointer": "/p"}]})
+
+
+def test_an_http_basic_step_is_a_get_with_the_pair_as_a_trusted_header():
+    import base64
+    shape = {"login_url": "http://t.test:8080/manager/html", "body_kind": "basic", "body": {},
+             "user_pointer": None, "secret_pointer": None, "replayable": True}
+    request = proof.build_request(shape, username="tomcat", secret="control-x")
+    assert request["method"] == "GET" and request["path"] == "/manager/html"
+    assert request["origin"] == "http://t.test:8080" and "form_body" not in request and "json_body" not in request
+    scheme, token = request["trusted_headers"]["Authorization"].split(" ", 1)
+    assert scheme == "Basic" and base64.b64decode(token) == b"tomcat:control-x"
+
+
+def test_an_evidence_reference_names_its_action_bare_or_with_the_action_prefix():
+    # The sweep cites "action:<id>"; a candidate so cited was refused as citing no action.
+    action = "473cdf19-e9d5-5b3d-b92a-ff1a15e67ad3"
+    assert str(proof._uuid(action)) == action and str(proof._uuid(f"action:{action}")) == action
+    assert proof._uuid("action:not-an-id") is None and proof._uuid("candidate:" + action) is None

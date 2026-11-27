@@ -139,13 +139,14 @@ def test_attempts_are_paced_and_the_pace_refusal_records_nothing(env, monkeypatc
     run(env, scenario())
 
 
-def test_at_most_four_logins_per_hunt(env):
+def test_logins_per_hunt_are_bounded(env):
     async def scenario():
         hunt = await env.hunt(policy=ACTIVE, budget=BUDGET)
         for index in range(dc.MAX_LOGINS_PER_HUNT):
             assert await env.call(hunt, f"default-cred-{index:04d}", values=attempt(path=f"/l{index}/login")) == "admitted"
-        fifth = await refused(env, hunt, "default-cred-0100", attempt(path="/l9/login"))
-        assert fifth.detail["reason_code"] == "default_credentials_exhausted"
+        assert dc.MAX_LOGINS_PER_HUNT == 12
+        over = await refused(env, hunt, "default-cred-0100", attempt(path="/one-more/login"))
+        assert over.detail["reason_code"] == "default_credentials_exhausted"
 
     run(env, scenario())
 

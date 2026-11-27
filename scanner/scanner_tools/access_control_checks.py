@@ -2073,7 +2073,7 @@ def _resource_replay_candidates(
     consumer_templates: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Build read-safe candidates; spend the existing replay cap on related resources first."""
-    from .authz_replay_routing import prioritize_replay_candidates
+    from .authz_replay_routing import fits_template, prioritize_replay_candidates
 
     object_id = str(ref.get("object_id") or "").strip()
     object_key = str(ref.get("object_id_key") or "id")
@@ -2091,6 +2091,8 @@ def _resource_replay_candidates(
     # The upstream inventory is bounded at 80. Rank before truncating: the
     # first five unrelated templates must not hide the correct consumer.
     for template_url in (consumer_templates or [])[:80]:
+        if not fits_template(object_id, template_url):
+            continue
         candidate = _replace_discovered_consumer_id(
             template_url, object_id, object_id_key=object_key,
         )
@@ -3143,6 +3145,12 @@ async def authz_resource_replay_test(
         )
         results["producer_ids_found"] += len(user1_refs)
 
+        # The replay cap goes first to the ids a mapped object route takes (its UUID, not the
+        # row's integer id, where the route is addressed by UUID).
+        from .authz_replay_routing import fits_template, template_id_shapes
+        user1_refs = sorted(user1_refs, key=lambda ref: not any(
+            template_id_shapes(template) and fits_template(str(ref.get("object_id") or ""), template)
+            for template in consumer_templates[:80]))
         for ref in user1_refs:
             if _stop_requested():
                 break

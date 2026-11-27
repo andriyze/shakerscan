@@ -87,3 +87,31 @@ def test_malformed_or_conflicting_path_authority_is_refused_before_traffic(chang
     with pytest.raises(SQLiProofError):
         _run(_request(url='https://app.example.test/users/v1/name/1*'), candidate(**changes), transport)
     assert transport.requests == []
+
+
+def test_a_hunt_marked_string_segment_is_proven_through_the_bridge():
+    """VAmPI's /users/v1/{username}: sqlmap reports the planner's marked segment as ``#1*``; the
+    Hunt bridge dropped it (only query and body inputs were replayable) and the path proof took only
+    {int}/{uuid} routes, so a confirmed injection in a user name stayed a candidate."""
+    from api.hunt.scanner_sqli_proof import proof_request
+
+    class StringTransport(PathTransport):
+        async def send(self, request, **kwargs):
+            self.requests.append(request)
+            value = unquote(urlsplit(request.url).path.split('/')[3])
+            body = b'SQLite error: unrecognized token' if value.endswith("'") else b'{"user":"name1"}'
+            return ReplayTransportResult(status_code=200, connected_address='192.0.2.10',
+                final_url=request.url, response_headers={'Content-Type': 'application/json'},
+                response_body=body, elapsed_ms=5)
+
+    prepared = proof_request('https://app.example.test/users/v1/name1*', {}, '#1*', headers={}, action_id='a1')
+    assert prepared is not None
+    request, built = prepared
+    assert built['parameter_location'] == 'path' and built['path_segment_index'] == 3
+    assert built['canonical_path'] == '/users/v1/{segment}' and built['parameter_name'] == 'path_3'
+    transport = StringTransport()
+    result = _run(request, {**built, 'candidate_id': 'e' * 64}, transport)
+    assert result.observations[0]['proof_state'] == 'verified'
+    assert [urlsplit(r.url).path for r in transport.requests][:2] == ['/users/v1/name1', '/users/v1/name1%27']
+    # A path the planner did not mark is not a path input.
+    assert proof_request('https://app.example.test/users/v1/name1', {}, '#1*', headers={}, action_id='a1') is None

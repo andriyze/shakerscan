@@ -158,6 +158,45 @@ def _query_names(path: Any) -> set[str]:
     return {name for name, _ in urllib.parse.parse_qsl(query, keep_blank_values=True) if name}
 
 
+_INPUT_NAME = re.compile(r"[A-Za-z0-9_.\[\]-]{1,64}")
+MAX_REQUEST_INPUTS = 20
+
+
+def _request_inputs(values: Mapping[str, Any]) -> set[str]:
+    """The input names one request of this Hunt carried besides its path's query: the keys of
+    its ``query``/``params`` and of a JSON or form body object. A default-credential attempt
+    names a sign-in's own fields, which the sign-in checks already cover."""
+    if _uses_default_credential(values):
+        return set()
+    names: list[str] = []
+    for key in ("query", "params", "json_body", "form_body"):
+        value = values.get(key)
+        if isinstance(value, Mapping):
+            names += [str(name) for name in value if isinstance(name, str) and _INPUT_NAME.fullmatch(name)]
+    return set(names[:MAX_REQUEST_INPUTS])
+
+
+_CAPTURE_BINDING_KEYS = frozenset({"source_action_id", "capture_name", "withheld_ref", "header", "prefix"})
+
+
+def _capture_identity(values: Mapping[str, Any]) -> list[dict[str, str]] | None:
+    """The identity one request of this Hunt was sent as, when it is made only of values the
+    Hunt's own login captured (a session cookie, a bearer token): the bindings, by reference."""
+    bindings = values.get("request_bindings")
+    if not isinstance(bindings, list) or not 1 <= len(bindings) <= 4:
+        return None
+    found: list[dict[str, str]] = []
+    for item in bindings:
+        if not isinstance(item, Mapping) or not set(item) <= _CAPTURE_BINDING_KEYS:
+            return None
+        source = (("withheld_ref",) if item.get("withheld_ref") else ("source_action_id", "capture_name"))
+        if ("withheld_ref" in item) == ("source_action_id" in item) or not all(
+                isinstance(item.get(key), str) and item.get(key) for key in (*source, "header")):
+            return None
+        found.append({key: str(item[key]) for key in (*source, "header", "prefix") if key in item})
+    return found
+
+
 def _params(value: Any) -> set[str]:
     if isinstance(value, str):
         return {item.strip() for item in re.split(r"[,&;\s]+", value) if item.strip()}
@@ -208,6 +247,14 @@ _VERIFIER_CLASS = {
     "xss.verify": ("xss",),
     "authz.verify": ("object_authz", "function_authz", "unauthenticated_api"),
 }
+# What one request.verify check settles on its route: the class its deterministic proof covers.
+_REQUEST_CHECK_CLASS: Mapping[str, tuple[str, ...]] = {
+    "sql_injection": ("sqli",), "exposure": ("exposure",), "directory_listing": ("exposure",),
+    "unauthenticated_api": ("unauthenticated_api",), "graphql": ("graphql",),
+}
+# "injection" bundles the classes no single check proves: it closes on a route once both checks
+# every input of it gets (command and template injection) have run there.
+_INJECTION_CHECKS = frozenset({"command_injection", "template_injection"})
 _FAMILY_CLASSES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"sql", re.I), ("sqli",)),
     (re.compile(r"xss|cross.?site.?script", re.I), ("xss",)),
@@ -229,6 +276,7 @@ _LOOKED_AT = frozenset({"review", "exposure", "unauthenticated_api"})
 _NOTHING_SERVED = frozenset({401, 403, 404, 405, 407, 410})
 # Process-state keys of the discovery runner that are not step outcomes.
 _STATE_KEYS = frozenset({"running", "products", "notes", "probe_hits", "sweep_counts", "deferred_finish",
+                         "engine_accounts", "engine_writes",
                          "sweep_stats"})
 
 
@@ -334,6 +382,9 @@ def build_coverage(
     ledger = _Ledger()
     known: dict[tuple[str, str], dict[str, Any]] = {}
     ran: dict[str, str] = {}
+    ran_checks: dict[str, set[str]] = {}
+    # The signed-in identity this Hunt's own request last reached each route with (2xx answer).
+    identities: dict[str, list[dict[str, str]]] = {}
 
     def add(method: str, raw_path: str, params: Iterable[str], content_type: str, source: str) -> None:
         route = normalize_path(raw_path)
@@ -392,6 +443,12 @@ def build_coverage(
                 ledger.written.add(route)
             if name in _VERIFIER_CLASS:
                 ledger.close(route, _VERIFIER_CLASS[name])
+            if name == "request.verify":
+                check = str(values.get("check") or "")
+                ledger.close(route, _REQUEST_CHECK_CLASS.get(check, ()))
+                ran_checks.setdefault(route, set()).add(check)
+                if _INJECTION_CHECKS <= ran_checks[route]:
+                    ledger.close(route, ("injection",))
             if name == "http.request" and _uses_default_credential(values):
                 ledger.close(route, ("default_credentials",))
         found = _discovered_from_action(row)
@@ -401,8 +458,13 @@ def build_coverage(
                 ledger.statuses.setdefault(route, set()).add(http_status)
             # An answer that is not "absent" names a route that exists. The engine's own probes
             # enter the inventory through the runner's negative control, never from here.
+            if not is_probe and http_status is not None and 200 <= http_status < 300 and name == "http.request":
+                identity = _capture_identity(values)
+                if identity:
+                    identities[route] = identity
             if not is_probe and http_status is not None and http_status != 404 and http_status < 500:
-                add(method, path, (), content_type, "hunt_request")
+                # The inputs the request itself carried are the route's inputs: the sweep tests them.
+                add(method, path, _request_inputs(values), content_type, "hunt_request")
 
     for row in candidates:
         locus = _json(row.get("canonical_locus"), {})
@@ -436,8 +498,17 @@ def build_coverage(
                 "params": sorted(entry["params"])[:8],
                 "requested": route in ledger.requested,
                 "sources": sorted(entry["sources"])[:4],
+                # By reference only: the sweep sends its checks on this route as the same login.
+                **({"identity": identities[route]} if route in identities else {}),
             })
     items.sort(key=_item_rank)
+    # Routes reached with the Hunt's own login whose classes are all settled anonymously: the sweep
+    # still tests their inputs as that login. Not open coverage (nothing here holds a finish).
+    listed = {item["endpoint"] for item in items}
+    signed_in = [{"endpoint": f"{method} {route}", "untested": [], "params": sorted(entry["params"])[:8],
+                  "identity": identities[route]}
+                 for (method, route), entry in known.items()
+                 if route in identities and f"{method} {route}" not in listed][:MAX_PAGE]
     pairs_open = sum(len(item["untested"]) for item in items)
     state = dict(discovery or {})
     allowed_names = None if allowed is None else {str(name) for name in allowed}
@@ -456,7 +527,9 @@ def build_coverage(
     pending = sorted(step for step, value in steps.items()
                      if value in {"running", "queued"} and step in DISCOVERY_STEPS)
     not_run = sorted(step for step, value in steps.items() if value == "not_run" and step in DISCOVERY_STEPS)
-    if state.get("running"):
+    # A sweep that follows the Hunt has tested what was mapped and waits for the planner's own
+    # requests: nothing of the engine's is pending then.
+    if state.get("running") and state.get("sweep") != "following":
         pending = sorted(set(pending) | {"auto_discovery"})
     by_class: dict[str, int] = {}
     for item in items:
@@ -479,8 +552,13 @@ def build_coverage(
                       **({"planner_finished": True} if state.get("deferred_finish") else {}),
                       **({"sweep_stats": dict(state["sweep_stats"])}
                          if isinstance(state.get("sweep_stats"), Mapping) else {}),
-                      **({"notes": state["notes"]} if state.get("notes") else {})},
+                      **({"notes": state["notes"]} if state.get("notes") else {}),
+                      # What the engine made on the target (allow_account_creation), for clean-up.
+                      **({"engine_accounts": list(state["engine_accounts"])} if state.get("engine_accounts") else {}),
+                      **({"engine_writes": list(state["engine_writes"])} if state.get("engine_writes") else {})},
         "open": items,
+        **({"signed_in": signed_in} if signed_in else {}),
+        **({"allowed": sorted(allowed_names)} if allowed_names is not None else {}),
         "class_guide": {name: CLASS_GUIDE[name] for name in by_class},
     }
 
@@ -499,7 +577,8 @@ def coverage_page(report: Mapping[str, Any], *, limit: int = 50, offset: int = 0
     offset = max(0, int(offset or 0))
     page = items[offset:offset + limit]
     rest = {key: value for key, value in report.items() if key != "open"}
-    return {**rest, "open": page, "returned": len(page), "offset": offset,
+    calls = next_calls(report)
+    return {**rest, **({"next_calls": calls} if calls else {}), "open": page, "returned": len(page), "offset": offset,
             "has_more": offset + len(page) < len(items),
             "next_offset": offset + len(page) if offset + len(page) < len(items) else None}
 
@@ -523,6 +602,7 @@ def compact_open_coverage(report: Mapping[str, Any], hunt_id: str) -> dict[str, 
         **({"sweep_checks": discovery["sweep_checks"]} if discovery.get("sweep_checks") else {}),
         **({"discovery_not_run": list(discovery["not_run"])} if discovery.get("not_run") else {}),
         "next": [_item_line(item) for item in (report.get("open") or [])[:COMPACT_ITEMS]],
+        **({"next_calls": calls} if (calls := next_calls(report)) else {}),
         "list": f"POST /hunts/{hunt_id}/query kind=coverage (or GET /hunts/{hunt_id}/coverage)",
     }
 
@@ -540,7 +620,8 @@ def debrief_coverage(report: Mapping[str, Any], *, forced: bool, reason: str | N
         "discovery": {"steps": dict(discovery.get("steps") or {}),
                       **({"sweep_stats": dict(discovery["sweep_stats"])} if discovery.get("sweep_stats") else {}),
                       **({"sweep_checks": dict(discovery["sweep_checks"])} if discovery.get("sweep_checks") else {}),
-                      **({"products": list(discovery.get("products") or [])} if discovery.get("products") else {})},
+                      **({"products": list(discovery.get("products") or [])} if discovery.get("products") else {}),
+                      **({key: list(discovery[key]) for key in ("engine_accounts", "engine_writes") if discovery.get(key)})},
         "open_sample": [_item_line(item) for item in (report.get("open") or [])[:20]],
         "forced": bool(forced),
         **({"force_reason": str(reason)[:2000]} if forced and reason else {}),
@@ -558,6 +639,87 @@ def wall_remaining_seconds(run: Mapping[str, Any], *, now: datetime | None = Non
     if created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
     return limit - (moment - created).total_seconds()
+
+
+# The planner loop: every capability answer and every finish refusal names the next concrete calls,
+# ready to send, so a planner always has a next step instead of deciding it is done.
+NEXT_CALLS = 3
+# A forced finish before this share of the wall is refused while a concrete next call exists.
+FORCE_MIN_WALL_SHARE = 1 / 3
+
+
+def _concrete(route: str) -> str:
+    return re.sub(r"\{[^/{}]*\}", "1", route)
+
+
+def next_call(item: Mapping[str, Any], allowed: Iterable[str] | None = None) -> dict[str, Any] | None:
+    """One ready-to-send call that closes the first open class of an endpoint, or None. With
+    ``allowed`` (the Hunt's capability manifest), only a call the Hunt may make."""
+    permitted = None if allowed is None else {str(name) for name in allowed}
+    for call in _next_call_options(item):
+        if permitted is not None and call["capability"] not in permitted:
+            continue
+        if call.get("default_credential") and not _default_credentials_on():
+            continue
+        call.pop("default_credential", None)
+        return call
+    return None
+
+
+def _default_credentials_on() -> bool:
+    try:
+        from .default_credentials import enabled
+    except ImportError:  # pragma: no cover - the module is part of the package
+        return False
+    return enabled()
+
+
+def _next_call_options(item: Mapping[str, Any]):
+    """Every ready call that would close an open class of the endpoint, best first."""
+    method, _, route = str(item.get("endpoint") or "").partition(" ")
+    if not route.startswith("/"):
+        return None
+    path = _concrete(route)
+    params = [str(name) for name in item.get("params") or () if str(name)]
+    identity = {"request_bindings": list(item["identity"])} if item.get("identity") else {}
+    for klass in item.get("untested") or ():
+        if klass in {"sqli", "injection"} and params:
+            check = "sql_injection" if klass == "sqli" else "command_injection"
+            base = ({"query": {name: "1" for name in params[:10]}} if method == "GET"
+                    else {"json_body": {name: "1" for name in params[:20]}})
+            yield {"capability": "request.verify", "why": f"{klass} on {method} {route} ({params[0]})",
+                    "input": {"check": check, "method": method, "path": path, "parameter": params[0], **base, **identity}}
+        if klass == "xss" and params and method == "GET":
+            yield {"capability": "xss.verify", "why": f"xss on GET {route}",
+                    "input": {"path": f"{path}?" + "&".join(f"{name}=1" for name in params[:10])}}
+        if klass in {"exposure", "unauthenticated_api"} and method == "GET" and not identity:
+            yield {"capability": "request.verify", "why": f"{klass} on GET {route}",
+                    "input": {"check": "exposure" if klass == "exposure" else "unauthenticated_api",
+                              "method": "GET", "path": path}}
+        if klass == "default_credentials" and method == "POST":
+            yield {"capability": "http.request", "why": f"default credentials on POST {route}", "default_credential": True, "input": {
+                "method": "POST", "path": path, "json_body": {"username": "", "password": ""},
+                "request_bindings": [
+                    {"default_credential": "dc-01", "credential_field": "username", "body_pointer": "/username"},
+                    {"default_credential": "dc-01", "credential_field": "secret", "body_pointer": "/password"}]}}
+        if klass in {"review", "object_authz", "function_authz"} and method == "GET":
+            yield {"capability": "http.request", "why": f"{klass}: read GET {route}" + (
+                " as the login that reached it" if identity else ""),
+                "input": {"method": "GET", "path": path, **identity}}
+
+
+def next_calls(report: Mapping[str, Any] | None, *, limit: int = NEXT_CALLS) -> list[dict[str, Any]]:
+    """The first few ready calls of the open list, only of capabilities the Hunt may run (the
+    report's ``allowed``, when it was built with the manifest)."""
+    calls: list[dict[str, Any]] = []
+    allowed = (report or {}).get("allowed")
+    for item in (report or {}).get("open") or ():
+        call = next_call(item, allowed) if isinstance(item, Mapping) else None
+        if call is not None:
+            calls.append(call)
+        if len(calls) >= limit:
+            break
+    return calls
 
 
 def http_budget_left(run: Mapping[str, Any]) -> bool:
@@ -578,7 +740,8 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
     or expired; it has no checks to close the open pairs with), a Hunt whose wall or HTTP budget
     is spent, a budget-exhausted Hunt, one with nothing open, or a forced finish with a reason
     (the engine's own sweep, not the planner, does the remaining work; a finish while it runs is
-    deferred until it ends, see ``run_service``)."""
+    deferred until it ends, see ``run_service``) once a third of the wall has passed: before that
+    a forced finish is refused while a concrete next call exists (``_early_finish``)."""
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or report is None:
         return None
     if not can_test:
@@ -587,7 +750,8 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
         if len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:
             return ("force=true needs force_reason: say in a sentence why the open coverage is left "
                     "untested; it is recorded in the debrief")
-        return None
+        early = _early_finish(run, report, now=now)
+        return early
     if str(run.get("status") or "") == "budget_exhausted":
         return None
     remaining = wall_remaining_seconds(run, now=now)
@@ -595,6 +759,29 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
         return None
     if not http_budget_left(run):
         return None
+    return _open_refusal(run, report, remaining)
+
+
+def _early_finish(run: Mapping[str, Any], report: Mapping[str, Any], *, now: datetime | None) -> str | None:
+    """A forced finish before a third of the wall, with concrete calls still open: refused with them."""
+    if str(run.get("status") or "") == "budget_exhausted" or not http_budget_left(run):
+        return None
+    budget = _json(run.get("budget_json"), {})
+    limit = budget.get("max_duration_seconds")
+    remaining = wall_remaining_seconds(run, now=now)
+    if not isinstance(limit, int) or remaining is None or limit - remaining >= FORCE_MIN_WALL_SHARE * limit:
+        return None
+    calls = next_calls(report)
+    if not calls:
+        return None
+    return (f"Too early to finish: {int((limit - remaining) // 60)} of {int(limit // 60)} min used and concrete "
+            "work is open. Send these next (ready to send, in next_calls): "
+            + "; ".join(f"{call['capability']} — {call['why']}" for call in calls)
+            + f". A forced finish is accepted once a third of the wall has passed.")
+
+
+def _open_refusal(run: Mapping[str, Any], report: Mapping[str, Any], remaining: float | None) -> str | None:
+    """The unforced finish refusal: what is open, and the next calls to send."""
     pending = list((report.get("discovery") or {}).get("pending") or [])
     pairs = int(report.get("pairs_open") or 0)
     if not pairs and not pending:
@@ -611,6 +798,10 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
     ]
     if lines:
         parts.append("Untested first: " + "; ".join(lines) + ".")
+    calls = next_calls(report)
+    if calls:
+        parts.append("Send next (ready to send): " + "; ".join(
+            f"{call['capability']} {json.dumps(call['input'], separators=(',', ':'))[:300]}" for call in calls) + ".")
     parts.append(
         f"Continue: POST /hunts/{hunt_id}/query kind=coverage lists every open pair with the check "
         "to run (class_guide). Or finish with force=true and force_reason; the reason and the open "

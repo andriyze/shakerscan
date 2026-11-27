@@ -2194,6 +2194,13 @@ async def _execute_hunt_capability_lifecycle(
                             )
                         )
                     )
+                    if name == "authz.verify" and request.input.get("primary_bindings"):
+                        # Two logins the Hunt captured itself: a workflow binding, admitted as
+                        # http.request admits one (active testing, the approval, an active action).
+                        if policy.get("active_testing") is not True:
+                            raise HTTPException(status_code=403, detail=(
+                                "authz.verify with captured logins requires this Hunt's active_testing permission"))
+                        workflow_http = True
                     if name in {"artifact.inspect", "request.verify"}:
                         # A signed-in read takes http.request's identities, admitted as for it.
                         principal_slot, uses_session, workflow_http = artifact_read_identity(
@@ -2470,6 +2477,9 @@ async def _execute_hunt_capability_lifecycle(
                             # Reserve the complete same-origin redirect envelope before the
                             # first request. The planner cannot expand this fixed server limit.
                             charges["http_requests"] = 1 + MAX_REDIRECT_HOPS
+                        if name == "http.request" and request.input.get("form_prefetch") is True:
+                            # The form's page is read first (runtime/form_prefetch).
+                            charges["http_requests"] = int(charges.get("http_requests") or 1) + 1
                         if validated_device_input is not None and device_adapter_name is not None:
                             # An SSH proposal is control-plane-only. The exact user-
                             # confirmed execution owns device fragility; proposing an
@@ -3518,8 +3528,10 @@ async def _execute_hunt_capability_lifecycle(
                         ),
                     ),
                 )
+                prefetched = min(1, int((receipt_payload.get("prefetch_requests") or 0)
+                                        if isinstance(receipt_payload, Mapping) else 0))
                 actual_charges["http_requests"] = min(
-                    int(charges.get("http_requests") or 0), 1 + followed,
+                    int(charges.get("http_requests") or 0), 1 + followed + prefetched,
                 )
             elif name in {"collections.replay_safe", "collections.replay_active"} and not worker_managed_budget and isinstance(receipt_payload, dict):
                 actual_charges["http_requests"] = min(

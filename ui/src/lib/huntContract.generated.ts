@@ -16,7 +16,7 @@ export const HUNT_START_CONTRACT = {
       "budget.raise:<max_dimension>=<total>",
       "credential.use:<target-id|host>,...",
       "target.authorize:<host[:port]|*.domain[:port]>,...",
-      "capability:active-replay|active-testing|oob|state-changing|tcp-discovery",
+      "capability:account-creation|active-replay|active-testing|oob|state-changing|tcp-discovery",
       "ssh.host_trust:first-contact",
       "login.use:<saved-login-profile-id>,..."
     ]
@@ -244,11 +244,17 @@ export const HUNT_START_CONTRACT = {
           "ssrf",
           "ssti"
         ],
+        "graphql_locus": {
+          "method": "POST",
+          "operation": "GraphQL document",
+          "parameter": "a string argument in it",
+          "route": "/graphql"
+        },
         "locus": {
           "parameter": "the query parameter name",
           "route": "/path of a GET request"
         },
-        "note": "A specific family runs that proof; 'injection' runs every one. XSS (family xss) and a request-body parameter are proven by xss.verify and sqli.verify: candidate.verify answers with that call, ready to send (next_call)."
+        "note": "A specific family runs that proof; 'injection' runs every one (graphql_locus for a GraphQL argument). XSS (family xss) and a request-body parameter are proven by xss.verify and sqli.verify: candidate.verify answers with that call, ready to send (next_call)."
       },
       "injection_verifiers": {
         "sqli.verify": "SQL injection in a URL parameter (path with its query) or a body field (method, body_field_names, injection_field)",
@@ -375,6 +381,7 @@ export const HUNT_START_CONTRACT = {
     "budget_resume_without_headroom",
     "cancellation_state_unavailable",
     "capability_not_selected",
+    "capability_requires_account_creation",
     "capability_requires_active_testing",
     "capability_requires_credentials",
     "capability_requires_network_discovery",
@@ -467,6 +474,7 @@ export const HUNT_START_CONTRACT = {
   },
   "policy_fields": [
     "active_testing",
+    "allow_account_creation",
     "allow_direct_origin",
     "allow_identity_headers",
     "allow_oob_interactions",
@@ -1722,6 +1730,8 @@ export const HUNT_START_CONTRACT = {
           "query",
           "headers",
           "follow_redirects",
+          "form_prefetch",
+          "form_page",
           "session_ref",
           "via_address",
           "as_principal",
@@ -1788,7 +1798,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/request.verify"
       },
-      "description": "Prove one vulnerability class on one exact request: a repeat with fresh random values and a negative control that must stay silent; a verified result becomes a finding. Name the request as for http.request plus check (and parameter for an input check). Input checks: sql_injection, command_injection, path_traversal (GET), template_injection, xxe (xml_body), ssrf (GET), nosql_injection, ldap_injection, crlf_injection, open_redirect. Request checks: host_header_injection, cors, security_headers, directory_listing, exposure and unauthenticated_api (anonymous GETs), graphql, jwt (bearer principal), csrf (signed-in write; token_field), rate_limit (sign-in POST; parameter = password field), file_upload (parameter = file field; retrieve_path with {filename}). Needs active testing; writes and uploads need state-changing permission.",
+      "description": "Prove one vulnerability class on one exact request: a repeat with fresh random values and a negative control that must stay silent; a verified result becomes a finding. Name the request as for http.request plus check (and parameter for an input check). Input checks: sql_injection, command_injection, path_traversal (GET), template_injection, xxe (xml_body), ssrf (GET), nosql_injection, ldap_injection, crlf_injection, open_redirect. Request checks: host_header_injection, cors, security_headers, directory_listing, exposure and unauthenticated_api (anonymous GETs), graphql, jwt (bearer principal), csrf (signed-in write; token_field), rate_limit (sign-in POST; parameter = password field), file_upload (parameter = file field; retrieve_path with {filename}), mass_assignment (sign-up POST; parameter, privilege_value, login_path, profile_path; 3 accounts, allow_account_creation). Needs active testing; writes and uploads need state-changing permission.",
       "input": {
         "fields": [
           "check",
@@ -1803,6 +1813,9 @@ export const HUNT_START_CONTRACT = {
           "parameter",
           "retrieve_path",
           "token_field",
+          "privilege_value",
+          "login_path",
+          "profile_path",
           "as_principal",
           "session_ref",
           "request_bindings"
@@ -1955,11 +1968,15 @@ export const HUNT_START_CONTRACT = {
       "input": {
         "fields": [
           "mode",
+          "create_action_id",
+          "planted_field",
           "origin",
           "primary_principal",
           "secondary_principal",
           "primary_session_ref",
           "secondary_session_ref",
+          "primary_bindings",
+          "secondary_bindings",
           "routes"
         ],
         "required": [

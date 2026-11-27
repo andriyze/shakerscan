@@ -115,6 +115,16 @@ async def hostile_login(wire):
                         "Account locked.</p>").encode()
                 response = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: "
                             + str(len(page)).encode() + b"\r\n\r\n" + page)
+            elif head.startswith(b"GET /manager/html "):
+                sent = re.search(rb"(?im)^authorization: Basic (\S+)", head)
+                import base64
+                if sent and base64.b64decode(sent[1]) == b"tomcat:tomcat":
+                    page = b"<html><title>/manager</title>Tomcat Web Application Manager</html>"
+                    response = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n"
+                                b"Content-Length: " + str(len(page)).encode() + b"\r\n\r\n" + page)
+                else:
+                    response = (b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Tomcat Manager "
+                                b"Application\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             else:
                 response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             writer.write(response)
@@ -186,6 +196,36 @@ def test_pairs_are_sent_by_reference_judged_and_the_check_stops_at_a_lockout():
                                                    policy={"active_testing": True}, context=conn.run["context_pack"])
             assert stopped.value.detail["reason_code"] == "default_credentials_stopped"
             assert len(wire) == sent, "nothing was sent after the lockout sign"
+    asyncio.run(scenario())
+
+
+def basic_attempt(pair, path="/manager/html"):
+    return {"method": "GET", "path": path, "follow_redirects": False, "request_bindings": [
+        {"default_credential": pair, "credential_field": "basic", "header": "Authorization"}]}
+
+
+def test_http_basic_pairs_are_sent_in_the_authorization_header_and_judged_by_the_challenge():
+    async def scenario():
+        wire = []
+        server = await hostile_login(wire)
+        async with serving(server):
+            conn = AttemptsConnection(f"http://fixture.test:{server.sockets[0].getsockname()[1]}")
+            # The anonymous read names the sign-in the route asks for (scheme only, never the realm).
+            anonymous, _ = await execute(conn, {"method": "GET", "path": "/manager/html"}, "basic-anon")
+            assert anonymous["status"] == "success", anonymous
+            assert '"challenge_schemes": ["basic"]' in json.dumps(anonymous) and "Tomcat Manager" not in json.dumps(anonymous)
+
+            refused, _ = await execute(conn, basic_attempt("dc-01"), "default-cred-basic-1")
+            assert refused["status"] == "success", refused
+            assert b"Authorization: Basic YWRtaW46YWRtaW4=\r\n" in wire[-1][0]  # admin:admin, by reference
+            assert verdict_of(refused)["verdict"] == "rejected"
+
+            accepted, _ = await execute(conn, basic_attempt("dc-15"), "default-cred-basic-2")
+            assert accepted["status"] == "success", accepted
+            public = verdict_of(accepted)
+            assert public["verdict"] == "accepted" and public["username"] == "tomcat"
+            assert [row["verdict"] for row in conn.attempts] == ["rejected", "accepted"]
+            assert conn.run["budget_used_json"].get("state_changing_requests", 0) == 0
     asyncio.run(scenario())
 
 

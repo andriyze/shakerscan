@@ -118,7 +118,7 @@ def test_finish_with_open_coverage_and_time_left_is_refused_and_names_what_is_op
 
 
 def test_forced_finish_records_the_reason_and_the_open_coverage_in_the_debrief():
-    connection = _Connection()
+    connection = _Connection(created_minutes_ago=40)  # a third of the 90-minute wall has passed
     with pytest.raises(run_router.HTTPException) as no_reason:
         asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[], force=True))
     assert "force_reason" in no_reason.value.detail
@@ -190,6 +190,23 @@ def test_a_finish_while_the_engine_sweep_runs_is_deferred_with_its_reason():
     # An unforced finish is deferred too: the engine's work never ends early.
     unforced = asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[]))
     assert unforced["finish_deferred"] is True
+    auto_discovery._STATE.clear()
+
+
+def test_an_unforced_finish_while_the_sweep_only_follows_is_held_by_open_coverage():
+    # The engine tested what was mapped and waits for the planner: what is open is the planner's,
+    # so the finish guard applies; a forced finish with a reason is deferred to the last round.
+    from api.hunt import auto_discovery
+    auto_discovery._STATE.clear()
+    auto_discovery._STATE[str(HUNT)] = {"running": True, "sweep": "following"}
+    connection = _Connection()
+    with pytest.raises(run_router.HTTPException) as held:
+        asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[]))
+    assert held.value.status_code == 409 and "coverage is open" in held.value.detail
+    assert "deferred_finish" not in auto_discovery._STATE[str(HUNT)]
+    forced = asyncio.run(_service(connection).finish(
+        str(HUNT), summary="Done", next_actions=[], force=True, force_reason="the rest needs a second account"))
+    assert forced["finish_deferred"] is True and connection.status == "active"
     auto_discovery._STATE.clear()
 
 

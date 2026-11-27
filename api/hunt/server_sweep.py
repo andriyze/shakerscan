@@ -9,8 +9,9 @@ check never runs twice):
 1. **Read every mapped endpoint** (one GET each, anonymously). An answer that carries a value the
    shared masking withholds as credential-shaped, a private key or a directory index becomes a
    ``data_exposure`` candidate citing that request, and ``candidate.verify`` proves it or not.
-2. **Default credentials** on each sign-in it found (an HTML sign-in form's own fields, or a JSON
-   login's ``username``/``password``): the built-in pairs through ``http.request`` bindings, under
+2. **Default credentials** on each sign-in it found (an HTML sign-in form's own fields, a JSON
+   login's ``username``/``password``, or a route that answers 401 with an HTTP Basic challenge,
+   once per first path segment): the built-in pairs through ``http.request`` bindings, under
    the default-credential module's server-side bounds (per-login attempt cap, pacing, stop at the
    first lockout or rate-limit sign). An accepted pair becomes a ``default_credentials`` candidate
    and ``candidate.verify`` proves it. Needs the Hunt's state-changing permission.
@@ -25,7 +26,8 @@ check never runs twice):
    a deterministic differential proves (SQL, command, template, path traversal; SSRF, open redirect
    and CRLF for an input named like a URL or a redirect target), a GraphQL endpoint its GraphQL
    check, an XML endpoint XXE, a sign-in its rate-limit, LDAP and NoSQL checks, and the root and
-   a bounded set of API answers their CORS and header checks. Each is a short action (seconds,
+   a bounded set of API answers their CORS and header checks, and each principal's bearer token
+   its JWT check on the first route it reads. Each is a short action (seconds,
    tens of requests) run from a second queue beside the long verifiers; inputs whose name points
    at a class go first.
 6. **API routes**: under each API root the mapped routes sit under (``/api``, ``/api/v1``, ...),
@@ -47,8 +49,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 import hashlib
+import heapq
 import json
+import os
 import re
+import secrets
 import time
 from typing import Any
 import urllib.parse
@@ -58,6 +63,9 @@ try:
     from runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.product_templates import PRODUCT_MOUNTS, PRODUCT_TEMPLATE_TAGS, product_window_count
+from .engine_logins import EngineLogins
+from . import graphql_sweep
+from . import engine_accounts
 from .route_words import API_ROUTE_WORDS, MAX_API_PREFIXES
 try:
     from capabilities.product_api import product_api_for
@@ -82,12 +90,38 @@ REQUEST_CONCURRENCY = 4
 MAX_HEADER_CHECK_ROUTES = 5
 # Routes that refuse GET (405) the sweep sends one empty JSON POST to learn their inputs.
 MAX_SHAPE_PROBES = 200
+# Parameter discovery: routes per Hunt, and requests per route (one, plus halving when an answer
+# changes with nothing reflected).
+MAX_PARAMETER_ROUTES = 120
+MAX_PARAMETER_REQUESTS = 16  # one, plus two per halving of 64 names (13), with room
+# Common parameter names, from the most frequent names of Arjun's default list and the inputs the
+# OWASP Web Security Testing Guide's examples use; one request carries all of them.
+COMMON_PARAMETERS: tuple[str, ...] = (
+    "q", "query", "search", "s", "keyword", "id", "uid", "user", "user_id", "username", "name",
+    "email", "page", "limit", "offset", "sort", "order", "category", "cat", "type", "filter", "file",
+    "filename", "path", "dir", "url", "uri", "redirect", "next", "return", "returnUrl", "callback",
+    "host", "ip", "domain", "cmd", "lang", "locale", "view", "template", "msg", "message", "text",
+    "comment", "title", "content", "data", "value", "input", "format", "debug", "token", "key", "code",
+    "action", "mode", "item", "product", "ref", "target", "dest", "src", "from", "to",
+)
+# An unrendered client-side template expression in a path (``/{{href}}``, ``/${id}``, ``/<%= x %>``).
+_TEMPLATE_ARTIFACT = re.compile(r"\{\{|%7B%7B|\$\{|%24%7B|<%|%3C%25", re.I)
+_STATIC_ROUTE = re.compile(r"\.(?:js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|map|txt|xml|json|pdf|zip|gz)$", re.I)
 MAX_SCRIPTS = 40
 # HTML pages whose inline scripts the sweep analyzes for routes (one request each).
 MAX_HTML_PAGES = 60
 # Rounds of read-record-test; each round only tests what earlier rounds did not.
 MAX_ROUNDS = 8
+# Once its own rounds find nothing new the sweep follows the Hunt: it re-reads the coverage report
+# and runs a round on whatever the planner's requests mapped since (routes, and inputs of routes
+# already tested), until the planner finishes. The wait between two looks grows while nothing is new.
+MAX_FOLLOW_ROUNDS = 60
+FOLLOW_POLL_SECONDS = 15.0
+FOLLOW_POLL_MAX_SECONDS = 120.0
 DEFAULT_CREDENTIAL_PACE_SECONDS = 2.2
+# Sign-ins the sweep tries the default pairs on; the rest of the default-credential module's bound
+# per Hunt (12) is left to the planner's own attempts.
+MAX_SWEEP_LOGINS = 8
 # Product-template and injection-verifier calls are long actions. While the Hunt's long-action
 # slots are all taken (the planner's scanners, the sweep's own verifiers), admission refuses them:
 # measured Hunts had 23 and 30 template refusals (one Hunt's every state-changing check among
@@ -99,7 +133,7 @@ _LONG_SLOTS_TAKEN = re.compile(r"long actions in flight", re.I)
 DEFAULT_PAIR_IDS = tuple(f"dc-{index:02d}" for index in range(1, 21))
 _SECRET_TEXT = re.compile(
     r"\[withheld:\d+\]|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|"
-    r"<title>\s*index of /|\bindex of /", re.I)
+    r"<title>\s*index of /|\bindex of /|\bdirectory listing for \[?/|\blisting directory /", re.I)
 # A field or setting named like a secret, with a value: "password": "...", DB_PASSWORD=..., token: ...
 _SECRET_FIELD = re.compile(
     r"""(?ix)["']?\b[\w.-]*(?:pass(?:word|wd)?|secret|api[_-]?key|access[_-]?key|private[_-]?key|
@@ -137,6 +171,25 @@ _EXPOSURE_ROUTE = re.compile(
     r"env|environment|trace|logs?|console|actuator(?:/[a-z]+)?|heapdump|dump|backups?|config|"
     r"configuration|settings|ftp|well-known)$)", re.I)
 # An API root a route sits under: /api, /api/v1, /rest, /v2 ... (the sweep tries API_ROUTE_WORDS there).
+# A path segment that names an operation which destroys, resets or ends something: a GET to it is a
+# write on many applications (VAmPI's GET /createdb recreates its database; a GET /logout ends the
+# session every later check runs in). The engine's own requests never go there.
+_DESTRUCTIVE_SEGMENT = re.compile(
+    r"^(?:create-?db|init-?db|drop-?db|reset-?db|db-?reset|reset|reset-?all|factory-?reset|init|initiali[sz]e|"
+    r"setup|install|seed|populate|migrate|drop|purge|wipe|truncate|destroy|delete|remove|erase|clear|flush|"
+    r"shutdown|restart|reboot|kill|log-?out|log-?off|sign-?out|deactivate|disable|unsubscribe)$", re.I)
+
+
+def destructive_route(path: str) -> bool:
+    """Whether a path has a segment naming a destructive operation (``/createdb``, ``/api/reset``)."""
+    route = path.split("?", 1)[0].split("#", 1)[0].lower()
+    for segment in route.split("/"):
+        for part in {segment, *re.split(r"[._]", segment)}:
+            if part and _DESTRUCTIVE_SEGMENT.match(part):
+                return True
+    return False
+
+
 _API_PREFIX = re.compile(r"^(/(?:api|rest|v[0-9]{1,2})(?:/v[0-9]{1,2})?)(?=/|$)", re.I)
 # A framework's validation answer that names the inputs a route requires (FastAPI/pydantic
 # ``"loc": ["query", "id"]``, and the plain "missing parameter 'x'" wording of other stacks).
@@ -159,9 +212,43 @@ class Refused(Exception):
 _WIRE_COST = {"http.request": 1, "candidate.verify": 3, "authz.verify": 6}
 _CHECK_COST = {"exposure": 3, "unauthenticated_api": 3, "directory_listing": 3, "security_headers": 2,
                "cors": 6, "host_header_injection": 6, "sql_injection": 12, "nosql_injection": 10,
-               "ldap_injection": 6, "rate_limit": 13, "graphql": 10, "command_injection": 14,
+               "ldap_injection": 6, "rate_limit": 13, "graphql": 10, "jwt": 8, "command_injection": 14,
                "path_traversal": 8, "template_injection": 6, "ssrf": 6, "xxe": 6, "open_redirect": 6,
                "crlf_injection": 6}
+
+
+class PriorityGate:
+    """At most ``limit`` holders at once; of the waiters, the lowest rank goes first (then first
+    come). A sweep queues hundreds of generic input checks; a check that matters more (an exposure,
+    an input named for its class, anything sent as a signed-in identity) is not left behind them."""
+
+    def __init__(self, limit: int) -> None:
+        self._free = max(1, int(limit))
+        self._waiting: list[tuple[int, int, asyncio.Future]] = []
+        self._order = 0
+
+    async def acquire(self, rank: int) -> None:
+        if self._free > 0:
+            self._free -= 1
+            return
+        self._order += 1
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        entry = (int(rank), self._order, future)
+        heapq.heappush(self._waiting, entry)
+        try:
+            await future
+        except asyncio.CancelledError:
+            if future.done() and not future.cancelled():
+                self.release()  # the slot was handed over as the wait was cancelled
+            raise
+
+    def release(self) -> None:
+        while self._waiting:
+            _rank, _order, future = heapq.heappop(self._waiting)
+            if not future.done():
+                future.set_result(None)
+                return
+        self._free += 1
 
 
 class WirePace:
@@ -207,6 +294,38 @@ def _response(result: Any) -> Mapping[str, Any]:
     return {}
 
 
+# Errors that mean the engine dropped a call before a worker ran it (budget released unspent).
+_NOT_STARTED_ERRORS = frozenset({"stale_reservation_recovered", "worker_result_timeout"})
+MAX_CALLS_IN_FLIGHT = max(1, int(os.environ.get("SHAKERSCAN_SWEEP_CALLS_IN_FLIGHT", "4") or 4))
+
+
+def _result_parts(result: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(result, Mapping):
+        return []
+    return [part for part in (result, result.get("result"), result.get("action_result"))
+            if isinstance(part, Mapping)]
+
+
+def _error_of(result: Any) -> str:
+    return next((str(part["error"]) for part in _result_parts(result) if part.get("error")), "")
+
+
+def _lost(result: Any) -> bool:
+    """The call ended without running: dropped from the queue or never answered by a worker."""
+    return _error_of(result) in _NOT_STARTED_ERRORS
+
+
+def _never_started(result: Any) -> bool:
+    """Dropped from the queue before any request could reach the target: its reservation was
+    recovered with nothing charged and no start recorded, so it is safe to send once more. A worker
+    timeout is not: the call may have been running."""
+    parts = _result_parts(result)
+    return (_error_of(result) == "stale_reservation_recovered"
+            and not any(part.get("execution_started") is True or part.get("execution_uncertain") is True
+                        or any(int(v or 0) for v in dict(part.get("budget_consumed") or {}).values())
+                        for part in parts))
+
+
 def _action_id(result: Any) -> str | None:
     if not isinstance(result, Mapping):
         return None
@@ -222,14 +341,17 @@ def exposure_signal(response: Mapping[str, Any]) -> str | None:
     html = response.get("html") if isinstance(response.get("html"), Mapping) else {}
     text += " " + str(html.get("title") or "") + " " + str(html.get("text_sample") or "")
     keys = " ".join(f'"{key}":' for key in response.get("json_keys") or ())
-    match = _SECRET_TEXT.search(text)
-    if match:
+    # An HTML page carries withheld values as a matter of course (a form's anti-forgery token, a
+    # session nonce in a script): on a page only a key, a provider key id or an index is a signal.
+    page = any(html.get(name) for name in ("title", "forms", "links", "text_sample"))
+    for match in _SECRET_TEXT.finditer(text):
         found = match.group(0).lower()
-        if "index of" in found:
+        if "index of" in found or "listing" in found:
             return "a directory index"
         if "private key" in found:
             return "a private key"
-        return "credential-shaped values"
+        if not page or not found.startswith("[withheld"):
+            return "credential-shaped values"
     if _SECRET_FIELD.search(text) or _SECRET_FIELD.search(keys):
         return "secret-named fields"
     if not html and _RECORDS.search(text):
@@ -293,11 +415,21 @@ def input_checks(name: str, method: str) -> list[tuple[int, str]]:
     return checks
 
 
-def _default_credential_request(path: str, user: str, secret: str, pair: str, *, json_body: bool) -> dict[str, Any]:
+def _default_credential_request(path: str, user: str, secret: str, pair: str, *, json_body: bool,
+                                basic: bool = False, form_page: str | None = None) -> dict[str, Any]:
+    if basic:
+        return {"method": "GET", "path": path, "follow_redirects": False, "request_bindings": [
+            {"default_credential": pair, "credential_field": "basic", "header": "Authorization"}]}
     body = {user: "", secret: ""}
     return {
         "method": "POST", "path": path, "follow_redirects": False,
         ("json_body" if json_body else "form_body"): body,
+        # An HTML sign-in form is posted as a browser posts it: from its own page, with the
+        # page's hidden fields (an anti-CSRF token) and cookies (runtime/form_prefetch).
+        **({} if json_body else {"form_prefetch": True, **({"form_page": form_page} if form_page else {}),
+                                 # An accepted form sign-in answers with its session cookie: kept so
+                                 # the sweep can test the application signed in (adopt_login).
+                                 "capture": [{"name": "session", "header": "Set-Cookie"}]}),
         "request_bindings": [
             {"default_credential": pair, "credential_field": "username", "body_pointer": f"/{user}"},
             {"default_credential": pair, "credential_field": "secret", "body_pointer": f"/{secret}"},
@@ -305,7 +437,7 @@ def _default_credential_request(path: str, user: str, secret: str, pair: str, *,
     }
 
 
-class Sweep:
+class Sweep(EngineLogins):
     """One Hunt's sweep. ``call`` runs one capability call; ``create_candidate`` records one.
 
     The sweep runs in rounds until a round finds nothing new to test: each round reads the
@@ -314,10 +446,16 @@ class Sweep:
     (``record``), which the next round's report lists. Every pair it tests is remembered, so a
     round never repeats a check; its wall, rounds, endpoints and pairs are reported in
     ``sweep_stats``.
+
+    With ``planner_finished`` (``run``) the sweep does not end when a round finds nothing new: it
+    follows the Hunt (state ``following``), running a round on each route or input the planner's
+    own requests reveal, and ends with a last look once the planner has finished.
     """
 
     def __init__(self, *, call: Call, create_candidate: CreateCandidate, state: dict[str, Any],
-                 live: Callable[[], Awaitable[bool]], pace: WirePace | None = None) -> None:
+                 live: Callable[[], Awaitable[bool]], pace: WirePace | None = None,
+                 request_permission: Callable[[str, list[str]], Awaitable[str]] | None = None) -> None:
+        self._request_permission = request_permission
         self._pace = pace
         self._call = call
         self._create = create_candidate
@@ -327,8 +465,17 @@ class Sweep:
         self.product_checks_run: set[str] = set()
         self.tested: set[tuple[str, str]] = set()  # pairs a sweep check ran on
         self.considered: set[tuple[str, str]] = set()  # pairs a round has looked at (never repeated)
+        self.params_seen: dict[str, set[str]] = {}  # the inputs each endpoint had when a round looked at it
+        self.identity_seen: set[str] = set()  # endpoints a round looked at with the planner's login
         self.logins: dict[str, tuple[str, str, str, bool]] = {}
         self.logins_tried: set[str] = set()
+        # The page each sign-in form was read on (its title) and the sign-ins already tried by
+        # (path after the first segment, fields, title): one application mounted under several
+        # paths gets the default pairs once, so the few logins a Hunt may try are distinct ones.
+        # Routes that asked an anonymous read for HTTP Basic, one per first path segment.
+        self.basic_logins: dict[str, str] = {}
+        self.login_titles: dict[str, str] = {}
+        self.login_mirrors: set[tuple[str, str, str, str]] = set()
         self.signed_in_only: set[str] = set()
         self.seen: set[str] = set()
         self.js_done: set[str] = set()
@@ -339,21 +486,52 @@ class Sweep:
         self._long_jobs: set[asyncio.Task] = set()
         self.injection_queued = 0
         self.injection_done = 0
-        self._request_gate = asyncio.Semaphore(REQUEST_CONCURRENCY)
+        self._request_gate = PriorityGate(REQUEST_CONCURRENCY)
         self.request_checks_queued = 0
         self.request_checks_done = 0
         self.request_checks_sent: set[str] = set()
         self.shape_probed: set[str] = set()
         self.signin_checked: set[str] = set()
+        self.jwt_checked: set[str] = set()
+        # Calls the sweep has open at once. One agent-tool worker runs three at a time, and a call
+        # queued longer than its reservation lease (90 s for http.request) is dropped unsent: with
+        # slow answers (30-60 s each) an unbounded burst queued 34 calls past it. Four open calls
+        # keep the wait under one call's time; SHAKERSCAN_SWEEP_CALLS_IN_FLIGHT raises it for a
+        # larger worker pool.
+        self._in_flight = asyncio.Semaphore(MAX_CALLS_IN_FLIGHT)
+        self.login_pages: dict[str, str] = {}  # a form login's action -> the page that showed it
+        self.graphql_seen: list[tuple[str, str]] = []
+        self.graphql_done: set[str] = set()
+        self._init_engine_logins()
         # The anonymous answer each read route gave (status, sample length, title), and the
         # mounts already queued for testing per route tail: one application served under several
         # mounts (/a/app.php, /b/app.php answering alike) is tested once.
         self.answers: dict[str, tuple[Any, int, str]] = {}
         self.mirror_tested: dict[tuple[str, str, tuple[Any, int, str]], str] = {}
         self.prefixes_tried: set[str] = set()
+        self._product_prefixes: tuple[str, ...] | None = None
+        self.reflection_probed: set[str] = set()
+        self.params_mined: set[str] = set()
         self.request_verify = False
         self.sqli_tool = False
         self._long_keys: set[str] = set()
+
+    # Helpers the engine-login mixin uses.
+    @staticmethod
+    def _key(*parts: str) -> str:
+        return sweep_key(*parts)
+
+    @staticmethod
+    def _response_of(result: Any) -> Mapping[str, Any]:
+        return _response(result)
+
+    @staticmethod
+    def _action_of(result: Any) -> str | None:
+        return _action_id(result)
+
+    @staticmethod
+    def _api_route(route: str) -> bool:
+        return bool(_API_PREFIX.match(route))
 
     def _count(self, name: str) -> None:
         self.counts[name] = self.counts.get(name, 0) + 1
@@ -376,15 +554,22 @@ class Sweep:
                     slot_wait_seconds: float = 0) -> Any:
         """One capability call; a refusal is counted and named. With ``slot_wait_seconds``, a
         refusal because the Hunt's long-action slots are all taken is retried (same key) once a
-        slot may have settled, for at most that long."""
+        slot may have settled, for at most that long. The engine never sends its own request to a
+        route that names a destructive operation (``destructive_route``), whatever the method."""
+        paths = [values.get("path"), *(values.get("routes") or ())] if isinstance(values, Mapping) else []
+        if any(destructive_route(str(path or "")) for path in paths):
+            self._count(f"{capability}:destructive_route_skipped")
+            return None
         waited = 0.0
+        requeued = False
         while True:
             if not await self._live():
                 raise asyncio.CancelledError()
             try:
                 if self._pace is not None and wire_cost(capability, values):
                     await self._pace.take(wire_cost(capability, values))
-                result = await self._call(capability, values, key)
+                async with self._in_flight:
+                    result = await self._call(capability, values, key)
             except asyncio.CancelledError:
                 raise
             except Refused as exc:
@@ -394,6 +579,17 @@ class Sweep:
                     continue
                 self._count(f"{capability}:refused")
                 self._note(f"{capability}: {exc}")
+                return None
+            if _never_started(result) and not requeued:
+                # The engine dropped the call before it ran (its queued reservation expired while
+                # the workers were busy): nothing reached the target, so it is sent once more.
+                requeued = True
+                self._count(f"{capability}:requeued")
+                key = f"{key}:requeue"[:200]
+                continue
+            if _lost(result):
+                self._count(f"{capability}:lost")
+                self._note(f"{capability}: the engine dropped a call before it ran ({_error_of(result)})")
                 return None
             self._count(capability)
             return result
@@ -416,7 +612,8 @@ class Sweep:
 
     async def run(self, run: Mapping[str, Any], report: Mapping[str, Any] | None = None, *,
                   load_report: Callable[[], Awaitable[Mapping[str, Any] | None]] | None = None,
-                  record: Callable[[list[str]], Awaitable[Any]] | None = None) -> None:
+                  record: Callable[[list[str]], Awaitable[Any]] | None = None,
+                  planner_finished: Callable[[], bool] | None = None) -> None:
         policy = _json(run.get("policy_json"))
         allowed = {str(name) for name in policy.get("allowed_capabilities") or ()}
         writes = bool(policy.get("allow_state_changing_http"))
@@ -431,24 +628,51 @@ class Sweep:
             if templates:
                 # The products discovery recognised are known before the first round.
                 await self._product_templates("read_only")
-            while rounds < MAX_ROUNDS:
-                current = report if (rounds == 0 and report is not None) else (
+            follow = planner_finished is not None and load_report is not None
+            first, last_look, wait = report, False, FOLLOW_POLL_SECONDS
+            while rounds < (MAX_ROUNDS + MAX_FOLLOW_ROUNDS if follow else MAX_ROUNDS):
+                current = first if (rounds == 0 and first is not None) else (
                     await load_report() if load_report is not None else None)
+                first = None
                 if current is None:
                     break
-                items = [item for item in current.get("open") or () if isinstance(item, Mapping)]
-                fresh = [item for item in items if self._untested(item)]
+                items = [item for item in (*(current.get("open") or ()), *(current.get("signed_in") or ()))
+                         if isinstance(item, Mapping)]
+                fresh = [item for item in items if self._untested(item) or self._new_params(item)]
                 if not fresh:
-                    break
+                    if not follow or last_look:
+                        break
+                    if planner_finished():
+                        # One more look: what the planner's last requests mapped is tested too.
+                        last_look = True
+                        continue
+                    if not await self._live():
+                        break
+                    self.state["sweep"] = "following"
+                    waited = 0.0
+                    while waited < wait and not planner_finished():  # a finish is noticed within a second
+                        await asyncio.sleep(min(1.0, wait - waited))
+                        waited += 1.0
+                    wait = min(FOLLOW_POLL_MAX_SECONDS, wait * 1.5)
+                    continue
+                last_look, wait = False, FOLLOW_POLL_SECONDS
+                self.state["sweep"] = "running"
                 rounds += 1
                 self._stats(rounds=rounds, endpoints_known=int(current.get("endpoints") or len(items)))
                 found: list[str] = []
                 if "http.request" in allowed:
                     found += await self._read_all(fresh, slots=slots, writes=writes)
+                    found += await self._discover_parameters(fresh)
                 if "javascript.analyze" in allowed:
                     found += await self._javascript(items)
                 if "http.request" in allowed and writes:
                     await self._default_credentials(request_checks="request.verify" in allowed)
+                    # Accounts the engine makes itself (only with the operator's explicit
+                    # allow_account_creation), then the application used as each of its logins
+                    # (engine_accounts): what that maps is tested as the login next round.
+                    if policy.get("allow_account_creation") or await self._ask_for_accounts(items):
+                        await self._make_accounts(items)
+                    await self._use_as_logins(items, writes=writes, allowed=allowed)
                 if "request.verify" in allowed:
                     self._request_checks(fresh, writes=writes, slots=slots, first=rounds == 1)
                 if templates and writes and "state_changing" not in self.product_checks_run:
@@ -456,6 +680,8 @@ class Sweep:
                 if "authz.verify" in allowed and {"primary", "secondary"} <= set(slots):
                     await self._function_authz(fresh)
                 await self._injection(fresh, allowed=allowed, writes=writes, slots=slots)
+                if {"http.request", "candidate.verify"} <= allowed:
+                    await self._graphql_arguments(writes=writes)
                 if "http.request" in allowed:
                     # Last in the round: the checks queued above run while route names are tried
                     # (one engine call each, about a second apiece at the Hunt's call rate).
@@ -468,6 +694,10 @@ class Sweep:
                 if "request.verify" in allowed:
                     handled |= {"injection", "graphql"}
                 for item in fresh:
+                    self.params_seen.setdefault(str(item.get("endpoint")), set()).update(
+                        str(name) for name in item.get("params") or ())
+                    if item.get("identity"):
+                        self.identity_seen.add(str(item.get("endpoint")))
                     for klass in item.get("untested") or ():
                         pair = (str(item.get("endpoint")), str(klass))
                         self.considered.add(pair)
@@ -502,6 +732,30 @@ class Sweep:
         endpoint = str(item.get("endpoint") or "")
         return [str(klass) for klass in item.get("untested") or () if (endpoint, str(klass)) not in self.considered]
 
+    def _identity(self, item: Mapping[str, Any], route: str, slots: Sequence[str]) -> dict[str, Any]:
+        """Who a check on ``route`` is sent as: the Hunt's first principal where anonymous is
+        refused, else the login the planner's own request reached the route with (values its
+        login captured, by reference), else nobody."""
+        if route in self.signed_in_only and slots:
+            return {"as_principal": slots[0]}
+        bindings = item.get("identity")
+        if isinstance(bindings, list) and bindings and all(isinstance(entry, Mapping) for entry in bindings):
+            return {"request_bindings": [dict(entry) for entry in bindings[:4]]}
+        return {}
+
+    def _new_params(self, item: Mapping[str, Any]) -> bool:
+        """Whether an endpoint a round already looked at has since gained inputs (a later request
+        of the planner's used them): its inputs are then tested like a new endpoint's."""
+        endpoint = str(item.get("endpoint") or "")
+        # A login the planner has reached it with counts the same: its inputs are tested (again)
+        # as that login, whether or not a round looked at the endpoint before.
+        if item.get("identity") and endpoint not in self.identity_seen:
+            return True
+        seen = self.params_seen.get(endpoint)
+        if seen is None:
+            return False
+        return any(str(name) not in seen for name in item.get("params") or ())
+
     async def _read_all(self, items: Sequence[Mapping[str, Any]], *, slots: Sequence[str],
                         writes: bool = False) -> list[str]:
         """GET every new endpoint (anonymously, then as each principal where anonymous is refused);
@@ -509,14 +763,21 @@ class Sweep:
         gate = asyncio.Semaphore(SHORT_CONCURRENCY)
         links: list[str] = []
         targets = []
+        # A POST sign-in outside an /api-style prefix (``/users/v1/login``): a JSON login unless a
+        # page read below shows it as an HTML form.
+        json_logins: list[str] = []
         for item in items[:MAX_READS]:
             method, _, route = str(item.get("endpoint") or "").partition(" ")
             if not route.startswith("/"):
                 continue
             if method == "GET":
-                targets.append(route)
-            elif method == "POST" and "default_credentials" in (item.get("untested") or ()) and "/api" in route:
+                if route not in self.answers:  # an endpoint back for its new inputs was read already
+                    targets.append(route)
+            elif method == "POST" and "default_credentials" in (item.get("untested") or ()) and (
+                    "/api" in route or _API_PREFIX.match(route)):
                 self.logins.setdefault(route, (route, "username", "password", True))
+            elif method == "POST" and _LOGIN_PATH.search(route) and "{" not in route:
+                json_logins.append(route)
 
         async def look(path: str, principal: str | None) -> Mapping[str, Any]:
             values = {"method": "GET", "path": path, "follow_redirects": False,
@@ -531,11 +792,20 @@ class Sweep:
             form = login_form(response)
             if form:
                 self.logins.setdefault(form[0], (form[0], form[1], form[2], False))
+                self.login_pages.setdefault(form[0], path.split("?", 1)[0])
+                self.login_titles.setdefault(form[0], str((response.get("html") or {}).get("title") or "")[:200])
             links.extend(form_entries(response, path))
             links.extend(hint_entries(response, path))
             signal = exposure_signal(response)
             action = _action_id(result)
             status = response.get("status")
+            if (self.request_verify and principal and principal not in self.jwt_checked
+                    and isinstance(status, int) and 200 <= status < 300):
+                # The first route a principal reads: its bearer token is tested once (an altered
+                # signature, alg none, a well-known secret). A principal without a bearer JWT
+                # costs one request.
+                self.jwt_checked.add(principal)
+                self._queue_request_check({"check": "jwt", "method": "GET", "path": path, "as_principal": principal})
             if (self.request_verify and principal is None and isinstance(status, int) and 200 <= status < 300
                     and product_api_for(path) is not None):
                 # A self-hosted product's management route answered an anonymous caller.
@@ -566,8 +836,11 @@ class Sweep:
             html = response.get("html") if isinstance(response.get("html"), Mapping) else {}
             self.answers[route] = (response.get("status"), len(str(response.get("body_sample") or "")),
                                    str(html.get("title") or "")[:200])
-            if _LOGIN_PATH.search(route) and response.get("status") in {405, 400} and "/api" in route:
+            if _LOGIN_PATH.search(route) and response.get("status") in {405, 400} and (
+                    "/api" in route or _API_PREFIX.match(route)):
                 self.logins.setdefault(route, (route, "username", "password", True))
+            if response.get("status") == 401 and "basic" in (response.get("challenge_schemes") or ()):
+                self.basic_logins.setdefault(path.split("/")[1] if path.count("/") else "", path)
             if response.get("status") in {401, 403} and slots:
                 self.signed_in_only.add(route)
                 for slot in slots:
@@ -577,6 +850,8 @@ class Sweep:
                 links.extend(await self._probe_shape(route, slots if route in self.signed_in_only else ()))
 
         await asyncio.gather(*(read(route) for route in targets))
+        for route in json_logins:
+            self.logins.setdefault(route, (route, "username", "password", True))
         return links
 
     async def _api_routes(self, items: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -644,36 +919,71 @@ class Sweep:
         return routes
 
     async def _default_credentials(self, *, request_checks: bool = False) -> None:
-        for path, (_path, user, secret, json_body) in list(self.logins.items())[:4]:
+        # Sign-in forms and Basic-protected routes in turn: the few logins a Hunt may try cover both.
+        forms = [(path, shape) for path, shape in self.logins.items()]
+        basics = [(path, (path, "", "", False)) for path in self.basic_logins.values()]
+        order: list[tuple[str, tuple[str, str, str, bool], bool]] = []
+        for index in range(max(len(forms), len(basics))):
+            if index < len(forms):
+                order.append((*forms[index], False))
+            if index < len(basics):
+                order.append((*basics[index], True))
+        for path, (_path, user, secret, json_body), basic in order:
             if path in self.logins_tried:
                 continue
+            if len(self.logins_tried) >= MAX_SWEEP_LOGINS:
+                break
+            if basic:
+                self.logins_tried.add(path)
+                await self._try_default_pairs(path, user, secret, json_body, basic=True)
+                continue
+            segments = path.split("/")
+            title = self.login_titles.get(path, "")
+            if len(segments) >= 3 and title:
+                mirror = ("/".join(segments[2:]), user, secret, title)
+                if mirror in self.login_mirrors:
+                    self._count("mirror_skipped")
+                    continue
+                self.login_mirrors.add(mirror)
             self.logins_tried.add(path)
             await self._try_default_pairs(path, user, secret, json_body)
             if request_checks:
                 # After the default pairs: the rate-limit run's wrong passwords never lock them out.
                 await self._signin_checks(path, user, secret, json_body)
 
-    async def _try_default_pairs(self, path: str, user: str, secret: str, json_body: bool) -> None:
+    async def _try_default_pairs(self, path: str, user: str, secret: str, json_body: bool, *,
+                                 basic: bool = False) -> None:
         for index, pair in enumerate(DEFAULT_PAIR_IDS):
             if index:
                 # The default-credential module paces attempts on one login; keep to its pace.
                 await asyncio.sleep(DEFAULT_CREDENTIAL_PACE_SECONDS)
             result = await self._safe(
-                "http.request", _default_credential_request(path, user, secret, pair, json_body=json_body),
-                sweep_key("default-credentials", path, pair))
+                "http.request",
+                _default_credential_request(path, user, secret, pair, json_body=json_body, basic=basic,
+                                            form_page=self.login_pages.get(path)),
+                sweep_key("default-credentials", path, pair, *(("basic",) if basic else ())))
             response = _response(result)
             verdict = str((response.get("login_attempt") or {}).get("verdict")
                           or ((result or {}).get("login_attempt") or {}).get("verdict") or "")
             if result is None or verdict in {"rate_limited", "locked", "not_sent"}:
                 break
             action = _action_id(result)
+            if verdict == "accepted" and action and not basic:
+                # Chaining: the accepted pair's session (a bearer token, else the form's session
+                # cookie) is a login the sweep uses like its own accounts.
+                token = engine_accounts.token_ref(response)
+                bindings = engine_accounts.bindings_for(
+                    token=token, cookie_action=None if token or json_body else action)
+                if bindings:
+                    self.adopt_login(f"default {pair} ({path})", bindings, refs=engine_accounts.own_refs(response))
             if verdict == "accepted" and action:
                 await self._candidate_and_verify({
                     "family": "default_credentials",
                     "title": f"{path} accepts a built-in default credential pair",
-                    "claim": f"The sign-in at {path} accepted the built-in pair {pair} (engine sweep).",
+                    "claim": (f"The {'HTTP Basic sign-in' if basic else 'sign-in'} at {path} accepted the "
+                              f"built-in pair {pair} (engine sweep)."),
                     "severity": "critical",
-                    "locus": {"method": "POST", "path": path},
+                    "locus": {"method": "GET" if basic else "POST", "path": path},
                     "evidence_refs": [f"action:{action}"],
                 })
                 break
@@ -730,7 +1040,10 @@ class Sweep:
                 self._count("mirror_skipped")
                 continue
             params = [str(name) for name in item.get("params") or () if str(name)]
-            untested = set(self._untested(item))
+            # New inputs on an endpoint already looked at: the verifiers still open on it run again
+            # (their keys carry the inputs, so no call repeats).
+            untested = (set(str(klass) for klass in item.get("untested") or ()) if self._new_params(item)
+                        else set(self._untested(item)))
             if not params or not route.startswith("/"):
                 continue
             # A route that refuses anonymous callers is tested signed in, as the first principal.
@@ -739,8 +1052,23 @@ class Sweep:
             # follows only where the screen saw the query break (``_queue_request_check``); a sign-in,
             # which the screen never probes, goes straight to the tool.
             screened = self.request_verify and not _LOGIN_PATH.search(route)
+            # A recognised product's own routes (its forms and pages) get the quick checks; the long
+            # tools follow there only when a quick check flags the input (the SQL proof's break, a
+            # reflected marker), so the application's own inputs are first in the tools' queue.
+            product = self._product_route(route)
             for capability, klass in (("sqli.verify", "sqli"), ("xss.verify", "xss")):
                 if capability not in allowed or klass not in untested or (capability == "sqli.verify" and screened):
+                    continue
+                # The XSS tool (seconds to minutes and tens of requests an input) runs where one
+                # request with a marker in every input saw the marker come back unencoded, on every
+                # route: measured Hunts spent the whole tool-time budget on inputs that reflect
+                # nothing. A request with no answer falls back to the tool.
+                if capability == "xss.verify" and "http.request" in allowed and (method == "GET" or writes):
+                    self._count("xss.verify:reflection_screened")
+                    self._queue_reflection(method, route, params, identity)
+                    continue
+                if product:
+                    self._count(f"{capability}:product_flag_needed")
                     continue
                 if method == "GET":
                     jobs.append(_tool_job(capability, klass, method, route, params, None, identity))
@@ -763,6 +1091,141 @@ class Sweep:
         key = (method, "/".join(segments[2:]), answer)
         first = self.mirror_tested.setdefault(key, route)
         return first != route
+
+    def _product_route(self, route: str) -> bool:
+        """Whether ``route`` belongs to a product discovery recognised: under one of its mounts, one
+        of its own identity or route paths, or a management route of a known product API."""
+        if self._product_prefixes is None:
+            from .products import PRODUCTS
+            recognised = {str(key) for key in self.state.get("products") or ()}
+            prefixes: set[str] = set()
+            for product in PRODUCTS:
+                if product.key not in recognised:
+                    continue
+                prefixes.update(mount.rstrip("/") for mount in PRODUCT_MOUNTS.get(product.key, ()))
+                for path in (*product.identity, *product.routes):
+                    clean = path.split("?", 1)[0].rstrip("/")
+                    if clean:
+                        prefixes.add(clean)
+            self._product_prefixes = tuple(sorted(prefixes))
+        clean = route.split("?", 1)[0].rstrip("/") or "/"
+        if product_api_for(clean) is not None:
+            return True
+        return any(clean == prefix or clean.startswith(prefix + "/") for prefix in self._product_prefixes)
+
+    def _queue_reflection(self, method: str, route: str, params: Sequence[str],
+                          identity: Mapping[str, Any]) -> None:
+        """One request with a marker in every input of a route; xss.verify follows for each input
+        that comes back with the marker's angle bracket unencoded."""
+        # Keyed by the inputs too: a route that gains an input (a later request named it) is screened again.
+        key = f"{method} {route} " + ",".join(sorted(params)) + " " + json.dumps(dict(identity), sort_keys=True)
+        if key in self.reflection_probed:
+            return
+        self.reflection_probed.add(key)
+        names = list(params[:10]) if method == "GET" else list(params[:MAX_FIELDS_PER_BODY])
+        tag = secrets.token_hex(3)
+        marks = {name: f"zsk{index}r{tag}<" for index, name in enumerate(names)}
+
+        async def probe() -> None:
+            values: dict[str, Any] = {"method": method, "path": concrete(route), "follow_redirects": False,
+                                      **identity}
+            if method == "GET":
+                values["path"] = f"{concrete(route)}?" + urllib.parse.urlencode(marks)
+            else:
+                values["form_body"] = dict(marks)
+            result = await self._safe("http.request", values, sweep_key("reflect", key))
+            answer = _response(result)
+            if not isinstance(answer.get("status"), int):
+                # The screen got no answer (refused, a transport error): the tool decides instead.
+                self._queue_long(_tool_job("xss.verify", "xss", method, route, params,
+                                           None if method == "GET" else (names[0] if names else None), identity))
+                return
+            text = str(answer.get("body_sample") or "")
+            for name, mark in marks.items():
+                if mark in text:
+                    self._count("reflection_flagged")
+                    self._queue_long(_tool_job("xss.verify", "xss", method, route, params,
+                                               None if method == "GET" else name, identity))
+                    if method == "GET":
+                        break
+
+        task = asyncio.get_running_loop().create_task(probe())
+        self._long_jobs.add(task)
+        task.add_done_callback(self._long_jobs.discard)
+
+    async def _discover_parameters(self, items: Sequence[Mapping[str, Any]]) -> list[str]:
+        """Inputs of mapped GET routes that answered with none known: one request carries every
+        common parameter name with its own marker; a reflected marker names an input, and an answer
+        unlike the route's own with nothing reflected is halved until the input is found."""
+        found: list[str] = []
+        gate = asyncio.Semaphore(SHORT_CONCURRENCY)
+
+        async def mine(route: str) -> None:
+            baseline = self.answers.get(route)
+            if baseline is None:
+                return
+            names = list(COMMON_PARAMETERS)
+            tag = secrets.token_hex(3)
+            marks = {name: f"zsp{index}m{tag}" for index, name in enumerate(names)}
+            sent = 0
+
+            async def ask(subset: Sequence[str]) -> Mapping[str, Any]:
+                nonlocal sent
+                sent += 1
+                query = urllib.parse.urlencode({name: marks[name] for name in subset})
+                async with gate:
+                    result = await self._safe("http.request", {"method": "GET", "path": f"{concrete(route)}?{query}",
+                                                               "follow_redirects": False},
+                                              sweep_key("params", route, ",".join(subset)))
+                return _response(result)
+
+            def differs(answer: Mapping[str, Any]) -> bool:
+                status = answer.get("status")
+                if not isinstance(status, int) or status in {429} or status >= 500 and baseline[0] < 500:
+                    return False
+                length = len(str(answer.get("body_sample") or ""))
+                return status != baseline[0] or abs(length - baseline[1]) > max(16, 0.05 * max(length, baseline[1]))
+
+            answer = await ask(names)
+            text = str(answer.get("body_sample") or "")
+            inputs = [name for name in names if marks[name] in text]
+            if not inputs and differs(answer):
+                pending = [names]
+                while pending and sent < MAX_PARAMETER_REQUESTS:
+                    group = pending.pop()
+                    if len(group) == 1:
+                        inputs.append(group[0])
+                        continue
+                    half = len(group) // 2
+                    changed = []
+                    for part in (group[:half], group[half:]):
+                        if sent >= MAX_PARAMETER_REQUESTS:
+                            break
+                        if differs(await ask(part)):
+                            changed.append(part)
+                    if len(changed) == 2:
+                        # Both halves change the answer: the route answers any query differently
+                        # (a strict validator, a cache key); no one name is an input. Stop.
+                        pending.clear()
+                        break
+                    pending.extend(changed)
+            if inputs:
+                self._count("parameters_found")
+                found.append(f"GET {route}?" + "&".join(f"{urllib.parse.quote(name)}=1" for name in inputs[:10]))
+
+        routes = []
+        for item in items:
+            method, _, route = str(item.get("endpoint") or "").partition(" ")
+            answer = self.answers.get(route)
+            if (method != "GET" or item.get("params") or route in self.params_mined or "{" in route
+                    or not isinstance(answer, tuple) or not isinstance(answer[0], int) or not 200 <= answer[0] < 300
+                    or _STATIC_ROUTE.search(route) or self._product_route(route)):
+                continue
+            routes.append(route)
+        for route in routes[:max(0, MAX_PARAMETER_ROUTES - len(self.params_mined))]:
+            self.params_mined.add(route)
+        await asyncio.gather(*(mine(route) for route in routes if route in self.params_mined))
+        return found
 
     def _shape_from(self, route: str, response: Mapping[str, Any], method: str) -> list[str]:
         """Inventory entries for the inputs a validation answer says ``route`` requires."""
@@ -811,12 +1274,22 @@ class Sweep:
                 continue
             if self._mirror(method, route):
                 continue
+            if _TEMPLATE_ARTIFACT.search(route):
+                continue  # a client-side template's placeholder a crawl read as a link, not a route
             untested = set(item.get("untested") or ())
             params = [str(name) for name in item.get("params") or () if str(name)]
             path = concrete(route)
-            identity = {"as_principal": slots[0]} if route in self.signed_in_only and slots else {}
+            identity = self._identity(item, route, slots)
+            if identity.get("request_bindings") and method == "GET":
+                # The first route reached with a login the planner made: its bearer token gets the
+                # JWT check once (one request when the login is not a bearer JWT).
+                who = json.dumps(identity["request_bindings"], sort_keys=True)
+                if who not in self.jwt_checked:
+                    self.jwt_checked.add(who)
+                    jobs.append((0, {"check": "jwt", "method": "GET", "path": path, **identity}, None))
             if _GRAPHQL_PATH.search(route):
                 jobs.append((0, {"check": "graphql", "method": "POST" if writes else "GET", "path": path, **identity}, None))
+                self.graphql_seen.append((path, json.dumps(identity, sort_keys=True)))
                 continue
             if method == "GET" and "unauthenticated_api" in untested and \
                     sum(1 for _rank, job, _f in jobs if job["check"] == "cors") < MAX_HEADER_CHECK_ROUTES:
@@ -840,13 +1313,30 @@ class Sweep:
             for name in names:
                 for rank, check in input_checks(name, method):
                     follow = None
-                    if check == "sql_injection" and self.sqli_tool:
+                    if check == "sql_injection" and self.sqli_tool and "request_bindings" not in identity:
+                        # The long tools take a managed principal, not a captured login.
                         follow = _tool_job("sqli.verify", "sqli", method, route, params,
                                            None if method == "GET" else name, identity)
                     jobs.append((rank, {**base, **identity, "check": check, "parameter": name}, follow))
         jobs.sort(key=lambda job: job[0])
-        for _rank, values, follow in jobs:
-            self._queue_request_check(values, follow_up=follow)
+        for rank, values, follow in jobs:
+            self._queue_request_check(values, follow_up=follow, rank=rank)
+
+    async def _graphql_arguments(self, *, writes: bool) -> None:
+        """Each GraphQL endpoint's query arguments, tested as inputs (hunt/graphql_sweep)."""
+        for path, identity in graphql_sweep.routes(self.graphql_seen):
+            if path in self.graphql_done:
+                continue
+            self.graphql_done.add(path)
+            result = await self._safe("http.request", graphql_sweep.introspection_request(path, identity, writes=writes),
+                                      sweep_key("graphql-schema", path))
+            action = _action_id(result)
+            body = _response(result).get("body_sample")
+            if not action or not body:
+                continue
+            for locus in graphql_sweep.argument_loci(body, path.split("?", 1)[0]):
+                self._count("graphql_arguments")
+                await self._candidate_and_verify(graphql_sweep.candidate_values(locus, action))
 
     async def _signin_checks(self, path: str, user: str, secret: str, json_body: bool) -> None:
         """A sign-in's own request checks: rate limiting, LDAP and NoSQL wildcards (request.verify)."""
@@ -861,23 +1351,29 @@ class Sweep:
             self._queue_request_check({**base, "check": "nosql_injection", "parameter": user})
 
     def _queue_request_check(self, values: Mapping[str, Any], *,
-                             follow_up: tuple[str, dict[str, Any], str] | None = None) -> None:
-        """Run one request.verify call from the short queue (REQUEST_CONCURRENCY at a time); a
+                             follow_up: tuple[str, dict[str, Any], str] | None = None,
+                             rank: int = 0) -> None:
+        """Run one request.verify call from the short queue (REQUEST_CONCURRENCY at a time, lowest
+        ``rank`` first; a check sent as a signed-in identity goes before every anonymous one); a
         ``follow_up`` long verifier is queued when the check's answer says the tool should look."""
+        if values.get("request_bindings") or values.get("as_principal"):
+            rank = -1
         identity = json.dumps(
             [values.get("check"), values.get("method"), values.get("path"), values.get("parameter"),
-             values.get("as_principal")], sort_keys=True)
+             values.get("as_principal"), values.get("request_bindings") or None],
+            sort_keys=True)
         if identity in self.request_checks_sent or len(self.request_checks_sent) >= MAX_REQUEST_CHECKS:
             return
         self.request_checks_sent.add(identity)
 
         async def one() -> None:
-            async with self._request_gate:
-                try:
-                    result = await self._safe("request.verify", values, sweep_key("request", identity))
-                finally:
-                    self.request_checks_done += 1
-                    self._stats()
+            await self._request_gate.acquire(rank)
+            try:
+                result = await self._safe("request.verify", values, sweep_key("request", identity))
+            finally:
+                self._request_gate.release()
+                self.request_checks_done += 1
+                self._stats()
             if follow_up is not None and sql_screen_escalates(result):
                 self._queue_long(follow_up)
 

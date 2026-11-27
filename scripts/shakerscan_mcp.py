@@ -1766,15 +1766,14 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
         "policy": {
             "type": "object",
             "description": (
-                "Explicit permissions for this Hunt. Passive is the default. Name the authority you "
-                "want directly: allow_state_changing_http, network_discovery, allow_oob_interactions, "
-                "allow_identity_headers and allow_direct_origin each enable active_testing on their "
-                "own. All of them, and credential work, need authorization_confirmed=true and a target "
-                "authorized once with POST /targets/{target_id}/authorization; that standing "
-                "authorization is resolved automatically, and a Hunt asked to run without it is "
-                "refused with a 422 that names this. Read policy_adjustments on the response: it "
-                "reports actual policy and budget adjustments. Unauthorized work is never downgraded. "
-                "Selected target credentials reuse standing authorization; target HTTP and self-signed HTTPS are supported."
+                "Explicit permissions; passive by default. Name the authority you want: allow_state_changing_http, network_discovery, allow_oob_interactions, "
+                "allow_account_creation, allow_identity_headers and "
+                "allow_direct_origin each enable active_testing. All of them, and credential work, need authorization_confirmed=true and a target "
+                "authorized once with POST /targets/{target_id}/authorization (resolved "
+                "automatically; without it the start is refused with a 422 naming it). "
+                "policy_adjustments on the response reports actual policy and budget changes. "
+                "Unauthorized work is never downgraded. "
+                "Selected credentials reuse standing authorization; HTTP and self-signed HTTPS work."
             ),
             "properties": policy_properties,
             "additionalProperties": False,
@@ -1927,7 +1926,7 @@ def _capability_inputs_text(contract: Mapping[str, Any]) -> str:
             continue
         required = [str(item) for item in call["input"].get("required") or ()]
         optional = [str(item) for item in call["input"].get("fields") or () if str(item) not in required]
-        text = ", ".join(required) if required else "no required fields ({} is valid)"
+        text = ", ".join(required) if required else "none required ({} is valid)"
         if optional:
             text += f" (optional: {', '.join(optional)})"
         lines.append(f"{call['name']}: {text}")

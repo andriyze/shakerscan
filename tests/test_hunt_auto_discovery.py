@@ -255,3 +255,32 @@ def test_stop_cancels_the_running_discovery_and_drops_a_deferred_finish():
         return fake
 
     assert asyncio.run(scenario()).calls
+
+
+
+def test_an_api_description_longer_than_the_answer_sample_is_parsed_whole_and_ingested():
+    """VAmPI's 29 KB spec answered complete, but http.request returns a 16 KB sample and Werkzeug
+    ignores byte ranges: the routes it declares were never mapped, only noted for the planner.
+    Discovery has the worker parse the whole document (javascript.analyze) and ingests its routes."""
+    spec = json.dumps({"openapi": "3.0.0", "paths": {"/users/v1/{username}": {"delete": {}}}})
+
+    class Worker(_Fake):
+        async def execute(self, hunt_id, capability, values, key):
+            if capability == "javascript.analyze":
+                self.calls.append((capability, dict(values), key))
+                return {"action_result": {"status": "success", "observations": [{
+                    "kind": "javascript_analysis", "api_description_routes": [
+                        {"method": "GET", "path": "/api/v1/thing0", "body_field_names": [], "content_type": ""},
+                        {"method": "POST", "path": "/users/v1/register", "content_type": "application/json",
+                         "body_field_names": ["username", "password", "email"]},
+                        {"method": "DELETE", "path": "/users/v1/{username}", "body_field_names": [],
+                         "content_type": ""}]}]}}
+            return await super().execute(hunt_id, capability, values, key)
+
+    fake = Worker({"/openapi.json": _response(200, spec[:40], length=29_537, content_type="application/json")})
+    state = asyncio.run(_runner(fake).run())
+    (_target, worklist, _source), = fake.recorded
+    assert "GET /api/v1/thing0" in worklist and "DELETE /users/v1/{username}" in worklist
+    assert 'POST /users/v1/register json:{"username":"","password":"","email":""}' in worklist
+    assert [values["path"] for cap, values, _key in fake.calls if cap == "javascript.analyze"].count("/openapi.json") == 1
+    assert not any("API description at /openapi.json" in note for note in state.get("notes", []))

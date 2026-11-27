@@ -223,7 +223,8 @@ def record_tunnel(
             "connections_opened", "connections_rejected", "bytes_to_target",
             "bytes_from_target", "http_requests_observed", "content_readable",
             "methods_observed", "request_lines_dropped", "refused_destinations",
-            "refused_destinations_other",
+            "refused_destinations_other", "status_counts", "holds", "held_seconds",
+            "refused_after_lock",
         )
     }
     summary["tool"] = str(tool or "")
@@ -282,7 +283,8 @@ def record_tunnel(
             "request_body": None,
             "response_headers": {},
             "response_body": None,
-            "status_code": None,
+            # The answer's status, read from a cleartext response (None when it was not read).
+            "status_code": line.get("status") if isinstance(line.get("status"), int) else None,
             "remote_ip": connected[0] if len(connected) == 1 else None,
             "fidelity": TUNNEL_REQUEST_FIDELITY,
             "tunnel_request": {

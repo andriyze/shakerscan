@@ -96,106 +96,9 @@ EXPOSURE_PATHS: tuple[str, ...] = tuple(dict.fromkeys(
     (*SENSITIVE_SEED_PATHS, *THOROUGH_SEED_PATHS, *EXTRA_EXPOSURE_PATHS)))
 
 
-@dataclass(frozen=True)
-class Product:
-    """A product's identity probes, and the known sensitive routes probed once it answers."""
-
-    key: str
-    identity: tuple[str, ...]
-    routes: tuple[str, ...] = ()
-    # Text one identity answer must carry (in its body sample, title or JSON keys) to count;
-    # without it, any answer distinct from the control counts.
-    marker: str | None = None
+from .products import PRODUCTS, Product  # noqa: F401 - re-exported: callers import them from here
 
 
-PRODUCTS: tuple[Product, ...] = (
-    Product("jenkins", ("/jenkins/api/json", "/jenkins/login", "/api/json"),
-            ("/jenkins/script", "/jenkins/whoAmI/api/json", "/jenkins/asynchPeople/api/json",
-             "/jenkins/people/api/json", "/jenkins/queue/api/json", "/jenkins/computer/api/json",
-             "/script", "/whoAmI/api/json", "/asynchPeople/api/json"),
-            marker=r"jenkins|hudson|_class"),
-    Product("jupyter", ("/api/kernelspecs", "/api/status"),
-            ("/api/kernels", "/api/sessions", "/api/terminals", "/api/contents", "/tree", "/lab"),
-            marker=r"kernelspecs|kernels|started|last_activity|jupyter"),
-    Product("ray", ("/api/cluster_status", "/api/version"),
-            ("/api/jobs/", "/api/v0/nodes", "/api/v0/actors", "/api/v0/tasks", "/api/v0/logs",
-             "/nodes?view=summary"),
-            marker=r"ray|autoscaler|cluster_status"),
-    Product("mlflow", ("/api/2.0/mlflow/experiments/search?max_results=1",
-                       "/ajax-api/2.0/mlflow/experiments/search?max_results=1"),
-            ("/api/2.0/mlflow/registered-models/search", "/ajax-api/2.0/mlflow/registered-models/search",
-             "/api/2.0/mlflow/experiments/get-by-name?experiment_name=Default", "/get-artifact",
-             "/model-versions/get-artifact"),
-            marker=r"experiment"),
-    Product("langflow", ("/api/v1/version", "/api/v1/auto_login"),
-            ("/api/v1/flows/", "/api/v1/all", "/api/v1/users/whoami", "/api/v1/login",
-             "/api/v1/validate/code", "/api/v1/custom_component"),
-            marker=r"langflow|access_token|version"),
-    Product("flowise", ("/api/v1/ping",), ("/api/v1/chatflows", "/api/v1/credentials", "/api/v1/apikey"),
-            marker=r"pong"),
-    Product("comfyui", ("/system_stats", "/api/system_stats"),
-            ("/object_info", "/queue", "/history", "/api/queue", "/api/history", "/view",
-             "/customnode/getlist", "/manager/queue/status"),
-            marker=r"system|devices|comfyui|python_version"),
-    Product("ollama", ("/api/version", "/api/tags"), ("/api/ps", "/api/show", "/ollama/api/tags"),
-            marker=r"version|models"),
-    Product("openai_api", ("/v1/models",), ("/v1/usage", "/v1/files", "/v1/chat/completions"),
-            marker=r"\bdata\b|object|model"),
-    Product("mcp", ("/mcp", "/.well-known/mcp.json"), ("/mcp/tools", "/mcp/resources"),
-            marker=r"jsonrpc|tools|mcp|protocol"),
-    Product("a2a", ("/.well-known/agent-card.json", "/.well-known/agent.json"), ("/a2a/tasks",),
-            marker=r"skills|capabilities|agent"),
-    Product("tomcat", ("/manager/html", "/manager/text/list", "/host-manager/html"),
-            ("/manager/status", "/manager/text/serverinfo"), marker=None),
-    Product("phpmyadmin", ("/phpmyadmin/", "/phpMyAdmin/", "/pma/", "/dbadmin/", "/myadmin/"), (),
-            marker=r"phpmyadmin|pma_"),
-    Product("wordpress", ("/wp-login.php", "/wp-json/"),
-            ("/wp-json/wp/v2/users", "/xmlrpc.php", "/readme.html", "/wp-content/debug.log",
-             "/wp-config.php.bak", "/wp-config.php~", "/?author=1"),
-            marker=r"wordpress|wp-|namespaces"),
-    Product("drupal", ("/core/CHANGELOG.txt", "/CHANGELOG.txt", "/user/login"),
-            ("/user/register", "/core/install.php", "/node/1"), marker=r"drupal"),
-    Product("joomla", ("/administrator/manifests/files/joomla.xml", "/administrator/"),
-            ("/api/index.php/v1/config/application?public=true", "/api/index.php/v1/users?public=true",
-             "/configuration.php.bak"), marker=r"joomla"),
-    Product("laravel", ("/_ignition/health-check", "/telescope", "/horizon", "/_debugbar/open"),
-            ("/storage/logs/laravel.log", "/telescope/telescope-api/requests", "/telescope/requests",
-             "/horizon/api/stats", "/_ignition/execute-solution"), marker=None),
-    Product("spring", ("/actuator", "/actuator/health"),
-            ("/actuator/env", "/actuator/mappings", "/actuator/configprops", "/actuator/logfile",
-             "/actuator/beans", "/jolokia/list", "/jolokia/read"), marker=r"_links|status|UP"),
-    Product("jolokia", ("/jolokia/", "/jolokia/version"), ("/jolokia/list", "/jolokia/read"),
-            marker=r"jolokia|agent|protocol"),
-    Product("docker_api", ("/_ping", "/version", "/v1.41/version"),
-            ("/info", "/containers/json", "/images/json", "/v1.41/containers/json"),
-            marker=r"ApiVersion|OK|Docker"),
-    Product("container_registry", ("/v2/",), ("/v2/_catalog",), marker=None),
-    Product("kubelet", ("/healthz", "/pods"), ("/runningpods/", "/configz", "/stats/summary", "/spec/"),
-            marker=r"PodList|items|ok"),
-    Product("kubernetes", ("/api", "/apis", "/k8s/clusters/local/api/v1/namespaces"),
-            ("/api/v1/namespaces", "/api/v1/secrets", "/api/v1/pods"), marker=r"APIVersions|versions|kind"),
-    Product("etcd", ("/v2/keys/", "/v3/version"), ("/v2/keys/?recursive=true", "/v2/members"),
-            marker=r"etcd|node|action"),
-    Product("consul", ("/v1/agent/self",), ("/v1/kv/?recurse", "/v1/catalog/services"), marker=r"Config|Member"),
-    Product("elasticsearch", ("/_cluster/health",), ("/_cat/indices", "/_nodes"), marker=r"cluster_name"),
-    Product("grafana", ("/api/health",), ("/api/datasources", "/api/users", "/api/snapshots"),
-            marker=r"database|version"),
-    Product("gitlab", ("/api/v4/version", "/users/sign_in"), ("/api/v4/projects", "/explore/projects", "/api/v4/users"),
-            marker=r"gitlab|version"),
-    Product("prometheus", ("/api/v1/status/buildinfo",), ("/api/v1/status/config", "/api/v1/targets", "/metrics"),
-            marker=r"version|success"),
-    Product("solr", ("/solr/admin/info/system?wt=json",), ("/solr/admin/cores?wt=json",), marker=r"solr|lucene"),
-    Product("n8n", ("/rest/settings",), ("/rest/workflows", "/rest/credentials"), marker=r"data|n8n"),
-    Product("exchange", ("/autodiscover/autodiscover.xml", "/EWS/Exchange.asmx", "/owa/"),
-            ("/mapi/", "/rpc/", "/_vti_bin/"), marker=None),
-    Product("php", ("/phpinfo.php", "/info.php"), ("/php.php", "/test.php", "/debug.php"),
-            marker=r"phpinfo|PHP Version|php"),
-    Product("apache_status", ("/server-status", "/server-info"), (), marker=r"Apache|Server"),
-    Product("scim", ("/scim/v2/ServiceProviderConfig", "/scim/v2/Users"), ("/scim/v2/Groups",),
-            marker=r"schemas|Resources|scim"),
-    Product("odata", ("/odata/$metadata", "/api/$metadata"), ("/odata/Users",), marker=r"edmx|EntityType"),
-    Product("nextjs", (), ("/api/auth/session", "/dashboard", "/admin"), marker=None),
-)
 _PRODUCT_BY_KEY = {product.key: product for product in PRODUCTS}
 # Products recognised from the root page alone (no identity probe of their own).
 _ROOT_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -369,6 +272,14 @@ def _observation(result: Any) -> Mapping[str, Any] | None:
     return None
 
 
+def _observation_of(result: Any) -> Mapping[str, Any] | None:
+    """The first observation of a capability result (an artifact window), or None."""
+    action = (result or {}).get("action_result") if isinstance(result, Mapping) else None
+    items = (action or {}).get("observations") if isinstance(action, Mapping) else None
+    first = items[0] if isinstance(items, list) and items else None
+    return first if isinstance(first, Mapping) else None
+
+
 def answer_of(result: Any) -> dict[str, Any] | None:
     """(status, length, text, content type) of one probe's answer, or None when nothing came back."""
     response = _observation(result)
@@ -447,11 +358,14 @@ def configure_auto_discovery(*, execute: Executor, record: Recorder,
                              load_run: Callable[[str], Awaitable[Mapping[str, Any] | None]],
                              load_report: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None = None,
                              create_candidate: Callable[[str, Mapping[str, Any]], Awaitable[Any]] | None = None,
-                             finish: Callable[..., Awaitable[Any]] | None = None) -> None:
+                             finish: Callable[..., Awaitable[Any]] | None = None,
+                             request_permission: Callable[..., Awaitable[str]] | None = None) -> None:
     """Wire the Hunt capability call, the inventory write, the run read, and for the sweep the
-    coverage read, candidate recording and the deferred finish (composition root)."""
+    coverage read, candidate recording, the deferred finish and its own permission requests
+    (composition root)."""
     _DEFAULTS.update(execute=execute, record=record, load_run=load_run)
-    for name, value in (("load_report", load_report), ("create_candidate", create_candidate), ("finish", finish)):
+    for name, value in (("load_report", load_report), ("create_candidate", create_candidate), ("finish", finish),
+                        ("request_permission", request_permission)):
         if value is not None:
             _DEFAULTS[name] = value
 
@@ -459,6 +373,12 @@ def configure_auto_discovery(*, execute: Executor, record: Recorder,
 def sweep_running(hunt_id: str) -> bool:
     """Whether this process is still running the Hunt's discovery or sweep."""
     return bool((_STATE.get(str(hunt_id)) or {}).get("running"))
+
+
+def sweep_following(hunt_id: str) -> bool:
+    """Whether the Hunt's sweep has tested what was mapped and now only follows the planner."""
+    state = _STATE.get(str(hunt_id)) or {}
+    return bool(state.get("running")) and state.get("sweep") == "following"
 
 
 def stop(hunt_id: str) -> bool:
@@ -587,8 +507,13 @@ class DiscoveryRunner:
             return _live(await self._load_run(self.hunt_id))
 
         create = self._create_candidate
+        ask = _DEFAULTS.get("request_permission")
+
+        async def request_permission(flag: str, routes: list[str]) -> str:
+            return await ask(self.hunt_id, flag, routes) if ask is not None else "unavailable"
+
         sweep = Sweep(call=call, create_candidate=lambda values: create(self.hunt_id, values),
-                      state=self.state, live=live, pace=self.pace)
+                      state=self.state, live=live, pace=self.pace, request_permission=request_permission)
         target_id = str(run.get("target_id") or "")
 
         async def reload() -> Mapping[str, Any] | None:
@@ -598,7 +523,10 @@ class DiscoveryRunner:
             return await self._record(target_id, worklist, "hunt_sweep") if target_id else 0
 
         try:
-            await sweep.run(run, report, load_report=reload, record=record)
+            # The sweep follows the Hunt until the planner finishes (its finish is deferred while
+            # the sweep runs): what the planner maps later gets the same checks.
+            await sweep.run(run, report, load_report=reload, record=record,
+                            planner_finished=lambda: bool(self.state.get("deferred_finish")))
         except asyncio.CancelledError:
             if self.state.get("sweep") != "stopped":
                 raise
@@ -649,6 +577,28 @@ class DiscoveryRunner:
         result = await self._call("http.request", {"method": "GET", "path": path, "follow_redirects": False},
                                   _probe_key(path))
         return answer_of(result)
+
+    async def _whole_spec(self, path: str, answer: Mapping[str, Any]) -> Mapping[str, Any]:
+        """An API description longer than a request's answer sample, parsed on the worker.
+
+        ``http.request`` returns the first ``body_sample`` characters; a spec past them (VAmPI's is
+        29 KB) was never ingested, only noted for the planner, and a server that ignores byte
+        ranges cannot be read in artifact windows. ``javascript.analyze`` reads the whole document
+        and returns the routes an OpenAPI/Swagger description declares."""
+        body = str(answer.get("body") or "")
+        length = int(answer.get("length") or 0)
+        if not answer.get("complete") or length <= len(body.encode("utf-8")):
+            return answer
+        await self.pace.take(1)
+        try:
+            result = await self._call("javascript.analyze", {"path": path}, f"spec-read:{_probe_key(path)}")
+        except _Refused:
+            return answer
+        analysis = _observation_of(result)
+        routes = (analysis or {}).get("api_description_routes")
+        if not isinstance(routes, list) or not routes:
+            return answer
+        return {**answer, "records": routes}
 
     async def _probe_phase(self, run: Mapping[str, Any]) -> None:
         self.state["probes"] = "running"
@@ -733,6 +683,7 @@ class DiscoveryRunner:
                 found.append(f"GET {path}")
 
         await asyncio.gather(*(exposure(path) for path in EXPOSURE_PATHS))
+        specs = [(path, await self._whole_spec(path, answer)) for path, answer in specs]
         routes = _spec_routes(specs, origin=_origin(run))
         if specs and not routes:
             for path, _answer in specs:
@@ -770,13 +721,17 @@ def _spec_routes(specs: Sequence[tuple[str, Mapping[str, Any]]], *, origin: str)
         from ..capabilities.spec_ingest import ingest_spec_bodies
     documents = [(f"{origin}{path}", str(answer.get("body") or "").encode("utf-8"), answer.get("content_type"))
                  for path, answer in specs if answer.get("complete") and answer.get("body")
+                 and not answer.get("records")
                  and int(answer.get("length") or 0) <= len(str(answer.get("body") or "").encode("utf-8"))]
-    if not documents:
+    # Routes the worker parsed from a whole document (``_whole_spec``), relative to the origin.
+    parsed = [{**dict(route), "url": origin + str(route.get("path") or "")}
+              for _path, answer in specs for route in answer.get("records") or () if isinstance(route, Mapping)]
+    if not documents and not parsed:
         return []
     try:
-        records = ingest_spec_bodies(documents, origin=origin)
+        records = (ingest_spec_bodies(documents, origin=origin) if documents else []) + parsed
     except Exception:  # noqa: BLE001 - untrusted document
-        return []
+        records = parsed
     out: list[str] = []
     for record in records[:500]:
         url = str(record.get("url") or "")
@@ -847,5 +802,5 @@ def start(hunt_id: str, *, runner: DiscoveryRunner | None = None) -> asyncio.Tas
 __all__ = [
     "CONTENT_WORDLISTS", "DiscoveryRunner", "configure_auto_discovery", "PRODUCTS", "SETTING", "Step", "answer_of",
     "discovery_state", "enabled", "plan_steps", "present", "probe_key_digests", "probe_paths",
-    "signed_in_slots", "start", "stop", "sweep_running", "defer_finish", "testing_authority", "wait_stopped",
+    "signed_in_slots", "start", "stop", "sweep_following", "sweep_running", "defer_finish", "testing_authority", "wait_stopped",
 ]
