@@ -153,6 +153,58 @@ def test_cors_answers_that_grant_nothing_are_not_findings():
                 if f["evidence"].get("check", "").startswith("cors_")]
 
 
+# A single-sign-on gateway in front of the application answers every request with a redirect to
+# its login page and echoes the request's Origin with credentials on that redirect.
+_SSO_LOGIN = "https://team.example.com/cdn-cgi/access/login/app.example.test?redirect_url=%2F"
+
+
+def _cors_answer(action_id: str, sent: str, **response):
+    headers = {"access-control-allow-origin": sent, "access-control-allow-credentials": "true"}
+    return {action_id: [{
+        "kind": "http_observation",
+        "request": {"method": "GET", "origin": "https://app.example.test", "path": "/"},
+        "response": {"security_headers": headers, **response},
+    }]}
+
+
+def test_a_cors_grant_on_a_redirect_or_sso_interstitial_is_a_low_candidate_not_a_proven_high():
+    for action_id, sent in (("baseline.cors", CORS_PROBE_ORIGIN), ("baseline.cors_null", "null")):
+        cases = {
+            "redirect": dict(status=302, location=_SSO_LOGIN, content_length=0, bytes_observed=0),
+            "empty": dict(status=200, content_length=0, bytes_observed=0),
+            "interstitial": dict(status=200, content_length=1800, bytes_observed=1800, body_sample=(
+                '<html><head><title>Sign in</title></head><body><form action="/cdn-cgi/access/login">'
+                "</form></body></html>")),
+            "client_error": dict(status=403, content_length=120, bytes_observed=120),
+        }
+        for case, response in cases.items():
+            [finding] = _report(_cors_answer(action_id, sent, **response))["findings"]
+            assert finding["severity"] == "low", (action_id, case)
+            assert finding["proof_state"] == "candidate" and finding["verified"] is False, (action_id, case)
+            assert finding["suspected"] is True and "proof_contract_v2" not in finding
+            assert finding["evidence"]["unreadable_reason"]
+        # The same grant on an answer that carries the application's content is proven and high.
+        [proven] = _report(_cors_answer(action_id, sent, status=200, content_length=5400,
+                                        bytes_observed=5400))["findings"]
+        assert (proven["severity"], proven["proof_state"], proven["verified"]) == ("high", "verified", True)
+
+
+def test_the_probe_judges_readability_before_the_receipt_drops_the_body():
+    from api.scan.posture_findings import cors_findings, cors_probe_verdict
+    headers = {"access-control-allow-origin": CORS_PROBE_ORIGIN, "access-control-allow-credentials": "true"}
+    page = {"status": 200, "content_length": 2100, "bytes_observed": 2100,
+            "body_sample": '<script src="/cdn-cgi/access/login.js"></script>Sign in to continue'}
+    verdict = cors_probe_verdict(CORS_PROBE_ORIGIN, headers, page)
+    assert verdict["sent_origin_granted"] is True and verdict["unreadable_reason"]
+    stored = {"status": 200, "content_length": 2100, "security_headers": headers, "body_sample": "",
+              "cors_probe": verdict}
+    [finding] = cors_findings("baseline.cors", {"origin": "https://app.example.test", "path": "/"}, stored,
+                              make=lambda **item: dict(item))
+    assert finding["proof_state"] == "candidate" and finding["severity"] == "low"
+    readable = cors_probe_verdict(CORS_PROBE_ORIGIN, headers, {**page, "body_sample": '{"user": "a"}'})
+    assert readable["unreadable_reason"] is None
+
+
 def _dns(records: dict, host: str = "example.com", errors=(), answered=None):
     base = {key: [] for key in ("host_txt", "dmarc", "host_caa", "host_mx")}
     records = {**base, **records}

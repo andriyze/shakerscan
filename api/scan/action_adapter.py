@@ -1747,7 +1747,7 @@ class DatabaseNeutralScanActionDispatcher:
                 # Judged before the receipt redacts the header it compares.
                 headers = response.get("security_headers")
                 response["cors_probe"] = cors_probe_verdict(
-                    cors_probe_origin, headers if isinstance(headers, Mapping) else {},
+                    cors_probe_origin, headers if isinstance(headers, Mapping) else {}, response,
                 )
             if action.action_id == "baseline.security_txt":
                 body = str(response.get("body_sample") or "").strip()
