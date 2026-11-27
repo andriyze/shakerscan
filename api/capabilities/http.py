@@ -632,12 +632,18 @@ async def execute_bound_http_request(
         if isinstance(args.get("form_body"), dict) else None
     )
     url = urllib.parse.urljoin(request_origin + "/", path.lstrip("/"))
+    if _origin_key(url) != _origin_key(request_origin):
+        # urljoin resolves a path whose first segment names a scheme ("/http://...") to another
+        # URL; the request must stay on the bound origin.
+        return {"ok": False, "error": "scope: request path resolves outside the frozen target origin"}
     prefetch_view: dict[str, Any] | None = None
     if args.get("form_prefetch") is True and method == "POST" and form_body is not None:
         # The form's own page first (runtime/form_prefetch): its hidden fields (an anti-CSRF
         # token) and the page's cookies go with this POST; the request's own fields win.
         from runtime import form_prefetch
         page_path = agent_tools.validate_same_origin_path(args.get("form_page") or path)
+        if _origin_key(urllib.parse.urljoin(request_origin + "/", page_path.lstrip("/"))) != _origin_key(request_origin):
+            return {"ok": False, "error": "scope: form_page resolves outside the frozen target origin"}
         seen: dict[str, Any] = {}
 
         def keep(private: WorkerPrivateHTTPResponse) -> None:
