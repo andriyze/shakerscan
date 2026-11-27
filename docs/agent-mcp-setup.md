@@ -1,7 +1,7 @@
 # Connect your agent to ShakerScan MCP
 
 **Status:** maintained setup guide for the open-source engine. `shakerscan mcp install` ships in the
-client after 0.14.0; the file formats were checked against OpenCode 2.4, Claude Code 2.1, Codex CLI
+client 0.15.0 and later; the file formats were checked against OpenCode 2.4, Claude Code 2.1, Codex CLI
 0.171, the Cursor CLI and each editor's documentation in November 2026.
 
 This page registers the ShakerScan MCP server in your coding agent once, permanently, so every
