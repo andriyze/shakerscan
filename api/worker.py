@@ -67,7 +67,7 @@ from retest_contract import (
     validate_retest_job_payload,
 )
 from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
-from runtime import target_pacing
+from runtime import target_backoff, target_pacing
 from runtime.nuclei_index import ensure_nuclei_template_index
 from runtime.heavy_slots import HeavyScannerSlot, HeavySlotUnavailable
 from runtime.scanner_cancel import ThrottledCancelCheck, shared_client
@@ -18333,6 +18333,8 @@ async def _execute_agent_scanner_process(
             int(reserved_budget.get("tcp_ports_attempted") or 0),
         )
         if name not in _DIRECT_ADDRESS_SCANNERS:
+            # The target's holds (429 Retry-After, a ban) are shared with every worker through Redis.
+            target_backoff.BACKOFF.share(redis_client)
             pinned_proxy = await PinnedSocksProxy(
                 hostname=str(parsed_execution.hostname or ""),
                 pinned_addresses=job_data.get("authorized_addresses") or (),

@@ -28,7 +28,9 @@ the next request or opens the next connection:
   ``BAN_BASE_SECONDS`` and double while the ban persists.
 
 An encrypted (TLS) tunnel's answers cannot be read, so they set no hold; such a tunnel still
-waits out a hold set by readable traffic to the same origin. Holds are per worker process. Every
+waits out a hold set by readable traffic to the same origin. Holds are shared by every worker
+through Redis (``share``; key ``scan:origin_hold:<origin>``, expiring with the hold), so a tool in
+another worker container waits too; without Redis they hold this process only. Every
 hold is counted in the tunnel record (``holds``), and the answers' statuses reach the archive,
 where ``target_pacing`` sees them for the next attempt.
 """
@@ -49,6 +51,14 @@ BAN_STREAK = 20
 BAN_STREAK_PATHS = 3
 MAX_KNOWN_GOOD = 4_096
 LOCK_HOLD_SECONDS = 900.0
+SHARED_KEY = "scan:origin_hold:{origin}"
+SHARED_CHECK_SECONDS = 1.0
+# Extend the shared hold only when this one ends later (PTTL in ms; -2 missing, -1 no expiry).
+_EXTEND = """
+local left = redis.call('PTTL', KEYS[1])
+if left < tonumber(ARGV[1]) then redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[1]) end
+return 1
+"""
 _STATUS_LINE = re.compile(rb"^HTTP/1\.[01] (\d{3})(?: .*)?$")
 _MAX_HEADER_BYTES = 64 * 1024
 
@@ -194,6 +204,35 @@ class TargetBackoff:
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._origins: dict[str, _Origin] = {}
+        self._store: Any = None
+        self._shared: dict[str, tuple[float, float]] = {}  # origin -> (checked at, held until)
+
+    def share(self, store: Any) -> None:
+        """Share holds through this Redis client (the first one given is kept)."""
+        if store is not None and self._store is None:
+            self._store = store
+
+    def _publish(self, origin: str, seconds: float, reason: str) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.eval(_EXTEND, 1, SHARED_KEY.format(origin=origin), str(int(seconds * 1000)), reason)
+        except Exception:  # noqa: BLE001 - the shared store failed: this process still holds
+            pass
+
+    def _shared_remaining(self, origin: str) -> float:
+        if self._store is None:
+            return 0.0
+        now = self._clock()
+        checked, until = self._shared.get(origin, (-1e9, 0.0))
+        if now - checked >= SHARED_CHECK_SECONDS:
+            try:
+                left = int(self._store.pttl(SHARED_KEY.format(origin=origin)))
+            except Exception:  # noqa: BLE001
+                left = -2
+            until = now + left / 1000.0 if left > 0 else 0.0
+            self._shared[origin] = (now, until)
+        return max(0.0, until - now)
 
     def _get(self, origin: str) -> _Origin:
         state = self._origins.get(origin)
@@ -215,7 +254,7 @@ class TargetBackoff:
         if status == 429 or (status == 503 and retry is not None):
             state.throttles += 1
             hold = retry if retry is not None else THROTTLE_BASE_SECONDS * 2 ** min(state.throttles - 1, 5)
-            self._hold(state, min(MAX_HOLD_SECONDS, max(1.0, hold)), f"{status} from the target")
+            self._hold(origin, state, min(MAX_HOLD_SECONDS, max(1.0, hold)), f"{status} from the target")
             return "throttled"
         if status == 403:
             state.streak += 1
@@ -226,7 +265,7 @@ class TargetBackoff:
                 state.streak, state.streak_paths = 0, set()
                 state.known_good.discard(key)
                 hold = min(MAX_BAN_HOLD_SECONDS, BAN_BASE_SECONDS * 2 ** min(state.bans - 1, 4))
-                self._hold(state, hold, "403 for requests the target served before" if refused_known
+                self._hold(origin, state, hold, "403 for requests the target served before" if refused_known
                            else f"{BAN_STREAK} consecutive 403s across paths")
                 return "banned"
             return None
@@ -237,10 +276,11 @@ class TargetBackoff:
                 state.known_good.add(key)
         return None
 
-    def _hold(self, state: _Origin, seconds: float, reason: str) -> None:
+    def _hold(self, origin: str, state: _Origin, seconds: float, reason: str) -> None:
         until = self._clock() + seconds
         if until > state.until:
             state.until, state.reason = until, reason
+        self._publish(origin, seconds, reason)
 
     def is_locked(self, origin: str, request: dict | None) -> bool:
         """Whether a request goes to a method and path the target answered 423 for."""
@@ -254,12 +294,14 @@ class TargetBackoff:
 
     def remaining(self, origin: str) -> float:
         state = self._origins.get(origin)
-        return max(0.0, state.until - self._clock()) if state else 0.0
+        local = max(0.0, state.until - self._clock()) if state else 0.0
+        return max(local, self._shared_remaining(origin))
 
     async def wait(self, origin: str, sleep: Callable[[float], Any] = asyncio.sleep) -> float:
-        """Wait while the origin is held; returns the seconds waited."""
+        """Wait while the origin is held (here or by another worker); returns the seconds waited."""
         waited = 0.0
-        while (left := self.remaining(origin)) > 0:
+        while (left := (self.remaining(origin) if self._store is None
+                        else await asyncio.to_thread(self.remaining, origin))) > 0:
             step = min(left, 5.0)
             await sleep(step)
             waited += step
@@ -267,6 +309,8 @@ class TargetBackoff:
 
     def reset(self) -> None:
         self._origins.clear()
+        self._shared.clear()
+        self._store = None
 
 
 BACKOFF = TargetBackoff()

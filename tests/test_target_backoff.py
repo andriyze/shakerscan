@@ -123,6 +123,38 @@ def test_a_423_refuses_that_sign_in_route_and_nothing_else():
     assert not backoff.is_locked(ORIGIN, {"method": "POST", "target": "/login"})
 
 
+class _Store:
+    """The two Redis calls the shared hold uses, on a fake clock."""
+
+    def __init__(self, clock):
+        self.clock, self.keys = clock, {}
+
+    def eval(self, _script, _n, key, ms, _reason):
+        left = self.pttl(key)
+        if left < int(ms):
+            self.keys[key] = self.clock() + int(ms) / 1000
+
+    def pttl(self, key):
+        until = self.keys.get(key)
+        return int((until - self.clock()) * 1000) if until and until > self.clock() else -2
+
+
+def test_a_hold_one_worker_sets_holds_the_others_through_the_shared_store():
+    clock = _Clock()
+    store = _Store(clock)
+    worker_a, worker_b = TargetBackoff(clock), TargetBackoff(clock)
+    worker_a.share(store)
+    worker_b.share(store)
+    assert _answer(worker_a, 429, retry="30") == "throttled"
+    assert worker_b.remaining(ORIGIN) == pytest.approx(30, abs=0.01)
+    _answer(worker_b, 429, retry="5")  # a shorter hold does not shorten the shared one
+    clock.now += 10
+    worker_b._shared.clear()
+    assert worker_b.remaining(ORIGIN) == pytest.approx(20, abs=0.01)
+    clock.now += 21
+    assert worker_b.remaining(ORIGIN) == 0
+
+
 def test_unread_tunnel_answers_are_not_degraded_answers():
     unread = [{"status_code": None, "elapsed_ms": None, "error": None}] * 40
     assert assess(unread).state == "normal"
