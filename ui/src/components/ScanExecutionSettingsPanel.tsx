@@ -219,6 +219,46 @@ export default function ScanExecutionSettingsPanel() {
         </div>
       </details>
 
+      <details className="group mt-4 rounded-sm border border-gray-800 bg-gray-950/50" data-testid="intelligence-sources">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-3">
+          <div>
+            <h3 className="text-sm font-medium text-gray-200">Advisory intelligence sources</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Optional data in the advisory snapshot. Off until enabled; nothing is fetched.
+            </p>
+          </div>
+          <span className="shrink-0 text-xs font-medium text-blue-400">
+            <span className="group-open:hidden">Show</span>
+            <span className="hidden group-open:inline">Hide</span>
+          </span>
+        </summary>
+
+        <div className="space-y-3 border-t border-gray-800 p-3">
+          <ToggleField
+            label="Curated vulnerability briefings"
+            description="Rank CVE candidates named in Cloudflare Radar Zero Wire briefings early and open Hunt leads for them. A briefing is a reason to look first: it is not evidence about a target and changes no score."
+            checked={Boolean(settings?.intelligence_sources?.curated_briefings)}
+            disabled={loading || saving || !settings}
+            onChange={(next) => save(
+              { intel_curated_briefings: next },
+              next ? 'Curated briefings enabled' : 'Curated briefings disabled'
+            )}
+            className="p-3"
+          />
+          <ToggleField
+            label="Vendor-declared affected ranges"
+            description="For a CVE NVD has not analysed yet, match services against the affected versions its publisher declared. These stay candidates and are labelled; device posture never uses them."
+            checked={Boolean(settings?.intelligence_sources?.vendor_declared_ranges)}
+            disabled={loading || saving || !settings}
+            onChange={(next) => save(
+              { intel_vendor_declared_ranges: next },
+              next ? 'Vendor-declared ranges enabled' : 'Vendor-declared ranges disabled'
+            )}
+            className="p-3"
+          />
+        </div>
+      </details>
+
       {asmConfig && (
         <div className="mt-4">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">

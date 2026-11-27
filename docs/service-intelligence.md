@@ -95,6 +95,21 @@ means **no match in that snapshot**, not “no vulnerabilities.” Configure the
 incorrect digest fails closed; its trust status remains visible. This feature never performs a live
 CVE, KEV, EPSS or exploit-site query.
 
+### Optional sources are off until enabled
+
+Vendor-declared ranges and curated briefings are optional sources. Neither takes part in matching,
+ranking or Hunt leads until an operator enables it: in Settings, under "Advisory intelligence
+sources", or with `PUT /settings/automation` (`intel_vendor_declared_ranges`,
+`intel_curated_briefings`). `GET /settings/automation` reports both under `intelligence_sources`.
+The choice is stored durably and a value that cannot be read counts as off. Changing it is an
+operator's decision, like every settings write; an agent hands over the command. Enabling a
+source fetches nothing: it only lets data already in the verified snapshot be used. Device
+posture never uses vendor-declared ranges, whatever the setting.
+
+```bash
+shakerscan api PUT /settings/automation '{"intel_curated_briefings":true,"intel_vendor_declared_ranges":true}'
+```
+
 ### Vendor-declared ranges
 
 NVD analysis can trail publication by days or weeks. A snapshot built with `--vendor-ranges`

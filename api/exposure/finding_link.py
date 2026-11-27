@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote, urlsplit
 import uuid
 
+from .intel_sources import load_intel_sources
 from .service_intel import CVE_ID, PRODUCT_CPE_ALIASES, enrich_service, load_service_intelligence
 from .service_inventory import build_inventory, object_value, origin, text
 from .service_store import SCAN_SOURCES_SQL, validated_scan_source
@@ -106,6 +107,7 @@ def _exposure_href(app_origin: str, service_id: str) -> str:
 def exposure_links(
     finding: Mapping[str, Any], services: list[dict[str, Any]], *,
     snapshot: Mapping[str, Any], matcher: Callable[..., Any], limit: int = MAX_RELATED_EXPOSURES,
+    intel_sources: Mapping[str, bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Candidates of the services at the finding's origin that share its CVE or product.
 
@@ -124,7 +126,7 @@ def exposure_links(
                 or service.get("identity_basis") == "port_hint" or not service.get("product")):
             continue
         enriched = dict(service)
-        enrich_service(enriched, snapshot, matcher)
+        enrich_service(enriched, snapshot, matcher, intel_sources)
         product = text(enriched.get("product"), 80)
         same_product = bool(product) and names_product(named, product)
         for order, candidate in enumerate(enriched.get("cve_candidates") or []):
@@ -179,7 +181,8 @@ async def related_exposures(
         if not any(service.get("application_origin") == app_origin and service.get("product") for service in services):
             return []
         snapshot, matcher = await asyncio.to_thread(intelligence)
-        return exposure_links(finding, services, snapshot=snapshot, matcher=matcher)
+        return exposure_links(finding, services, snapshot=snapshot, matcher=matcher,
+                              intel_sources=await load_intel_sources(conn))
     except Exception as exc:  # the brief stands without the link
         logger.warning("finding exposure link unavailable: %s", type(exc).__name__)
         return []
