@@ -1208,12 +1208,31 @@ _ENV_ASSIGNMENT_RE = re.compile(r"[ \t]*(?:export[ \t]+)?([A-Z][A-Z0-9_]{1,127})
 _MARKDOWN_NAME_RE = re.compile(r"(?i)\.(?:md|markdown|mdx)$")
 
 
+def _shell_word(value: str) -> str:
+    """The first shell word of an assignment's right-hand side, unquoted.
+
+    ``NAME=value command args`` sets ``NAME`` for one command: the value ends at the first
+    unquoted blank. An angle-bracket slot (``<service token>``) is kept whole so the placeholder
+    screen sees it, even when it holds a blank.
+    """
+    text = value.strip()
+    if text[:1] in {'"', "'"}:
+        end = text.find(text[0], 1)
+        return text[1:end] if end > 0 else text[1:]
+    if text[:1] == "<":
+        end = text.find(">")
+        if end > 0:
+            return text[:end + 1]
+    return text.split(None, 1)[0] if text else ""
+
+
 def _markdown_env_blocks(path: str, headers_type: str, text: str) -> ExposureSignature | None:
     """Environment assignments inside the fenced code blocks of a served Markdown document.
 
     Prose never counts: only lines inside a fence, in the ``NAME=value`` grammar a shell or a
     dotenv file reads, and only values that pass the shared screen. A README showing
-    ``API_TOKEN=<your-token>`` proves nothing; a runbook that inlines the real token does.
+    ``API_TOKEN=<your-token>`` or ``API_TOKEN=<service token> ./run.sh`` proves nothing (see
+    ``secret_material.is_documentation_placeholder``); a runbook that inlines the real token does.
     """
     if "markdown" not in headers_type and not _MARKDOWN_NAME_RE.search(_last_segment(path)):
         return None
@@ -1232,7 +1251,7 @@ def _markdown_env_blocks(path: str, headers_type: str, text: str) -> ExposureSig
             continue
         match = _ENV_ASSIGNMENT_RE.fullmatch(line.rstrip())
         if match:
-            pairs.append((match.group(1), match.group(2).strip().strip("\"'")))
+            pairs.append((match.group(1), _shell_word(match.group(2))))
             if len(pairs) >= _MAX_DOCUMENT_PAIRS:
                 break
     if not pairs:
