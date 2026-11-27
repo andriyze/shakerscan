@@ -30,6 +30,7 @@ from runtime.archive_body_masking import (
     mask_public_http_urls,
 )
 from runtime import origin_pace
+from runtime.target_backoff import BACKOFF as TARGET_BACKOFF
 from runtime.models import TargetBinding
 from runtime.target_bound_socket import FrozenTargetSocketFactory
 
@@ -687,6 +688,11 @@ async def execute_bound_http_request(
                 final_url = current_url
                 # The Hunt's aggregate rate at this origin (runtime/origin_pace; no-op outside Hunts).
                 await origin_pace.take(current_url)
+                # The target asked to wait (429 Retry-After) or banned us: wait it out, as the
+                # scanner tunnels do (runtime/target_backoff).
+                backoff_origin = origin_pace.origin_of(current_url)
+                if backoff_origin:
+                    await TARGET_BACKOFF.wait(backoff_origin)
                 hop_started = time.perf_counter()
                 hop_started_at = datetime.now(timezone.utc)
                 response = None
@@ -734,6 +740,13 @@ async def execute_bound_http_request(
                         "all frozen target addresses failed before connect"
                     ) from last_connect_error
                 request_view["pinned_address"] = pinned_address
+                if backoff_origin:
+                    retry_after = response.headers.get("retry-after")
+                    TARGET_BACKOFF.observe(
+                        backoff_origin, int(response.status_code),
+                        {b"retry-after": retry_after.encode("latin-1", "replace")} if retry_after else {},
+                        {"method": str(current_method).upper(),
+                         "target": urllib.parse.urlsplit(current_url).path or "/"})
                 del body_lookahead[:]  # this hop's own
                 try:
                     (

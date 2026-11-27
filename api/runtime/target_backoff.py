@@ -201,10 +201,11 @@ class _Origin:
 class TargetBackoff:
     """Holds per origin, set by the target's answers and observed by every tunnel to it."""
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic, *, lazy_store: bool = False) -> None:
         self._clock = clock
         self._origins: dict[str, _Origin] = {}
         self._store: Any = None
+        self._store_tried = not lazy_store
         self._shared: dict[str, tuple[float, float]] = {}  # origin -> (checked at, held until)
 
     def share(self, store: Any) -> None:
@@ -212,7 +213,24 @@ class TargetBackoff:
         if store is not None and self._store is None:
             self._store = store
 
+    def _lazy_store(self) -> None:
+        """A worker process that never called ``share`` (the engine's own HTTP client) connects
+        to the workers' Redis by itself (``REDIS_URL``), once."""
+        if self._store is not None or self._store_tried:
+            return
+        self._store_tried = True
+        import os
+        url = os.environ.get("REDIS_URL")
+        if not url:
+            return
+        try:
+            import redis  # type: ignore
+            self._store = redis.from_url(url, socket_timeout=2, socket_connect_timeout=2)
+        except Exception:  # noqa: BLE001 - holds stay process-local
+            self._store = None
+
     def _publish(self, origin: str, seconds: float, reason: str) -> None:
+        self._lazy_store()
         if self._store is None:
             return
         try:
@@ -221,6 +239,7 @@ class TargetBackoff:
             pass
 
     def _shared_remaining(self, origin: str) -> float:
+        self._lazy_store()
         if self._store is None:
             return 0.0
         now = self._clock()
@@ -300,6 +319,7 @@ class TargetBackoff:
     async def wait(self, origin: str, sleep: Callable[[float], Any] = asyncio.sleep) -> float:
         """Wait while the origin is held (here or by another worker); returns the seconds waited."""
         waited = 0.0
+        self._lazy_store()
         while (left := (self.remaining(origin) if self._store is None
                         else await asyncio.to_thread(self.remaining, origin))) > 0:
             step = min(left, 5.0)
@@ -311,8 +331,9 @@ class TargetBackoff:
         self._origins.clear()
         self._shared.clear()
         self._store = None
+        self._store_tried = True  # a reset (tests) never connects by itself
 
 
-BACKOFF = TargetBackoff()
+BACKOFF = TargetBackoff(lazy_store=True)
 
 __all__ = ["BACKOFF", "ResponseReader", "TargetBackoff", "retry_after_seconds"]

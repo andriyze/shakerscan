@@ -219,3 +219,46 @@ def test_the_tunnel_waits_out_a_retry_after_before_it_relays_the_next_request():
     assert record["status_counts"] == {"200": 1, "429": 1}
     assert record["holds"] == {"throttled": 1} and record["held_seconds"] >= 0.9
     assert [line.get("status") for line in record["request_lines"]] == [429, 200]
+
+
+def test_the_engines_own_http_client_waits_out_a_retry_after():
+    """exposure, identify and GraphQL checks use the engine's HTTP client, not the tunnel: in the
+    finding zoo they kept sending through the Retry-After the tunnel already honoured."""
+    from uuid import UUID
+    from capabilities.http import execute_bound_http_request
+    from runtime.models import TargetBinding
+
+    target_backoff.BACKOFF.reset()
+
+    async def scenario():
+        arrivals = []
+
+        async def app(reader, writer):
+            while line := await reader.readline():
+                if line.startswith(b"GET "):
+                    arrivals.append(asyncio.get_running_loop().time())
+                if line == b"\r\n":
+                    answer = (b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n"
+                              if len(arrivals) == 1 else b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    writer.write(answer)
+                    await writer.drain()
+            writer.close()
+
+        try:
+            server = await asyncio.start_server(app, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("the unit-test sandbox forbids loopback listeners")
+        base = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        target = TargetBinding(target_id=str(UUID(int=2)), target_kind="web", canonical_host="127.0.0.1",
+                               allowed_origins=(base,), allowed_addresses=("127.0.0.1",),
+                               allowed_root_domains=("127.0.0.1",), environment="lab", scope_receipt_id=str(UUID(int=3)))
+        first = await execute_bound_http_request(base, {"method": "GET", "path": "/a"}, target=target)
+        second = await execute_bound_http_request(base, {"method": "GET", "path": "/b"}, target=target)
+        server.close()
+        await server.wait_closed()
+        return arrivals, first, second
+
+    arrivals, first, second = asyncio.run(scenario())
+    target_backoff.BACKOFF.reset()
+    assert first["ok"] and second["ok"]
+    assert len(arrivals) == 2 and arrivals[1] - arrivals[0] >= 0.9
