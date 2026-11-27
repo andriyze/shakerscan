@@ -241,6 +241,8 @@ def test_discovery_skips_names_without_an_address_record():
         "outside_root_count": 0,
         "wildcard_suppressed_count": 0,
         "wildcard_suppressed": [],
+        "wildcard_match_kept_count": 0,
+        "wildcard_match_kept": [],
         "wildcards": [],
         "notes": [],
     }
