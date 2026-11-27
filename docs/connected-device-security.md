@@ -451,7 +451,10 @@ python3 scripts/generate_device_advisories.py --vendor mosquitto --output /tmp/m
 
 `--base PATH` refreshes an existing snapshot instead of rebuilding it: its records are kept, the
 CVEs given with `--cve` that it does not carry are added, and the context files below are
-re-applied to every record. `--kev`, `--epss`, `--templates` and `--zero-wire` take downloaded files (the CISA KEV catalog,
+re-applied to every record. `--vendor-ranges` covers a CVE NVD has not analysed yet: NVD returns the
+affected ranges the CVE's publisher declared beside its record, and the generator uses those
+(marked `range_source: cna`) for curated products until NVD lists a configuration, which then
+replaces them on the next refresh. `--kev`, `--epss`, `--templates` and `--zero-wire` take downloaded files (the CISA KEV catalog,
 the FIRST EPSS CSV, a nuclei templates directory and the Cloudflare Radar Zero Wire RSS feed) and
 add exploitation context to the records; see `docs/service-intelligence.md`.
 
