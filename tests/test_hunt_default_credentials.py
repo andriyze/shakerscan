@@ -260,3 +260,19 @@ def test_the_briefing_gives_way_to_its_size_limit():
     bounded = bound_briefing(briefing, limit=2_000)
     assert bounded["default_credentials"]["pairs"] == [] and bounded["default_credentials"]["pairs_trimmed"]
     assert any("dc-01 to dc-20" in item for item in bounded["trimmed"])
+
+
+def test_a_jsend_style_failure_answered_with_200_is_a_rejected_sign_in():
+    """APIs often answer a failed sign-in with 200 and a failure outcome (VAmPI:
+    ``{"status": "fail", "message": "Password is not correct for the given username."}``); the
+    rate-limit proof stopped at refusal_not_recognised on such a login."""
+    from api.hunt.default_credentials import classify_response
+
+    def verdict(body):
+        return classify_response(status=200, headers={"content-type": "application/json"}, cookie_names=[],
+                                 body=body.encode(), location=None, login_path="/users/v1/login")
+
+    assert verdict('{"status": "fail", "message": "Password is not correct for the given username."}') == "rejected"
+    assert verdict('{"status": "fail", "message": "Username does not exist"}') == "rejected"
+    assert verdict('{"result": "error"}') == "rejected"
+    assert verdict('{"auth_token": "eyJhbGciOiJIUzI1NiJ9.e30.abcdefgh", "status": "success"}') == "accepted"

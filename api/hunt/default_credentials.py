@@ -121,12 +121,15 @@ _RATE_RE = re.compile(r"rate[ -]?limit|throttl|slow down|captcha", re.IGNORECASE
 _FAILURE_RE = re.compile(
     r"invalid (?:user ?name|username|password|credentials|login|email)|incorrect|wrong password"
     r"|login failed|authentication failed|sign[- ]in failed|bad credentials|unauthori[sz]ed"
-    r"|not (?:recogni[sz]ed|found)|does not match|do not match",
+    r"|not (?:recogni[sz]ed|found|correct|valid)|does not (?:match|exist)|do not match|doesn'?t exist",
     re.IGNORECASE,
 )
 _TOKEN_NAMES = frozenset({"token", "access_token", "id_token", "jwt", "auth_token", "session",
                           "session_id", "sessionid", "accesstoken", "authtoken"})
 _SUCCESS_FLAGS = frozenset({"authenticated", "is_authenticated", "logged_in", "success", "ok"})
+# An outcome field carrying a failure word: ``{"status": "fail"}`` (the JSend convention), ``"error"``.
+_OUTCOME_FIELDS = frozenset({"status", "result", "outcome", "state"})
+_OUTCOME_FAILURES = frozenset({"fail", "failed", "failure", "error", "denied", "unauthorized", "invalid"})
 _LOGIN_PATH_RE = re.compile(r"(?:^|/)(?:log[-_]?in|sign[-_]?in|auth|session)s?(?:[/?#.]|$)", re.IGNORECASE)
 # Query names of a redirect back to the sign-in's own path that mean "sign in (again)".
 _SAME_PATH_RETRY_RE = re.compile(
@@ -443,6 +446,7 @@ def classify_response(*, status: Any, headers: Mapping[str, Any], cookie_names: 
     explicit_failure = bool(_FAILURE_RE.search(text)) or any(
         (name in _SUCCESS_FLAGS and child is False)
         or (name in {"error", "errors", "error_description"} and child not in (None, "", [], {}, False))
+        or (name in _OUTCOME_FIELDS and isinstance(child, str) and child.strip().lower() in _OUTCOME_FAILURES)
         for name, child in fields)
     if document is not None:
         try:
