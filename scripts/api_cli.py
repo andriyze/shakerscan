@@ -13,10 +13,14 @@ Token:    SHAKERSCAN_API_TOKEN_FILE (a file, preferred) or SHAKERSCAN_API_TOKEN;
 A person's decision (person_decision_routes.py: allowing a Hunt permission request, authorizing a
 target, dismissing a finding, recording an approval, revealing a secret, approving an access-control
 contract, ...) is never sent from inside an agent that `shakerscan agent` launched
-(SHAKERSCAN_AGENT_NAME): the helper prints the command the person runs in their own terminal and
-exits 3 with nothing sent. On an open-source engine without authentication that is a guard rail
-for an agent following its kit, not a security boundary (any process on the host can call the API
-directly); ShakerScan Enterprise enforces person decisions on the server.
+(SHAKERSCAN_AGENT_NAME), nor from anywhere that is not a person's terminal (stdin and stdout both
+terminals: an agent started without the launcher runs this from its shell tool, which has none):
+the helper prints the command the person runs in their own terminal and exits 3 with nothing sent.
+A person's own script, which has no terminal either, says so with SHAKERSCAN_PERSON_SCRIPT=1
+(docs/agent-mcp-setup.md); inside a launched agent that changes nothing. On an open-source engine
+without authentication all of this is a guard rail for an agent following its kit, not a security
+boundary (any process on the host can call the API directly); ShakerScan Enterprise enforces
+person decisions on the server.
 """
 
 from __future__ import annotations
@@ -267,14 +271,47 @@ def agent_session(environ: dict[str, str] | None = None) -> bool:
     return bool((environ.get("SHAKERSCAN_AGENT_NAME") or "").strip())
 
 
+#: Set to 1 by a person for their own script (cron, CI, a pipe): the script, which has no terminal,
+#: sends the person's decisions it was written to send. Named for what it asserts. It never applies
+#: inside an agent that ``shakerscan agent`` launched.
+PERSON_SCRIPT_ENV = "SHAKERSCAN_PERSON_SCRIPT"
+
+
+def person_terminal(stdin: object = None, stdout: object = None) -> bool:
+    """A person's terminal: stdin and stdout are both terminals (hunt_approve.person_at_terminal
+    asks the same of the commands that prompt). An agent's shell tool has neither."""
+    def is_tty(stream: object) -> bool:
+        try:
+            return bool(stream is not None and stream.isatty())
+        except (AttributeError, ValueError):
+            return False
+    return is_tty(sys.stdin if stdin is None else stdin) and is_tty(sys.stdout if stdout is None else stdout)
+
+
+def person_script(environ: dict[str, str] | None = None) -> bool:
+    """The person stated that this call without a terminal is their own script."""
+    environ = os.environ if environ is None else environ
+    return (environ.get(PERSON_SCRIPT_ENV) or "").strip().lower() in {"1", "true", "yes"}
+
+
 def agent_refusal(request: urllib.request.Request, path: str, api_url: str,
-                  environ: dict[str, str] | None = None) -> str | None:
+                  environ: dict[str, str] | None = None, *, terminal: bool | None = None) -> str | None:
     """The line an agent gets instead of sending a person's decision, or None to send the
     request. The body read is the one that would be sent (parsed and serialized once, so a
-    repeated key cannot hide the decision)."""
-    if not agent_session(environ):
+    repeated key cannot hide the decision).
+
+    A person's decision is sent only from a person: never inside an agent ``shakerscan agent``
+    launched, and otherwise only from a terminal (``terminal``; read from stdin and stdout when
+    None) or from a script the person marked as theirs (PERSON_SCRIPT_ENV). An agent started
+    without the launcher carries no signal, but its shell tool has no terminal."""
+    routes = _person_decision_routes()
+    if agent_session(environ):
+        return routes.refusal(request.get_method(), path, request.data, api_url=api_url)
+    if routes.match(request.get_method(), path, request.data) is None:
         return None
-    return _person_decision_routes().refusal(request.get_method(), path, request.data, api_url=api_url)
+    if (person_terminal() if terminal is None else terminal) or person_script(environ):
+        return None
+    return routes.refusal(request.get_method(), path, request.data, api_url=api_url, no_terminal=True)
 
 
 def with_person_decision(request: urllib.request.Request, api_url: str, token: str | None, *,

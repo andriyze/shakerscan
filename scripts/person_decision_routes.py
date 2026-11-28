@@ -2,7 +2,9 @@
 
 An AI agent never makes a person's decision: it asks, a person decides, and the agent reads the
 outcome. ``shakerscan api`` (api_cli.py) reads this list. Inside an agent that ``shakerscan agent``
-launched (SHAKERSCAN_AGENT_NAME is set, the signal hunt_approve.person_at_terminal uses) it refuses
+launched (SHAKERSCAN_AGENT_NAME is set, the signal hunt_approve.person_at_terminal uses), and
+anywhere stdin and stdout are not both a terminal (an agent started without the launcher runs it
+from a shell tool; a person's own script opts out with SHAKERSCAN_PERSON_SCRIPT=1), it refuses
 every request listed here before anything is sent, and prints the one command the person runs in
 their own terminal instead, and how the agent reads the outcome afterwards.
 
@@ -10,12 +12,17 @@ What this is and is not:
 
 - On an open-source engine without authentication this is a guard rail for an agent that follows
   its kit, not a security boundary: any process on the host can call the API directly (curl, its
-  own HTTP client), and an agent that unsets the variable is not stopped here.
+  own HTTP client), and an agent that unsets the variable or sets the script opt-out is not
+  stopped here.
 - ShakerScan Enterprise enforces person decisions on the server: its gateway refuses them from a
   service token unless the person proves the decision with their own security key.
 
 The list is the engine's own person-only decisions: every route that records an approval, an
-authorization, a grant, an acceptance of risk, a reveal of a secret value or an operator setting.
+authorization, a grant, an acceptance of risk, a reveal of a secret value or an operator setting,
+and every route that changes or withdraws one of those (a revocation, a changed trust anchor, a
+deleted exception): what a person decided stays decided until a person decides otherwise.
+tests/test_person_decision_routes.py reads every method the engine serves on these resources, so a
+new verb on one is classified there or fails.
 A route whose body decides whether it is one (a finding's status, a target registered together
 with its authorization) names that test in ``when``; a body that is not a JSON object counts as
 the decision (fail closed).
@@ -150,12 +157,17 @@ ROUTES: tuple[PersonRoute, ...] = (
     # Credentials and discovered secrets.
     PersonRoute("POST", "/credential-profiles/{profile_id}/grants", "sharing a saved credential with another target",
                 "read GET /credential-profiles/{profile_id}/grants"),
+    PersonRoute("DELETE", "/credential-profiles/{profile_id}/grants/{target_id}",
+                "ending a saved credential's sharing with another target",
+                "read GET /credential-profiles/{profile_id}/grants"),
     PersonRoute("POST", "/targets/{target_id}/discovered-secrets/{secret_id}/reveal",
                 "revealing a discovered secret's value (to the person, in their own terminal)", _READ_SECRETS,
                 command="shakerscan secrets reveal {target_id} {secret_id}"),
     PersonRoute("POST", "/targets/{target_id}/discovered-secrets/{secret_id}/grants",
                 "letting another target's Hunts use a discovered secret", _READ_SECRETS,
                 command="shakerscan secrets grant {target_id} {secret_id} --to {body_target_id}"),
+    PersonRoute("DELETE", "/targets/{target_id}/discovered-secrets/{secret_id}/grants/{grant_target_id}",
+                "ending another target's use of a discovered secret", _READ_SECRETS),
     PersonRoute("POST", "/targets/{target_id}/discovered-secrets/{secret_id}/promote",
                 "moving a discovered secret into a credential profile", _READ_SECRETS),
     # Findings: dismissal, accepted risk and exceptions.
@@ -170,6 +182,8 @@ ROUTES: tuple[PersonRoute, ...] = (
     PersonRoute("POST", "/finding-exceptions", "accepting a finding's risk as an exception",
                 "read GET /finding-exceptions"),
     PersonRoute("PATCH", "/finding-exceptions/{exception_id}", "changing a finding exception",
+                "read GET /finding-exceptions"),
+    PersonRoute("DELETE", "/finding-exceptions/{exception_id}", "deleting a finding exception",
                 "read GET /finding-exceptions"),
     # Target instructions and access-control contracts.
     PersonRoute("POST", "/targets/{target_id}/instruction-proposals/{proposal_id}/accept",
@@ -191,8 +205,17 @@ ROUTES: tuple[PersonRoute, ...] = (
                 "read GET /model-intake/submissions/{submission_id}"),
     PersonRoute("POST", "/model-intake/trust-anchors", "adding a Model Intake trust anchor",
                 "read GET /model-intake/trust-anchors"),
+    PersonRoute("PATCH", "/model-intake/trust-anchors/{anchor_id}",
+                "changing a Model Intake trust anchor (its key, constraints or whether it is active)",
+                "read GET /model-intake/trust-anchors?active_only=false"),
+    PersonRoute("DELETE", "/model-intake/trust-anchors/{anchor_id}", "deactivating a Model Intake trust anchor",
+                "read GET /model-intake/trust-anchors?active_only=false"),
+    PersonRoute("POST", "/model-intake/admissions/{admission_id}/revoke", "revoking a model admission",
+                "read GET /model-intake/admissions/{admission_id}"),
     # Fleet membership.
     PersonRoute("POST", "/fleet/join-tokens", "issuing a fleet join token", "read GET /fleet/nodes"),
+    PersonRoute("DELETE", "/fleet/join-tokens/{token_id}", "revoking a fleet join token",
+                "ask the person whether it was revoked"),
     PersonRoute("POST", "/fleet/nodes/{node_id}/revoke", "revoking a fleet node", "read GET /fleet/nodes"),
     # Operator settings.
     PersonRoute("PUT", "/settings/ai", "changing the AI settings", _SETTINGS),
@@ -255,10 +278,13 @@ def dedicated_command(entry: PersonRoute, values: Mapping[str, str], body: bytes
     return entry.command.format(**words)
 
 
-def refusal(method: str, path: str, body: bytes | str | None, *, api_url: str | None = None) -> str | None:
+def refusal(method: str, path: str, body: bytes | str | None, *, api_url: str | None = None,
+            no_terminal: bool = False) -> str | None:
     """One line for an agent that sent a person's decision: what the decision is, that nothing was
     sent, how to read the outcome, and last the person's command (nothing after it, so a copy of
-    the line's end takes no punctuation into the command). None for any other request."""
+    the line's end takes no punctuation into the command). None for any other request.
+    ``no_terminal``: the caller carries no agent signal but is not a person's terminal either; the
+    line says so, and where a person's own script finds its opt-out."""
     found = match(method, path, body)
     if found is None:
         return None
@@ -272,7 +298,9 @@ def refusal(method: str, path: str, body: bytes | str | None, *, api_url: str | 
     command = (person_decision.with_gateway(command, api_url) if command
                else person_decision.person_command(method.upper(), path, raw or None, gateway=api_url))
     outcome = entry.outcome.format(path=route_path(path), **values) if "{" in entry.outcome else entry.outcome
-    return (f"person decision required: {entry.summary}. Nothing was sent: an agent never makes this "
-            f"decision. Ask the person to run the command below in their own terminal (not this agent's "
+    why = ("this is not a person's terminal (stdin and stdout are not both terminals), and an agent never "
+           "makes this decision (a person's own script: docs/agent-mcp-setup.md, \"A person's own scripts\")"
+           if no_terminal else "an agent never makes this decision")
+    return (f"person decision required: {entry.summary}. Nothing was sent: {why}. Ask the person to run the command below in their own terminal (not this agent's "
             f"shell), or to decide it in the browser; once they say it is done, {outcome}. "
             f"The person's command: {command}")

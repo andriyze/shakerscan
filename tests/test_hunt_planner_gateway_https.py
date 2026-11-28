@@ -68,9 +68,12 @@ def test_real_cli_cannot_self_authorize_but_can_drive_its_hunt(tmp_path):
         while not server.started and thread.is_alive() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert server.started, 'TLS fixture failed to start'
+        # SHAKERSCAN_PERSON_SCRIPT: this test is the gateway's own refusal of a self-authorization, so
+        # the CLI (which has no terminal here) must send the request rather than refuse it itself.
         env = {**os.environ, 'SSL_CERT_FILE':str(certificate),
                'SHAKERSCAN_API_TOKEN_FILE':str(token_file), 'NO_PROXY':'127.0.0.1,localhost',
-               'no_proxy':'127.0.0.1,localhost'}
+               'no_proxy':'127.0.0.1,localhost', 'SHAKERSCAN_PERSON_SCRIPT':'1'}
+        env.pop('SHAKERSCAN_AGENT_NAME', None)
         env.pop('SHAKERSCAN_API_TOKEN', None)
 
         def call(method, path, body=None, *, authenticated=True):
