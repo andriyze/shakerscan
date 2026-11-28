@@ -38,7 +38,7 @@ paramiko>=5.1.0
 # Security floors for transitive dependencies. The lock already resolves newer versions, but a
 # floor is what a scanner of this file (OSV, Scorecard) resolves, and what an unlocked install gets.
 anyio>=4.15.1
-filelock>=4.2.1
+filelock>=4.3.1
 idna>=3.20
 pygments>=2.20.0
 pytest>=9.1.1
