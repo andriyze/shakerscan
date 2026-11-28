@@ -124,6 +124,15 @@ def admission_refusal(values: Mapping[str, Any], policy: Mapping[str, Any]) -> s
         if policy.get("allow_account_creation") is not True:
             return ("mass_assignment signs up three accounts and needs this Hunt's allow_account_creation "
                     "permission")
+        # The field and its value are the planner's; whether they are a privilege is not
+        # (capabilities/registration_mass_assignment: a stored newsletter flag is not a finding).
+        try:
+            from capabilities.registration_mass_assignment import privilege_refusal
+        except ModuleNotFoundError:  # package import layout
+            from ..capabilities.registration_mass_assignment import privilege_refusal
+        not_a_privilege = privilege_refusal(values.get("parameter"), values.get("privilege_value"))
+        if not_a_privilege:
+            return not_a_privilege
     if check == "jwt" and not (values.get("as_principal") or values.get("session_ref")
                                or values.get("request_bindings")):
         return ("jwt tests the token a principal signs in with: send as_principal, session_ref, or "
@@ -440,9 +449,12 @@ REQUEST_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
     "host_header_injection": ("Verified host header injection", "medium", "CWE-644",
                               "A random host sent in a host header was written into the response "
                               "twice; the same host in an unrelated header was not"),
-    "cors_reflected_origin": ("CORS policy reflects any origin", "medium", "CWE-942",
+    # Low without Access-Control-Allow-Credentials: a browser then sends the cross-origin request
+    # without the user's cookies, so the other site reads only what an anonymous caller can read.
+    # ``finding_records`` raises it to high when the grant came with credentials.
+    "cors_reflected_origin": ("CORS policy reflects any origin", "low", "CWE-942",
                               "Two random origins were each granted in Access-Control-Allow-Origin"),
-    "cors_null_origin": ("CORS policy trusts the null origin", "medium", "CWE-942",
+    "cors_null_origin": ("CORS policy trusts the null origin", "low", "CWE-942",
                          "The null origin was granted twice while a random origin was not"),
     "cors_wildcard_credentials": ("CORS wildcard combined with credentials", "low", "CWE-942",
                                   "Access-Control-Allow-Origin: * was sent with "
@@ -468,14 +480,13 @@ REQUEST_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
                            "A batch of operations in one request was answered in full; the same batch "
                            "of an undefined field was rejected"),
     "file_upload": ("Verified unrestricted file upload (HTML served from the application origin)", "high",
-                    "CWE-434", "Two uploaded HTML files were served back as HTML from the "
-                    "application's origin; a file name never uploaded was not"),
-    "rate_limit": ("Sign-in not rate limited or locked out", "medium", "CWE-307",
-                   "A run of wrong passwords was refused each time with no lockout, rate-limit "
-                   "status or Retry-After"),
+                    "CWE-434", "Two uploaded HTML files were served back as HTML, with their own markup, "
+                    "from the application's origin; a file name never uploaded was not"),
+    # No ``rate_limit`` entry: a short run of unthrottled refusals is an observation, never a
+    # finding (capabilities/request_verify._rate_limit says what it cannot show).
     "csrf": ("Verified cross-site request forgery", "medium", "CWE-352",
-             "The state-changing request, sent as another site would send it, was accepted twice; "
-             "the same request without the session was refused"),
+             "The state-changing request, sent as another site would send it without its anti-CSRF "
+             "fields, was answered like the original twice; the same request without the session was refused"),
     "ldap_injection": ("Verified LDAP injection in sign-in", "critical", "CWE-90",
                        "A wildcard signed in twice; a random value and the escaped wildcard did not"),
     "unauthenticated_api": ("Management API answers without authentication", "high", "CWE-306",
@@ -483,8 +494,9 @@ REQUEST_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
                             "answered with that product's data twice; a sibling route that does not "
                             "exist was not"),
     "mass_assignment": ("Verified mass assignment at sign-up (privileged field stored)", "high", "CWE-915",
-                        "Two new accounts that sent the field at sign-up show the sent value in their own "
-                        "profile; an account signed up without it shows another value"),
+                        "Two new accounts that sent a privilege field (an administrator flag, a role, an "
+                        "account gate or a balance) at sign-up show the sent value in their own profile; "
+                        "an account signed up without it shows another value"),
     "jwt": ("JSON Web Token accepted without a valid signature", "critical", "CWE-347",
             "The principal's token was accepted forged (altered signature, alg none or a well-known "
             "secret), twice"),
@@ -573,7 +585,8 @@ def finding_records(
                 "refusal_status", "batch_size", "alias_count", "duplicate_count", "suggested_fields",
                 "served_content_type", "token_field_removed", "algorithm", "none_spelling",
                 "secret_in_common_list", "forged_token_accepted", "listed_links", "root_type", "product",
-                "exposure_class", "matched_pattern", "secret_keys",
+                "exposure_class", "matched_pattern", "secret_keys", "anti_csrf_fields_removed",
+                "session_cookie_same_site", "privilege_kind",
             ) if raw.get(key) is not None},
             "proof_producer": "shakerscan", "evidence_type": "deterministic_differential",
             "secret_values_visible": False,

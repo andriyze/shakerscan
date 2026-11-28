@@ -12,7 +12,8 @@ Distinct means, from records the server holds and the planner cannot write:
 * the two logins were captured from different actions of this Hunt, and
 * the tokens name different subjects (a JWT's ``sub``/``id``/``email``/``username`` claim, read
   without trusting its signature), or, when a login is not a JWT, the two sign-in requests this
-  Hunt sent carried different account names in their body.
+  Hunt sent carried different account names in their body (not one name spelt two ways: a
+  user name and the e-mail address that starts with it are treated as one account).
 
 Anything else is refused with what to do (sign in as two different accounts and capture each
 session from its own sign-in request). The headers never leave the worker.
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import json
+import unicodedata
 from typing import Any, Mapping, Sequence
 import uuid
 
@@ -95,6 +97,27 @@ def account_name(login_input: Any) -> tuple[str, str] | None:
     return found[0] if len(found) == 1 else None
 
 
+def _account_key(value: str) -> str:
+    return unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
+
+
+def same_account_spelling(first: str, second: str) -> bool:
+    """Whether two sign-in names may be one account written two ways.
+
+    A sign-in that takes "user name or e-mail" in one field signs one person in as ``alice`` and as
+    ``alice@x.test``: equal after Unicode and case folding, or one an e-mail address whose local
+    part is the other, is not evidence of two accounts. (Two real accounts spelt that way are
+    refused too; they can be told apart by a token subject, or by other account names.)
+    """
+    one, other = _account_key(first), _account_key(second)
+    if one == other:
+        return True
+    for address, name in ((one, other), (other, one)):
+        if "@" in address and "@" not in name and address.split("@", 1)[0] == name:
+            return True
+    return False
+
+
 def distinction(primary_subjects: Mapping[str, str], secondary_subjects: Mapping[str, str],
                 primary_account: tuple[str, str] | None, secondary_account: tuple[str, str] | None) -> str | None:
     """Why the two logins are different accounts (``token_subject`` or ``sign_in_account``), or None."""
@@ -103,7 +126,7 @@ def distinction(primary_subjects: Mapping[str, str], secondary_subjects: Mapping
         # The highest-priority subject both tokens name settles it either way.
         return "token_subject" if primary_subjects[shared] != secondary_subjects[shared] else None
     if (primary_account and secondary_account and primary_account[0] == secondary_account[0]
-            and primary_account[1] != secondary_account[1]):
+            and not same_account_spelling(primary_account[1], secondary_account[1])):
         return "sign_in_account"
     return None
 

@@ -19,9 +19,20 @@ from typing import Any
 import urllib.parse
 import uuid
 
-_PRIVATE_FIELD = re.compile(
-    r"secret|passw|pwd|token|api_?key|private|note|ssn|social|card|cvv|iban|account_?n|address|phone|"
-    r"mobile|birth|dob|salary|medical|diagnos|email|personal", re.I)
+# A field name is read as its words (snake_case, kebab-case, dotted and camelCase all split) and
+# one whole word must be private: ``note`` is, ``footnote`` is not; ``card`` is, ``discard`` is not.
+_WORD = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
+_PRIVATE_WORDS = frozenset({
+    "secret", "secrets", "password", "passwd", "pwd", "token", "tokens", "apikey", "private", "note", "notes",
+    "ssn", "card", "cvv", "iban", "address", "phone", "mobile", "birth", "birthday", "birthdate", "dob",
+    "salary", "medical", "diagnosis", "diagnoses", "email", "personal",
+})
+# Two words that are private only together.
+_PRIVATE_PAIRS = frozenset({("api", "key"), ("social", "security"), ("account", "number"), ("account", "no"),
+                            ("account", "num"), ("pass", "word")})
+# ``address`` after one of these is where a machine is, not where a person lives.
+_NETWORK_ADDRESS = frozenset({"ip", "ipv4", "ipv6", "mac", "host", "server", "web", "url", "site", "remote",
+                              "bind", "listen", "contract", "memory"})
 MIN_VALUE_CHARS = 12
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
@@ -31,7 +42,14 @@ class PlantedObjectRefused(ValueError):
 
 
 def private_field(name: str) -> bool:
-    return bool(_PRIVATE_FIELD.search(str(name or "")))
+    words = [word.lower() for word in _WORD.findall(str(name or ""))]
+    for index, word in enumerate(words):
+        before = words[index - 1] if index else ""
+        if word in _PRIVATE_WORDS and not (word == "address" and before in _NETWORK_ADDRESS):
+            return True
+        if (before, word) in _PRIVATE_PAIRS:
+            return True
+    return False
 
 
 def distinctive(value: str) -> bool:

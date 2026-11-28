@@ -3,6 +3,7 @@ findings it materializes (hunt/request_verification.py)."""
 from __future__ import annotations
 
 import asyncio
+import re
 import json
 
 import pytest
@@ -177,6 +178,12 @@ def test_finding_severity_and_titles_follow_the_proof():
         _proof(check="cors", proof_class="cors_reflected_origin", credentials=True, field_path=None,
                proof_contract="request_cors_origin_differential/v1")])[0]
     assert cors["severity"] == "high"
+    # Without Access-Control-Allow-Credentials the other site reads only what anyone can: low.
+    for proof_class in ("cors_reflected_origin", "cors_null_origin"):
+        plain = finding_records("h", "a", ORIGIN, "r", {"check": "cors"}, [
+            _proof(check="cors", proof_class=proof_class, credentials=False, field_path=None,
+                   proof_contract="request_cors_origin_differential/v1")])[0]
+        assert plain["severity"] == "low"
     injection = finding_records("h", "a", ORIGIN, "r", {"check": "command_injection"}, [{
         "kind": "injection_proof", "injection_class": "command_injection", "origin": ORIGIN,
         "canonical_path": "/ping", "method": "GET", "field_path": "host", "proof_state": "verified",
@@ -288,6 +295,107 @@ def test_an_anonymous_product_management_api_is_proved_against_a_sibling_control
     assert not finding_records("h", "a", ORIGIN, "r", {"check": "unauthenticated_api"}, list(unknown.observations))
     assert "anonymous" in admission_refusal({"check": "unauthenticated_api", "method": "GET", "path": "/api/kernels",
                                              "as_principal": "primary"}, ACTIVE)
+
+
+def _product_check(path, body):
+    from api.hunt.request_verification import run_check
+    from api.runtime.request_replay_executor import ReplayTransportResult
+    import urllib.parse as parse
+
+    class Application:
+        async def send(self, request, **_kwargs):
+            found = parse.urlsplit(request.url).path == path
+            return ReplayTransportResult(
+                status_code=200 if found else 404, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={"Content-Type": "application/json"},
+                response_body=body.encode() if found else b'{"error": "not found"}')
+
+    result = asyncio.run(run_check("unauthenticated_api", url=ORIGIN + path, target=_target(),
+                                   transport=Application(), policy=ACTIVE, seed="sweep-product"))
+    return finding_records("h", "a", ORIGIN, "r", {"check": "unauthenticated_api"}, list(result.observations))
+
+
+# An ordinary application's own JSON at a path a product also uses: one generic key of the
+# product's answer, and nothing else of it.
+GENERIC_ANSWERS = [
+    ("/api/v1/targets", '{"status": "success", "data": [{"id": 1, "name": "Q3 sales target"}]}'),
+    ("/api/v1/status/config", '{"status": "success", "config": {"theme": "dark"}}'),
+    ("/queue", '{"input": "pending", "system": "printer-2", "output_node": null}'),
+    ("/history", '{"input": [], "system": "orders"}'),
+    ("/api/users", '[{"id": 7, "login": "alice", "orgId": 3}]'),
+    ("/api/datasources", '[{"id": 1, "isDefault": true}]'),
+    ("/nodes", '{"clients": [{"node_id": "n1"}]}'),
+    ("/pods", '{"pods": [{"name": "escape pod 1"}], "node": {"name": "bay"}}'),
+    ("/api/tags", '{"models": [{"name": "summer"}, {"name": "sale"}]}'),
+    ("/jolokia/read/x", '{"request": {"id": 4}, "status": 404}'),
+    ("/rest/workflows", '{"data": [{"name": "Approval", "type": "manual"}]}'),
+    ("/rest/credentials", '{"data": [{"name": "x", "type": "y"}]}'),
+    ("/telescope/telescope-api/requests", '{"entries": []}'),
+    ("/_cluster/health", '{"health": "ok", "index": 3}'),
+    ("/_cat/indices", '[{"index": "products", "health": "green"}]'),
+    ("/v1/catalog/services", '{"Config": {}, "ModifyIndex": 1}'),
+    ("/v1/agent/self", '{"Config": {"debug": false}}'),
+    ("/v2/keys/app", '{"action": "get", "node": "front"}'),
+    ("/wp-json/wp/v2/users", '[{"slug": "about", "link": "https://app.example.test/about"}]'),
+    ("/whoAmI/api/json", '{"_class": "hudson.security.WhoAmI", "anonymous": true}'),
+    ("/api/terminals", '[{"name": "till-1", "last_activity": "2026-01-01"}]'),
+    ("/horizon/api/stats", '{"status": "running", "processes": 3}'),
+    ("/actuator/beans", '{"beans": ["black", "pinto"]}'),
+]
+# What the product itself answers on that route (its documented keys).
+PRODUCT_ANSWERS = [
+    ("Prometheus", "/api/v1/targets",
+     '{"status":"success","data":{"activeTargets":[{"scrapeUrl":"http://10.0.0.1:9100/metrics"}],"droppedTargets":[]}}'),
+    ("Prometheus", "/api/v1/status/config", '{"status":"success","data":{"yaml":"global:\\n  scrape_interval: 15s"}}'),
+    ("ComfyUI", "/queue", '{"queue_running": [], "queue_pending": []}'),
+    ("ComfyUI", "/system_stats", '{"system": {"os": "posix", "python_version": "3.11"}, '
+                                 '"devices": [{"name": "cuda:0", "vram_total": 1, "vram_free": 1}]}'),
+    ("Grafana", "/api/users", '[{"id":1,"name":"","login":"admin","email":"a@x","isAdmin":true,'
+                              '"isDisabled":false,"lastSeenAt":"2026-01-01","lastSeenAtAge":"1m"}]'),
+    ("Grafana", "/api/datasources", '[{"id":1,"uid":"u","orgId":1,"name":"db","type":"postgres",'
+                                    '"access":"proxy","basicAuth":false,"isDefault":true}]'),
+    ("Ollama", "/api/tags", '{"models":[{"name":"llama3:latest","modified_at":"2026-01-01T00:00:00Z",'
+                            '"size":1,"digest":"sha256:ab"}]}'),
+    ("Kubelet", "/pods", '{"kind":"PodList","apiVersion":"v1","metadata":{},"items":[]}'),
+    ("Jolokia", "/jolokia/version", '{"request":{"type":"version"},"value":{"agent":"1.7.2","protocol":"7.2"},'
+                                    '"timestamp":1,"status":200}'),
+    ("Elasticsearch", "/_cluster/health", '{"cluster_name":"es","status":"green","number_of_nodes":1,'
+                                          '"active_primary_shards":3}'),
+    ("Consul", "/v1/agent/self", '{"Config":{"Datacenter":"dc1","NodeName":"n"},"Member":{"Name":"n"}}'),
+    ("etcd", "/v2/keys/app", '{"action":"get","node":{"key":"/app","value":"v","modifiedIndex":4,"createdIndex":4}}'),
+    ("Jenkins", "/api/json", '{"_class":"hudson.model.Hudson","jobs":[]}'),
+    ("Ray dashboard", "/nodes", '{"result":true,"msg":"Node summary fetched.","data":{"summary":[{"raylet":{}}]}}'),
+]
+
+
+@pytest.mark.parametrize("path,body", GENERIC_ANSWERS, ids=[item[0] for item in GENERIC_ANSWERS])
+def test_generic_json_at_a_product_route_is_not_that_products_management_api(path, body):
+    assert _product_check(path, body) == []
+
+
+@pytest.mark.parametrize("product,path,body", PRODUCT_ANSWERS, ids=[item[1] for item in PRODUCT_ANSWERS])
+def test_a_products_own_answer_is_still_proved(product, path, body):
+    records = _product_check(path, body)
+    assert records and records[0]["evidence"]["product"] == product and records[0]["severity"] == "high"
+
+
+def test_product_markers_are_conjunctions_of_simple_patterns():
+    """They run on target-controlled bodies: one key each, searched separately, nothing unbounded
+    next to anything else; and no entry is told by one bare key."""
+    import time
+    from api.capabilities.product_api import PRODUCT_APIS, _api
+    for api in PRODUCT_APIS:
+        assert api.markers, api.product
+        for marker in api.markers:
+            assert ".*" not in marker.pattern and ".+" not in marker.pattern, (api.product, marker.pattern)
+            assert not marker.flags & re.DOTALL
+        assert len(api.markers) >= 2 or '"\\s*:\\s*' in api.markers[0].pattern, api.product
+    with pytest.raises(ValueError):
+        _api("One key", r"^/x$", "status")
+    hostile = '"slug"   :' * 20_000 + '"status" :' * 20_000 + " " * 100_000
+    started = time.monotonic()
+    assert not any(api.answers(hostile) for api in PRODUCT_APIS)
+    assert time.monotonic() - started < 2.0
 
 
 def test_an_exposure_class_is_proved_twice_against_a_sibling_control():
