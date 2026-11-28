@@ -211,12 +211,14 @@ def test_the_runner_sweeps_after_discovery_and_finishes_with_the_planners_debrie
 
     runner = auto_discovery.DiscoveryRunner("h2", execute=execute, record=record, load_run=load_run,
                                             load_report=load_report, create_candidate=create, finish=finish)
-    auto_discovery.defer_finish("h2", summary="Done", next_actions=["n"], reason="handing the rest to the engine")
+    auto_discovery.defer_finish("h2", summary="Done", next_actions=["n"], reason="handing the rest to the engine",
+                                forced=True)
     assert auto_discovery.sweep_running("h2") is False
     state = asyncio.run(runner.run())
     assert state["sweep"] == "done" and state["running"] is False
+    # The planner's own force and reason, completed as the engine's finish (never the planner's guard).
     assert finished == [("h2", {"summary": "Done", "next_actions": ["n"], "force": True,
-                                "force_reason": "handing the rest to the engine"})]
+                                "force_reason": "handing the rest to the engine", "engine_deferred": True})]
     sweep_calls = [key for _c, _v, key in engine.calls if key.startswith("auto-sweep:")]
     assert sweep_calls  # the sweep ran after discovery
     auto_discovery._STATE.clear()
@@ -379,7 +381,11 @@ def test_the_sweep_learns_inputs_from_validation_answers_and_runs_request_checks
     assert ("command_injection", "/fetch", "url") in checks
     assert ("xxe", "/api/xml/parse", None) in checks and ("graphql", "/graphql", None) in checks
     assert ("cors", "/", None) in checks and ("security_headers", "/", None) in checks
-    assert ("rate_limit", "/hub/login", "password") in checks and ("ldap_injection", "/hub/login", "username") in checks
+    # No rate-limit check from the sweep: it has no real account to name (a made-up user's wrong
+    # passwords can never trip a per-account lockout), so the check is the planner's.
+    assert ("ldap_injection", "/hub/login", "username") in checks
+    assert not any(check == "rate_limit" for check, _path, _parameter in checks)
+    assert state["sweep_counts"]["rate_limit:skipped_no_account"] == 1
     # named classes before the generic ones, and never an injection probe at a sign-in
     order = [c for c in checks if c[1] == "/fetch"]
     assert order.index(("ssrf", "/fetch", "url")) < order.index(("command_injection", "/fetch", "url"))

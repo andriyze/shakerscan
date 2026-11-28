@@ -186,10 +186,13 @@ def test_a_finish_while_the_engine_sweep_runs_is_deferred_with_its_reason():
     assert answer["finish_deferred"] is True and answer["status"] == "active"
     assert connection.status == "active" and connection.final_debrief is None
     assert auto_discovery._STATE[str(HUNT)]["deferred_finish"] == {
-        "summary": "Done", "next_actions": ["x"], "reason": "my part is done here"}
-    # An unforced finish is deferred too: the engine's work never ends early.
+        "summary": "Done", "next_actions": ["x"], "reason": "my part is done here", "forced": True}
+    # An unforced finish is deferred too: the engine's work never ends early. It is recorded as
+    # unforced, with no reason: the engine never invents either.
     unforced = asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[]))
     assert unforced["finish_deferred"] is True
+    assert auto_discovery._STATE[str(HUNT)]["deferred_finish"] == {
+        "summary": "Done", "next_actions": [], "reason": None, "forced": False}
     auto_discovery._STATE.clear()
 
 
@@ -257,3 +260,201 @@ def test_a_passive_finish_is_never_deferred():
     result = asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[]))
     assert result["status"] == "completed" and "finish_deferred" not in result
     auto_discovery._STATE.clear()
+
+
+# --- the engine's own deferred finish (review of 2.14.1) -----------------------------------------
+
+# Coverage with a concrete next call the Hunt may send: a planner's forced finish this early is
+# refused ("too early"), which is what used to hold the engine's deferred finish for ever.
+EARLY = build_coverage(actions=[], endpoints=[{"method": "GET", "path": "/search", "param_shape": "q"}],
+                       allowed=["request.verify", "xss.verify", "http.request"])
+
+
+def test_the_engines_deferred_finish_is_not_held_by_the_planners_too_early_guard():
+    connection = _Connection(created_minutes_ago=5)
+    with pytest.raises(run_router.HTTPException) as early:
+        asyncio.run(_service(connection, EARLY).finish(
+            str(HUNT), summary="Done", next_actions=[], force=True, force_reason="the planner finished early"))
+    assert early.value.status_code == 409 and "Too early to finish" in early.value.detail
+    assert connection.status == "active"
+    # The same finish, completed by the engine once its sweep has ended: an unforced planner finish
+    # stays unforced in the debrief, marked as the engine's, with no reason nobody gave.
+    result = asyncio.run(_service(connection, EARLY).finish(
+        str(HUNT), summary="Done", next_actions=[], engine_deferred=True))
+    assert result["status"] == "completed" and connection.status == "completed"
+    coverage = json.loads(connection.final_debrief)["coverage"]
+    assert coverage["engine_deferred"] is True and coverage["forced"] is False and "force_reason" not in coverage
+    assert coverage["pairs_open"] == EARLY["pairs_open"]  # what was left open is still recorded
+
+
+def test_an_engine_deferred_finish_keeps_the_planners_own_force_and_reason_and_waits_for_actions():
+    connection = _Connection(created_minutes_ago=5)
+    asyncio.run(_service(connection, EARLY).finish(
+        str(HUNT), summary="Done", next_actions=[], force=True,
+        force_reason="the rest needs a second account", engine_deferred=True))
+    coverage = json.loads(connection.final_debrief)["coverage"]
+    assert coverage == {**coverage, "engine_deferred": True, "forced": True,
+                        "force_reason": "the rest needs a second account"}
+    # Actions still settling hold it like any finish (the engine retries).
+    busy = _Connection(in_flight=True)
+    with pytest.raises(run_router.HTTPException) as held:
+        asyncio.run(_service(busy, EARLY).finish(str(HUNT), summary="Done", next_actions=[], engine_deferred=True))
+    assert held.value.status_code == 409 and "reserved or running actions" in held.value.detail
+
+
+def test_no_request_can_claim_to_be_the_engines_finish():
+    import inspect
+
+    with pytest.raises(Exception) as refused:
+        run_router.HuntFinishRequest(summary="s", engine_deferred=True)
+    assert "engine_deferred" in str(refused.value)
+    assert "engine_deferred" not in run_router.HuntFinishRequest.model_fields
+    seen = {}
+
+    class _Recording:
+        async def finish(self, hunt_id, **values):
+            seen.update(values)
+            return {}
+
+    original = run_router._service
+    run_router._service = lambda: _Recording()
+    try:
+        asyncio.run(run_router.finish_hunt(str(HUNT), run_router.HuntFinishRequest(
+            summary="s", force=True, force_reason="a planner's reason")))
+    finally:
+        run_router._service = original
+    assert set(seen) == {"summary", "next_actions", "force", "force_reason"}
+    assert inspect.signature(HuntRunService.finish).parameters["engine_deferred"].default is False
+
+
+def test_the_engine_names_a_deferred_finish_it_could_not_complete(monkeypatch):
+    from api.hunt import auto_discovery
+    from api.hunt.coverage_map import build_coverage as build
+    monkeypatch.setattr(auto_discovery, "DEFERRED_FINISH_ATTEMPTS", 3)
+    monkeypatch.setattr(auto_discovery, "DEFERRED_FINISH_RETRY_SECONDS", 0)
+    auto_discovery._STATE.clear()
+    attempts = []
+
+    async def load_run(_hunt_id):
+        return {"id": "h9", "status": "active", "completed_at": None, "target_kind": "web"}
+
+    async def finish(hunt_id, **values):
+        attempts.append(values)
+        raise run_router.HTTPException(status_code=409, detail="Hunt has reserved or running actions: x")
+
+    async def nothing(*_args, **_kwargs):
+        return None
+
+    runner = auto_discovery.DiscoveryRunner("h9", execute=nothing, record=nothing, load_run=load_run, finish=finish)
+    auto_discovery.defer_finish("h9", summary="Done", next_actions=["n"], reason=None)
+    asyncio.run(runner._finish_deferred())
+    assert len(attempts) == 3
+    assert attempts[0] == {"summary": "Done", "next_actions": ["n"], "force": False, "force_reason": None,
+                           "engine_deferred": True}
+    state = auto_discovery.discovery_state("h9")
+    assert "still refused after 3 attempts" in state["deferred_finish_failed"]
+    assert "reserved or running actions" in state["deferred_finish_failed"]
+    assert any(note.startswith("deferred finish failed") for note in state["notes"])
+    # The Hunt's coverage state says it (it is what the planner, the UI and the debrief read).
+    report = build(actions=[], endpoints=[], discovery=state)
+    assert "still refused" in report["discovery"]["deferred_finish_failed"]
+    assert "deferred_finish_failed" not in report["discovery"]["steps"]
+    # A later finish that goes through clears it.
+    attempts.clear()
+
+    async def accepted(hunt_id, **values):
+        attempts.append(values)
+
+    runner._finish = accepted
+    asyncio.run(runner._finish_deferred())
+    assert "deferred_finish_failed" not in auto_discovery.discovery_state("h9")
+    auto_discovery._STATE.clear()
+
+
+class _DurableConnection(_Connection):
+    """A Hunt row with its ``notes`` column, and the quiet-period read of the recovery."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.notes: list = []
+        self.quiet = True
+
+    def row(self):
+        return {**super().row(), "notes": json.dumps(self.notes)}
+
+    async def execute(self, query, *args):
+        if "UPDATE hunt_runs SET notes" in query:
+            kept = [item for item in self.notes if item.get("kind") != args[2]]
+            self.notes = kept + json.loads(args[1])
+        return "UPDATE 1"
+
+    async def fetchval(self, query, *args):
+        if "make_interval" in query:
+            return self.quiet
+        return await super().fetchval(query, *args)
+
+
+def test_a_recorded_finish_survives_an_api_restart_and_is_completed_once_the_hunt_is_quiet():
+    from api.hunt import auto_discovery, run_service
+    auto_discovery._STATE.clear()
+    auto_discovery._STATE[str(HUNT)] = {"running": True}
+    connection = _DurableConnection()
+    service = _service(connection, EARLY)
+    asyncio.run(service.finish(str(HUNT), summary="Done", next_actions=["x"]))
+    asyncio.run(service.finish(str(HUNT), summary="Done, really", next_actions=["x"]))  # the latest replaces it
+    assert [(note["kind"], note["summary"], note["forced"], note["reason"]) for note in connection.notes] == [
+        ("engine_deferred_finish", "Done, really", False, None)]
+    assert connection.status == "active"
+
+    # While this process still runs the engine's work nothing is recovered.
+    assert asyncio.run(service.recover_deferred_finish(str(HUNT))) is None
+    # The API restarts: the sweep and its recorded finish (process memory) are gone.
+    auto_discovery._STATE.clear()
+    restarted = _service(connection, EARLY)
+    # Just recorded: another API process may still be sweeping.
+    assert asyncio.run(restarted.recover_deferred_finish(str(HUNT))) is None
+    old = (datetime.now(timezone.utc) - timedelta(seconds=run_service.DEFERRED_RECOVERY_QUIET_SECONDS + 5)).isoformat()
+    connection.notes[0]["at"] = old
+    connection.quiet = False  # an action in flight or just settled
+    assert asyncio.run(restarted.recover_deferred_finish(str(HUNT))) is None
+    assert connection.status == "active"
+    connection.quiet = True
+    result = asyncio.run(restarted.recover_deferred_finish(str(HUNT)))
+    assert result["status"] == "completed" and connection.status == "completed"
+    debrief = json.loads(connection.final_debrief)
+    assert debrief["summary"] == "Done, really" and debrief["next_actions"] == ["x"]
+    assert debrief["coverage"]["engine_deferred"] is True and debrief["coverage"]["forced"] is False
+    # Finished: nothing more to recover.
+    assert asyncio.run(restarted.recover_deferred_finish(str(HUNT))) is None
+
+
+def test_reading_an_open_hunt_with_a_recorded_finish_starts_its_recovery():
+    from api.hunt import auto_discovery, run_service
+    auto_discovery._STATE.clear()
+    connection = _DurableConnection()
+    old = (datetime.now(timezone.utc) - timedelta(seconds=run_service.DEFERRED_RECOVERY_QUIET_SECONDS + 5)).isoformat()
+    connection.notes = [{"kind": "entries_retracted"},
+                        {"kind": "engine_deferred_finish", "summary": "Done", "next_actions": [], "reason":
+                         "my part is done here", "forced": True, "at": old}]
+    service = _service(connection, EARLY)
+
+    async def scenario():
+        service._recover_deferred_in_background(connection.row())
+        service._recover_deferred_in_background(connection.row())  # one recovery at a time
+        assert len(service._recovering) == 1
+        await asyncio.gather(*list(service._recovering.values()))
+
+    asyncio.run(scenario())
+    assert connection.status == "completed" and not service._recovering
+    coverage = json.loads(connection.final_debrief)["coverage"]
+    assert coverage["forced"] is True and coverage["force_reason"] == "my part is done here"
+
+    # A Hunt with no recorded finish, or a finished one, starts nothing.
+    plain = _DurableConnection()
+
+    async def untouched():
+        service._recover_deferred_in_background(plain.row())
+        service._recover_deferred_in_background(connection.row())
+        assert not service._recovering
+
+    asyncio.run(untouched())

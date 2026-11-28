@@ -125,3 +125,63 @@ async def test_coverage_is_read_from_the_hunts_records_and_holds_an_early_finish
             await pool.close()
         await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_coverage_counts_actions_past_the_first_five_thousand():
+    """Review of 2.14.1: the action read was ``ORDER BY started_at LIMIT 5000`` (the oldest rows);
+    a Hunt's later requests then never closed a class or mapped a route. The read is whole, in
+    pages through a cursor, inside or outside a caller's transaction."""
+    import asyncpg
+
+    assert urlsplit(DSN).hostname in {"localhost", "127.0.0.1", "::1", "postgres"}
+    schema = "hunt_open_coverage_" + uuid4().hex
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute(f'CREATE SCHEMA "{schema}"; SET search_path TO "{schema}"')
+        ddl = (Path(__file__).resolve().parents[1] / "db/init.sql").read_text()
+        await conn.execute("CREATE TABLE targets(id UUID PRIMARY KEY); CREATE TABLE device_targets(id UUID PRIMARY KEY);"
+                           "CREATE TABLE scan_campaigns(id UUID PRIMARY KEY);"
+                           "CREATE TABLE http_transactions(hunt_run_id UUID, hunt_action_id UUID,"
+                           " sequence INTEGER, status_code INTEGER)")
+        for table in ("hunt_runs", "hunt_actions", "target_endpoints", "hunt_coverage_angle_events"):
+            await conn.execute(re.search(rf"CREATE TABLE {table} \(.*?\n\);", ddl, re.S)[0])
+        for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
+            await conn.execute(statement)
+        await conn.execute("""CREATE TABLE investigation_candidates (
+            id UUID PRIMARY KEY, family TEXT, title TEXT, status TEXT, claimed_severity TEXT,
+            fingerprint TEXT, canonical_locus JSONB, verifier_contract_id TEXT,
+            last_seen_at TIMESTAMPTZ DEFAULT NOW());
+            CREATE TABLE investigation_candidate_observations(candidate_id UUID, hunt_run_id UUID);""")
+        target, hunt = uuid4(), uuid4()
+        await conn.execute("INSERT INTO targets VALUES($1)", target)
+        await conn.execute(
+            "INSERT INTO hunt_runs(id,target_kind,target_id,objective,status,policy_json) "
+            "VALUES($1,'web',$2,'Coverage','active','{\"allowed_capabilities\":[\"http.request\"]}')", hunt, target)
+        await conn.execute(
+            "INSERT INTO target_endpoints(target_id,method,path,param_shape,fingerprint,source,test_status) "
+            "VALUES($1,'GET','/search','q',$2,'crawl','untested')", target, uuid4().hex)
+        insert = ("INSERT INTO hunt_actions(id,hunt_run_id,capability_name,status,input_summary,result_summary,"
+                  "started_at) VALUES($1,$2,$3,'completed',$4::jsonb,'{}'::jsonb, NOW() + make_interval(secs => $5))")
+        early = [(uuid4(), hunt, "http.request",
+                  json.dumps({"input": {"method": "GET", "path": f"/static/file{index % 40}.css"}}), float(index))
+                 for index in range(5_500)]
+        await conn.executemany(insert, early)
+        run = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", hunt))
+        before = {item["endpoint"]: item["untested"] for item in (await load_coverage(conn, run))["open"]}
+        assert {"sqli", "xss"} <= set(before["GET /search"])
+        late_read = uuid4()
+        await conn.executemany(insert, [
+            (uuid4(), hunt, "sqli.verify", json.dumps({"input": {"path": "/search", "parameter": "q"}}), 6_000.0),
+            (uuid4(), hunt, "xss.verify", json.dumps({"input": {"path": "/search?q=1"}}), 6_001.0),
+            (late_read, hunt, "http.request", json.dumps({"input": {"method": "GET", "path": "/api/late/7"}}), 6_002.0)])
+        await conn.execute("INSERT INTO http_transactions VALUES($1,$2,1,200)", hunt, late_read)
+        report = await load_coverage(conn, run)
+        after = {item["endpoint"]: item["untested"] for item in report["open"]}
+        assert "GET /search" not in after  # closed by actions 5,501 and 5,502
+        assert "GET /api/late/{id}" in after  # mapped by action 5,503
+        async with conn.transaction():  # the finish reads it inside its own transaction
+            assert (await load_coverage(conn, run))["pairs_open"] == report["pairs_open"]
+    finally:
+        await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.close()

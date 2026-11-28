@@ -3987,6 +3987,7 @@ lifespan = create_api_lifespan(ApiLifecycleDependencies(
         ),
         ("summary_compactor", lambda pool: _summary_compactor(pool)),
         ("target_liveness_runner", lambda pool: _target_liveness_runner(pool)),
+        ("hunt_deferred_finish_runner", lambda pool: _hunt_deferred_finish_runner(pool)),
     ),
     background_maintenance=(
         ("loop_scale_indexes", lambda pool: build_loop_scale_indexes_in_background(pool)),
@@ -13077,6 +13078,21 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
 
 
 _hunt_run_service = HuntRunService(lambda: db_pool, get_redis, finish_retainer=retain_hunt_action_safely)
+
+
+async def _hunt_deferred_finish_runner(_pool: Any, *, interval_seconds: float = 120.0) -> None:
+    """Finish Hunts whose planner finished while the engine was still working and whose engine
+    work this process no longer runs (an API restart lost the sweep and the recorded finish it was
+    to complete). ``recover_deferred_finishes`` waits for each Hunt to be quiet, so a sweep another
+    API process still runs is never cut short; one failed round is logged and the next still runs."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await _hunt_run_service.recover_deferred_finishes()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - housekeeping never stops the API
+            logger.warning("deferred Hunt finish round failed: %s", type(exc).__name__)
 configure_hunt_run_router(
     lambda: _hunt_run_service,
     start_handler=_start_hunt_v2,

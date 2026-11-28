@@ -60,8 +60,16 @@ def hidden_fields(html: str, *, page_url: str, post_url: str) -> dict[str, str]:
         return {}
     posting = [form for form in parser.forms if form["method"] == "POST"]
     target = _path_of(post_url)
-    chosen = [form for form in posting
-              if _path_of(urllib.parse.urljoin(page_url, form["action"] or page_url)) == target]
+
+    def posts_to_target(form: dict[str, Any]) -> bool:
+        # The action is the page's text: one that is no URL (``http://[``) is a form that posts
+        # elsewhere, never an error of the request.
+        try:
+            return _path_of(urllib.parse.urljoin(page_url, form["action"] or page_url)) == target
+        except ValueError:
+            return False
+
+    chosen = [form for form in posting if posts_to_target(form)]
     if len(chosen) != 1:
         chosen = [form for form in posting if any(item["type"] == "password" for item in form["inputs"])]
     if len(chosen) != 1:

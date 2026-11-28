@@ -45,7 +45,8 @@ def _base(type_ref: Any) -> tuple[str, str, bool, bool]:
     required = listed = False
     node = type_ref if isinstance(type_ref, Mapping) else {}
     first = True
-    while node.get("kind") in {"NON_NULL", "LIST"}:
+    # ``kind`` is the target's value: only a string names a wrapper (a list or object is no kind).
+    while isinstance(node.get("kind"), str) and node["kind"] in {"NON_NULL", "LIST"}:
         if node["kind"] == "NON_NULL" and first:
             required = True
         if node["kind"] == "LIST":
@@ -56,12 +57,15 @@ def _base(type_ref: Any) -> tuple[str, str, bool, bool]:
 
 
 def _query_fields(answer: Any) -> list[Mapping[str, Any]]:
+    # The answer is the target's text: any shape other than the introspection one names no field.
     try:
         document = json.loads(answer) if isinstance(answer, (str, bytes)) else answer
         fields = document["data"]["__schema"]["queryType"]["fields"]
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, RecursionError):
         return []
-    return [field for field in fields or () if isinstance(field, Mapping)]
+    if not isinstance(fields, list):
+        return []
+    return [field for field in fields if isinstance(field, Mapping)]
 
 
 def argument_loci(answer: Any, route: str) -> list[dict[str, str]]:
@@ -74,7 +78,8 @@ def argument_loci(answer: Any, route: str) -> list[dict[str, str]]:
             continue
         kind, _type_name, _required, _listed = _base(field.get("type"))
         selection = "" if kind in _SCALAR_KINDS else "{__typename}"
-        arguments = [arg for arg in field.get("args") or () if isinstance(arg, Mapping)]
+        declared = field.get("args")
+        arguments = [arg for arg in (declared if isinstance(declared, list) else ()) if isinstance(arg, Mapping)]
         shapes = {str(arg.get("name") or ""): _base(arg.get("type")) for arg in arguments}
         if not all(re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]{0,63}", arg) for arg in shapes):
             continue

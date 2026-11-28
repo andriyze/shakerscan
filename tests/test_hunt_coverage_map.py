@@ -328,3 +328,46 @@ def test_a_request_check_never_closes_a_class_it_does_not_prove():
         _action("request.verify", check="crlf_injection", method="GET", path="/convert", parameter="file")])
     left = {k for item in report["open"] for k in item["untested"]}
     assert {"sqli", "xss"} <= left  # only sql_injection (sqli) and xss.verify (xss) settle those
+
+
+def test_coverage_reads_every_action_however_many_the_hunt_ran():
+    """Review of 2.14.1: the read kept the first 5,000 actions, and one sweep runs more, after
+    which a later request never closed a class or mapped a route and the finish guard named pairs
+    that had been tested."""
+    from api.hunt.coverage_map import CoverageFold
+
+    endpoints = [_endpoint("/search", params="q")]
+    early = [_action("http.request", method="GET", path=f"/static/file{index % 40}.css") for index in range(6_000)]
+    late = [_action("sqli.verify", path="/search", parameter="q"),
+            _action("xss.verify", path="/search?q=1"),
+            _action("http.request", method="GET", path="/api/late/7")]
+    before = build_coverage(actions=early, endpoints=endpoints)
+    assert {"sqli", "xss"} <= set(next(item for item in before["open"] if item["endpoint"] == "GET /search")["untested"])
+    after = build_coverage(actions=early + late, endpoints=endpoints)
+    assert not any(item["endpoint"] == "GET /search" for item in after["open"])  # closed by action 6,001 and 6,002
+    assert any(item["endpoint"] == "GET /api/late/{id}" for item in after["open"])  # mapped by action 6,003
+    # The fold keeps routes, not rows: any iterable is read once, a row at a time.
+    fold = CoverageFold(endpoints=endpoints)
+    for row in (_action("http.request", method="GET", path=f"/item/{index}") for index in range(20_000)):
+        fold.add_action(row)
+    assert fold.actions == 20_000 and len(fold.known) == 2 and len(fold.ledger.requested) == 1
+    assert fold.report()["endpoints"] == 2
+
+
+def test_the_open_coverage_refusal_does_not_claim_every_route_was_probed():
+    report = build_coverage(actions=[], endpoints=[_endpoint("/from-a-sitemap", source="hunt_sweep")])
+    refusal = finish_guard(_run(), report, force=False, force_reason=None, now=NOW)
+    assert "coverage is open" in refusal
+    assert "Every listed endpoint answered" not in refusal
+    assert "sources say which" in refusal
+
+
+def test_only_the_engines_own_finish_passes_the_guard_unconditionally():
+    report = build_coverage(actions=[], endpoints=[_endpoint("/search", params="q")],
+                            allowed=["request.verify", "xss.verify", "http.request"])
+    assert "Too early" in finish_guard(_run(), report, force=True, force_reason="I think I am done here", now=NOW)
+    assert "coverage is open" in finish_guard(_run(), report, force=False, force_reason=None, now=NOW)
+    assert finish_guard(_run(), report, force=False, force_reason=None, now=NOW, engine_deferred=True) is None
+    debrief = debrief_coverage(report, forced=False, reason=None, engine_deferred=True)
+    assert debrief["engine_deferred"] is True and debrief["forced"] is False and "force_reason" not in debrief
+    assert "engine_deferred" not in debrief_coverage(report, forced=False, reason=None)

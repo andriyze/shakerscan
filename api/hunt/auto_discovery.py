@@ -29,7 +29,11 @@ hold, refused by the server) is skipped and named in the coverage report; nothin
 person for anything. Long steps run one at a time, leaving the planner a long slot.
 
 ``SHAKERSCAN_HUNT_AUTO_DISCOVERY=false`` turns it off for the instance. Progress is process state:
-a restarted API reports the steps that never ran as not run, and the planner can run them.
+a restarted API reports the steps that never ran as not run, and the planner can run them. A
+finish the planner recorded while the engine was working (``defer_finish``) is the exception: it
+is also kept on the Hunt's row (``deferred_note``; the run service writes it), so a restart
+between "recorded, nothing else is needed" and the sweep's end still finishes the Hunt
+(``HuntRunService.recover_deferred_finish``).
 
 It runs only in a Hunt that holds active testing authority (``testing_authority``: active testing
 with an approval). A passive Hunt keeps its zero authority: the engine adds no traffic to it, and
@@ -65,6 +69,14 @@ PROBE_CONCURRENCY = 8
 CONTROL_LENGTH_TOLERANCE = 0.05
 # Discovery and the sweep never outlive the Hunt's own wall; a Hunt without one gets this.
 MAX_DISCOVERY_SECONDS = 24 * 3600
+# The negative control every probe is judged against is asked for at most this many times (an
+# answer lost in the queue is asked for again under its own key). Without one no probe hit counts.
+CONTROL_ATTEMPTS = 3
+# The engine's deferred finish waits for actions still settling: attempts, and seconds between.
+DEFERRED_FINISH_ATTEMPTS = 60
+DEFERRED_FINISH_RETRY_SECONDS = 10.0
+# The kind of the entry in ``hunt_runs.notes`` that keeps a recorded finish across a restart.
+DEFERRED_FINISH_NOTE = "engine_deferred_finish"
 
 SPEC_PATHS: tuple[str, ...] = (
     "/openapi.json", "/swagger.json", "/v3/api-docs", "/v2/api-docs", "/api-docs", "/api-docs.json",
@@ -144,8 +156,13 @@ def probe_paths() -> tuple[str, ...]:
     return tuple(paths)
 
 
+def _control_step(attempt: int) -> str:
+    return "probe:control" if attempt == 0 else f"probe:control:{attempt}"
+
+
 _STEP_NAMES = ("crawl", *(f"content:{name}" for name in CONTENT_WORDLISTS), "crawl:primary",
-               "crawl:secondary", "templates", "probe:control", "browser_crawl",
+               "crawl:secondary", "templates", *(_control_step(n) for n in range(CONTROL_ATTEMPTS)),
+               "browser_crawl",
                *(f"content:{name}:{slot}" for name in SIGNED_IN_WORDLISTS for slot in ("primary", "secondary")))
 _PROBE_DIGESTS = frozenset(key_digest(_probe_key(path)) for path in probe_paths()) | {
     key_digest(step_key(name)) for name in _STEP_NAMES}
@@ -304,8 +321,11 @@ def answer_of(result: Any) -> dict[str, Any] | None:
 
 
 def present(answer: Mapping[str, Any] | None, control: Mapping[str, Any] | None) -> bool:
-    """Whether a probe found something: not absent, not the server's answer for absent paths."""
-    if not answer:
+    """Whether a probe found something: not absent, not the server's answer for absent paths.
+
+    Never without a control: with nothing to compare against, any 200 of an application that
+    answers every path (a single-page application's catch-all) would read as a route."""
+    if not answer or not control:
         return False
     status = int(answer["status"])
     # A rate-limit answer (429) says nothing about the path.
@@ -405,12 +425,53 @@ async def wait_stopped(hunt_id: str, *, timeout: float) -> bool:
     return bool(done)
 
 
-def defer_finish(hunt_id: str, *, summary: str, next_actions: list[str], reason: str | None) -> dict[str, Any]:
-    """Record the planner's finish; the Hunt finishes with it when the server sweep ends."""
+def defer_finish(hunt_id: str, *, summary: str, next_actions: list[str], reason: str | None,
+                 forced: bool = False) -> dict[str, Any]:
+    """Record the planner's finish; the Hunt finishes with it when the server sweep ends.
+
+    ``forced`` and ``reason`` are what the planner itself gave: the engine completes the finish
+    as its own (``engine_deferred``) and never presents it as forced by the planner, or with a
+    reason the planner did not state."""
     state = _STATE.setdefault(str(hunt_id), {})
     state["deferred_finish"] = {"summary": summary, "next_actions": list(next_actions),
-                                "reason": (reason or "").strip() or None}
+                                "reason": (reason or "").strip() or None, "forced": bool(forced)}
+    state.pop("deferred_finish_failed", None)
     return dict(state["deferred_finish"])
+
+
+def deferred_note(deferred: Mapping[str, Any], *, at: str) -> dict[str, Any]:
+    """The durable form of a recorded finish (an entry of ``hunt_runs.notes``)."""
+    return {"kind": DEFERRED_FINISH_NOTE, "summary": str(deferred.get("summary") or ""),
+            "next_actions": [str(item) for item in deferred.get("next_actions") or ()],
+            "reason": deferred.get("reason"), "forced": bool(deferred.get("forced")), "at": at}
+
+
+def deferred_from_notes(notes: Any) -> dict[str, Any] | None:
+    """The recorded finish kept on a Hunt's row (the latest entry), or None."""
+    for item in reversed(notes if isinstance(notes, list) else []):
+        if isinstance(item, Mapping) and item.get("kind") == DEFERRED_FINISH_NOTE and item.get("summary"):
+            actions = item.get("next_actions")
+            return {"summary": str(item["summary"]),
+                    "next_actions": [str(entry) for entry in (actions if isinstance(actions, list) else [])],
+                    "reason": (str(item["reason"]).strip() or None) if item.get("reason") else None,
+                    "forced": item.get("forced") is True, "at": str(item.get("at") or "")}
+    return None
+
+
+def engine_busy(hunt_id: str) -> bool:
+    """Whether this process still has the Hunt's engine task (discovery, the sweep, or its deferred
+    finish waiting for actions to settle)."""
+    task = _TASK_BY_HUNT.get(str(hunt_id))
+    return sweep_running(hunt_id) or (task is not None and not task.done())
+
+
+def deferred_finish_values(deferred: Mapping[str, Any]) -> dict[str, Any]:
+    """What the engine passes to the run service's finish for a recorded finish: the planner's
+    debrief, the planner's own force and reason, and the engine-origin mark."""
+    forced = bool(deferred.get("forced")) and bool(deferred.get("reason"))
+    return {"summary": deferred["summary"], "next_actions": list(deferred.get("next_actions") or ()),
+            "force": forced, "force_reason": deferred.get("reason") if forced else None,
+            "engine_deferred": True}
 
 
 async def _not_configured(*_args: Any, **_kwargs: Any) -> Any:
@@ -512,8 +573,13 @@ class DiscoveryRunner:
         async def request_permission(flag: str, routes: list[str]) -> str:
             return await ask(self.hunt_id, flag, routes) if ask is not None else "unavailable"
 
+        async def load_policy() -> Mapping[str, Any]:
+            # The Hunt's policy as it is now: a permission revoked mid-Hunt is seen by the next use.
+            return _json(((await self._load_run(self.hunt_id)) or {}).get("policy_json"), {})
+
         sweep = Sweep(call=call, create_candidate=lambda values: create(self.hunt_id, values),
-                      state=self.state, live=live, pace=self.pace, request_permission=request_permission)
+                      state=self.state, live=live, pace=self.pace, request_permission=request_permission,
+                      load_policy=load_policy)
         target_id = str(run.get("target_id") or "")
 
         async def reload() -> Mapping[str, Any] | None:
@@ -533,27 +599,43 @@ class DiscoveryRunner:
             _note(self.state, "sweep stopped: the Hunt ended")
 
     async def _finish_deferred(self) -> None:
-        """Finish the Hunt with the planner's debrief once the engine's own work has ended."""
+        """Finish the Hunt with the planner's debrief once the engine's own work has ended.
+
+        The finish is the engine's own (``engine_deferred``): the planner's too-early and open
+        coverage guards do not hold it, since the planner was told nothing else is needed and is
+        gone. Only actions still settling do, and those are waited for, bounded. A finish that
+        cannot be completed is named in the Hunt's coverage state, never dropped silently."""
         deferred = self.state.get("deferred_finish")
         if not deferred or self._finish is None:
             return
-        for _attempt in range(60):  # actions still settling hold a finish; wait for them, bounded
+        refusal = ""
+        for _attempt in range(DEFERRED_FINISH_ATTEMPTS):
             run = await self._load_run(self.hunt_id)
             if not run or run.get("completed_at") or str(run.get("status")) not in {
                     "active", "awaiting_planner", "budget_exhausted"}:
                 return
             try:
-                await self._finish(self.hunt_id, summary=deferred["summary"],
-                                   next_actions=deferred["next_actions"], force=True,
-                                   force_reason=deferred.get("reason") or
-                                   "the planner finished; the server sweep has ended")
+                await self._finish(self.hunt_id, **deferred_finish_values(deferred))
                 self.state["deferred_finish"] = {**deferred, "finished": True}
+                self.state.pop("deferred_finish_failed", None)
                 return
+            except asyncio.CancelledError:
+                self._deferred_failed("the engine was stopped before it could finish the Hunt")
+                raise
             except Exception as exc:  # noqa: BLE001 - retried while actions settle
+                refusal = _refusal_text(exc)
                 if getattr(exc, "status_code", None) != 409:
-                    _note(self.state, f"deferred finish failed: {type(exc).__name__}")
+                    self._deferred_failed(f"{type(exc).__name__}: {refusal}")
                     return
-            await asyncio.sleep(10)
+            await asyncio.sleep(DEFERRED_FINISH_RETRY_SECONDS)
+        self._deferred_failed(f"still refused after {DEFERRED_FINISH_ATTEMPTS} attempts: {refusal}")
+
+    def _deferred_failed(self, why: str) -> None:
+        text = (f"the planner's recorded finish was not completed ({why}); the Hunt is still open: "
+                f"finish it again (POST /hunts/{self.hunt_id}/finish) or cancel it")[:400]
+        self.state["deferred_finish_failed"] = text
+        _note(self.state, "deferred finish failed: " + text)
+        print(f"[hunt] deferred finish of {self.hunt_id} failed: {why[:200]}", file=sys.stderr, flush=True)
 
     async def _long_steps(self, steps: Sequence[Step]) -> None:
         for step in steps:
@@ -604,10 +686,25 @@ class DiscoveryRunner:
         self.state["probes"] = "running"
         target_id = str(run.get("target_id") or "")
         try:
-            control = answer_of(await self._call(
-                "http.request",
-                {"method": "GET", "path": control_path(self.hunt_id), "follow_redirects": False},
-                step_key("probe:control")))
+            control = None
+            for attempt in range(CONTROL_ATTEMPTS):
+                # Paced like every probe; an answer lost in the queue is asked for again.
+                await self.pace.take(1)
+                control = answer_of(await self._call(
+                    "http.request",
+                    {"method": "GET", "path": control_path(self.hunt_id), "follow_redirects": False},
+                    step_key(_control_step(attempt))))
+                if control is not None or not _live(await self._load_run(self.hunt_id)):
+                    break
+            if control is None:
+                # Nothing to judge a probe against: on an application that answers every path
+                # alike, each of some 300 probe paths (/.env, /.aws/config ...) would enter the
+                # target's durable inventory as a route. No probe is sent, no hit is recorded.
+                self.state["probes"] = "skipped"
+                self.state["probe_hits"] = 0
+                _note(self.state, f"probes: the negative control got no answer ({CONTROL_ATTEMPTS} attempts); "
+                                  "no probe hit was recorded")
+                return
             root = await self._probe("/")
         except _Refused as exc:
             self.state["probes"] = "skipped"
@@ -803,4 +900,5 @@ __all__ = [
     "CONTENT_WORDLISTS", "DiscoveryRunner", "configure_auto_discovery", "PRODUCTS", "SETTING", "Step", "answer_of",
     "discovery_state", "enabled", "plan_steps", "present", "probe_key_digests", "probe_paths",
     "signed_in_slots", "start", "stop", "sweep_following", "sweep_running", "defer_finish", "testing_authority", "wait_stopped",
+    "DEFERRED_FINISH_NOTE", "deferred_finish_values", "deferred_from_notes", "deferred_note", "engine_busy",
 ]
