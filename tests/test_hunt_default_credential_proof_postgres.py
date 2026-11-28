@@ -120,7 +120,10 @@ def test_the_pair_again_and_a_refused_control_prove_it_and_promote_one_finding(e
         # Two steps on the same login: the pair, then the user with a random password.
         assert [r["form_body"]["username"] for r in sent] == ["admin", "admin"]
         assert sent[0]["form_body"]["password"] == "admin"
-        assert sent[1]["form_body"]["password"].startswith("shakerscan-control-")
+        # The control: random, of the pair's password's length and character classes, never listed.
+        control = sent[1]["form_body"]["password"]
+        assert control != "admin" and len(control) == 5 and control.isalpha() and control.islower()
+        assert control not in {row[2] for row in dc.PAIRS}
         assert {r["origin"] + r["path"] for r in sent} == {"https://app.example.test:443/hub/login"}
         rows = await ledger(env, hunt)
         assert [(r["pair_id"], r["verdict"]) for r in rows][-2:] in (
@@ -129,7 +132,8 @@ def test_the_pair_again_and_a_refused_control_prove_it_and_promote_one_finding(e
         assert records[0]["cwe"] == "CWE-1392" and kwargs["target_id"] == hunt["target_id"]
         row = await env.conn.fetchrow("SELECT status, verification_context FROM investigation_candidates WHERE id=$1", candidate)
         assert row["status"] == "verified"
-        assert "shakerscan-control-" not in json.dumps(json.loads(row["verification_context"]))
+        assert control not in json.dumps(json.loads(row["verification_context"]))
+        assert control not in json.dumps(records, default=str)
 
     run(env, scenario())
 
@@ -200,5 +204,25 @@ def test_a_candidate_without_an_accepted_attempt_or_with_captured_values_is_refu
         with pytest.raises(proof.DefaultCredentialProofRefused) as replay:
             await verify(env, hunt, candidate, login(None)[0])
         assert replay.value.reason == "default_credentials_not_replayable"
+
+    run(env, scenario())
+
+
+def test_the_first_step_is_paced_and_waits_for_an_attempt_without_an_answer(env, monkeypatch):
+    async def scenario():
+        hunt = await env.hunt(policy=ACTIVE, budget=BUDGET)
+        candidate = await accepted_candidate(env, hunt)
+        # Another attempt on the same login (spelled differently) is admitted and not yet answered.
+        assert await env.call(hunt, "default-cred-0002", values=attempt("dc-02", path="/hub/Login")) == "admitted"
+        send, sent = login(None)
+        with pytest.raises(proof.DefaultCredentialProofRefused) as waiting:
+            await verify(env, hunt, candidate, send)
+        assert waiting.value.reason == "default_credentials_paced" and sent == []
+        await dc.settle_attempt(env.pool, hunt_id=hunt["id"], verdict="rejected",
+                                action_id=uuid.uuid5(uuid.UUID(str(hunt["id"])), "hunt-capability:default-cred-0002"))
+        monkeypatch.setattr(dc, "PACE_SECONDS", 60.0)
+        with pytest.raises(proof.DefaultCredentialProofRefused) as paced:
+            await verify(env, hunt, candidate, send)
+        assert paced.value.reason == "default_credentials_paced" and sent == []
 
     run(env, scenario())

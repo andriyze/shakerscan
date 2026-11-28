@@ -51,6 +51,11 @@ class AttemptsConnection(ReplayConnection):
             self.attempts.append({"action_id": str(args[1]), "login_key": args[2], "login_host": args[3],
                                   "pair_id": args[4], "verdict": "pending", "age": 999.0, "attempted_at": None})
             return "INSERT 0 1"
+        if "UPDATE hunt_default_credential_attempts" in sql and "verdict='not_sent'" in sql:
+            for row in self.attempts:  # the worker's stop: (hunt, action, pair)
+                if row["action_id"] == str(args[1]) and row["pair_id"] == args[2] and row["verdict"] == "pending":
+                    row["verdict"] = "not_sent"
+            return "UPDATE 1"
         if "UPDATE hunt_default_credential_attempts" in sql:
             for row in self.attempts:
                 if row["action_id"] == str(args[1]) and row["verdict"] == "pending":
@@ -84,9 +89,13 @@ class AttemptsConnection(ReplayConnection):
                 return sum(row["login_key"] == args[0] for row in self.attempts)
             if "verdict = ANY" in sql:
                 return 1 if any(row["login_key"] == args[0] and row["verdict"] in args[1] for row in self.attempts) else None
-            if "verdict='pending'" in sql:
-                return 1 if any(row["action_id"] == str(args[1]) and row["pair_id"] == args[2]
-                                and row["verdict"] == "pending" for row in self.attempts) else None
+            if "SELECT login_key" in sql:  # the worker's own pending row
+                return next((row["login_key"] for row in self.attempts
+                             if row["action_id"] == str(args[1]) and row["pair_id"] == args[2]
+                             and row["verdict"] == "pending"), None)
+            if "verdict='pending'" in sql:  # an attempt on this login with no verdict yet (not lost)
+                return 1 if any(row["login_key"] == args[0] and row["verdict"] == "pending"
+                                and not row.get("lost") for row in self.attempts) else None
         return await super().fetchval(sql, *args)
 
 
@@ -250,4 +259,81 @@ def test_the_worker_refuses_a_pair_admission_did_not_record():
         with pytest.raises(ValueError, match="not admitted"):
             await dc.require_admitted(conn, hunt_id=HUNT, action_id="00000000-0000-4000-8000-000000000009",
                                       pair_id="dc-01")
+    asyncio.run(scenario())
+
+
+ACTION = "00000000-0000-4000-8000-000000000009"
+OTHER_ACTION = "00000000-0000-4000-8000-00000000000a"
+
+
+def ledger_row(action_id, pair_id, verdict, key="k" * 64, **extra):
+    return {"action_id": action_id, "login_key": key, "login_host": "fixture.test", "pair_id": pair_id,
+            "verdict": verdict, "age": 999.0, "attempted_at": None, **extra}
+
+
+@pytest.mark.parametrize("sign", sorted(dc.STOP_VERDICTS))
+def test_the_worker_sends_nothing_once_the_login_answered_another_attempt_with_a_stop_sign(sign):
+    # Admitted before the first answer was read (a slow login): the stop is read again when sending.
+    async def scenario():
+        conn = AttemptsConnection("http://fixture.test:9")
+        conn.attempts = [ledger_row(OTHER_ACTION, "dc-01", sign), ledger_row(ACTION, "dc-02", "pending")]
+        with pytest.raises(ValueError, match="default_credentials_stopped"):
+            await dc.require_admitted(conn, hunt_id=HUNT, action_id=ACTION, pair_id="dc-02")
+        assert conn.attempts[1]["verdict"] == "not_sent", "the stopped attempt is settled, not left pending"
+        # Settled: a second look (the request's other binding) finds no admitted attempt either.
+        with pytest.raises(ValueError, match="not admitted"):
+            await dc.require_admitted(conn, hunt_id=HUNT, action_id=ACTION, pair_id="dc-02")
+    asyncio.run(scenario())
+
+
+def test_the_worker_still_sends_an_admitted_attempt_when_only_another_login_stopped():
+    async def scenario():
+        conn = AttemptsConnection("http://fixture.test:9")
+        conn.attempts = [ledger_row(OTHER_ACTION, "dc-01", "locked", key="o" * 64),
+                         ledger_row(OTHER_ACTION, "dc-03", "rejected"), ledger_row(ACTION, "dc-02", "pending")]
+        await dc.require_admitted(conn, hunt_id=HUNT, action_id=ACTION, pair_id="dc-02")
+        assert conn.attempts[2]["verdict"] == "pending"
+    asyncio.run(scenario())
+
+
+def test_a_login_receives_one_attempt_at_a_time_and_every_spelling_is_that_login():
+    async def scenario():
+        conn = AttemptsConnection("http://fixture.test:9")
+        policy, context = {"active_testing": True}, conn.run["context_pack"]
+        claim = await dc.admit_default_credentials(conn, run=conn.run, values=api_attempt("dc-01"),
+                                                   policy=policy, context=context)
+        await dc.record_attempt(conn, hunt_id=HUNT, action_id=ACTION, claim=claim)
+        # No verdict yet: the next attempt waits, however its path is spelled.
+        for path in ("/hub/api/login", "/hub/api/./login", "/hub/x/../api/login", "/hub/api/login/",
+                     "/hub/API/Login", "/hub/api/login;x=1", "/hub/api/%6cogin"):
+            with pytest.raises(HTTPException) as waiting:
+                await dc.admit_default_credentials(conn, run=conn.run, values=api_attempt("dc-02", path),
+                                                   policy=policy, context=context)
+            assert waiting.value.detail["reason_code"] == "default_credentials_paced", path
+            assert waiting.value.headers["Retry-After"].isdigit()
+        assert len(conn.attempts) == 1
+        # Answered with a lockout: every spelling is stopped (each used to be a fresh login).
+        await dc.settle_attempt(conn, hunt_id=HUNT, action_id=ACTION, verdict="locked")
+        for path in ("/hub/api/login", "/hub/api/./login", "/hub/API/login/"):
+            with pytest.raises(HTTPException) as stopped:
+                await dc.admit_default_credentials(conn, run=conn.run, values=api_attempt("dc-02", path),
+                                                   policy=policy, context=context)
+            assert stopped.value.detail["reason_code"] == "default_credentials_stopped", path
+        # Another login is unaffected.
+        assert (await dc.admit_default_credentials(conn, run=conn.run, values=api_attempt("dc-02", "/other/login"),
+                                                   policy=policy, context=context)).pair_id == "dc-02"
+    asyncio.run(scenario())
+
+
+def test_an_attempt_whose_verdict_never_arrived_stops_holding_its_login():
+    async def scenario():
+        conn = AttemptsConnection("http://fixture.test:9")
+        policy, context = {"active_testing": True}, conn.run["context_pack"]
+        claim = await dc.admit_default_credentials(conn, run=conn.run, values=api_attempt("dc-01"),
+                                                   policy=policy, context=context)
+        await dc.record_attempt(conn, hunt_id=HUNT, action_id=ACTION, claim=claim)
+        conn.attempts[0]["lost"] = True  # labelled double: older than PENDING_HOLD (the SQL's own bound)
+        assert (await dc.admit_default_credentials(conn, run=conn.run, values=api_attempt("dc-02"),
+                                                   policy=policy, context=context)).pair_id == "dc-02"
+        assert dc.PENDING_HOLD.total_seconds() >= 60
     asyncio.run(scenario())
