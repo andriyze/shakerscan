@@ -509,6 +509,28 @@ def proof_request_for_candidate(
     )
 
 
+def injection_candidate_writes(request: ReplayRequest, candidate: Mapping[str, Any]) -> bool:
+    """Whether ``injection.verify_batch`` counts every request of this candidate as a write: any
+    method but GET, HEAD and OPTIONS, except a GraphQL query sent by POST (the verifier's rule)."""
+    return request.method not in {"GET", "HEAD", "OPTIONS"} and not (
+        str(candidate.get("field_path") or candidate.get("parameter_name") or "").startswith("graphql:")
+        and candidate.get("request_class") == "safe_read"
+    )
+
+
+def injection_write_sub_budget(hold_left: int, request_share: int, writing_candidates: int) -> int:
+    """The state-changing hold one writing candidate of an injection slice may spend.
+
+    An even share of what the slice's hold has left among the writing candidates still to run,
+    never more than the candidate's request share. When the even share is too small to test
+    anything, the first candidate takes what is left rather than none being tested.
+    """
+    share = int(hold_left) // max(1, int(writing_candidates))
+    if share < INJECTION_MINIMUM_REQUESTS:
+        share = int(hold_left)
+    return max(0, min(share, int(request_share)))
+
+
 _BATCH_SUCCESS_STATUSES = frozenset({"success", "succeeded", "completed"})
 
 
@@ -4466,6 +4488,12 @@ class DatabaseNeutralScanActionDispatcher:
             if sign_in_checks.endpoint(request.url, request.method) is not None:
                 inapplicable(manifest_index, candidate, "sign_in_endpoint_candidate")
                 continue
+            # Every request of a candidate sent with a writing method may write, whether its
+            # field is in the body or the query: it needs the authority and a state-changing hold.
+            writes = injection_candidate_writes(request, proof_candidate)
+            if writes and not may_write:
+                inapplicable(manifest_index, candidate, "state_changing_http_not_allowed")
+                continue
             remaining_attempts = max(1, len(rows) - offset)
             remaining = {
                 name: max(0, int(limit) - int(consumed.get(name, 0)))
@@ -4473,10 +4501,25 @@ class DatabaseNeutralScanActionDispatcher:
             }
             sub_budget = {
                 name: amount // remaining_attempts
-                for name, amount in remaining.items() if amount // remaining_attempts > 0
+                for name, amount in remaining.items()
+                if name != "state_changing_requests" and amount // remaining_attempts > 0
             }
             if sub_budget.get("http_requests", 0) < INJECTION_MINIMUM_REQUESTS:
                 break
+            if writes:
+                # The slice's state-changing hold is shared by its writing candidates only; a
+                # read spends none of it. A write the hold cannot fund is left unattempted: it
+                # is never sent as a plain request.
+                write_hold = injection_write_sub_budget(
+                    remaining.get("state_changing_requests", 0),
+                    sub_budget["http_requests"],
+                    sum(1 for _index, later in rows[offset:] if self._injection_row_writes(
+                        later, request_mode=request_mode,
+                    )),
+                )
+                if write_hold < INJECTION_MINIMUM_REQUESTS:
+                    continue
+                sub_budget["state_changing_requests"] = write_hold
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             # One candidate must never fail the batch: a request that does not match its
             # candidate is that candidate's failed attempt, and the rest are still tested.
@@ -4551,6 +4594,13 @@ class DatabaseNeutralScanActionDispatcher:
                 "secret_values_visible": False,
             },
         )
+
+    def _injection_row_writes(self, candidate: Mapping[str, Any], *, request_mode: bool) -> bool:
+        """Whether a slice row is sent with a writing method (before its request is built)."""
+        if request_mode:
+            request = self._private_requests.get(str(candidate.get("request_ref_id") or ""))
+            return request is not None and injection_candidate_writes(request, candidate)
+        return str(candidate.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
 
     async def _authz_surface_batch(
         self, action: ScanAction, heartbeat: ActionHeartbeat,

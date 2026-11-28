@@ -78,8 +78,8 @@ _BUDGETS: dict[str, dict[str, int]] = {
     "sqli.prove_batch": {"http_requests": 14, "tool_wall_seconds": 90},
     "nosqli.verify_batch": {"http_requests": 8, "tool_wall_seconds": 60},
     # One class: the baseline, its probes, the repeat and the control (the blind command screen
-    # and its three pairs are the longest).
-    "injection.verify_batch": {"http_requests": 24, "tool_wall_seconds": 90},
+    # and its seven confirming requests are the longest).
+    "injection.verify_batch": {"http_requests": 28, "tool_wall_seconds": 90},
 }
 _REFUSALS = frozenset({"authentication_required", "target_refused"})
 _LIKELY_FIXED = "The check that proved the finding sent the same request again and did not reproduce it."

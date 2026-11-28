@@ -3,7 +3,7 @@
 from typing import Any, Mapping
 
 
-def web_candidate_budget(family: str) -> dict[str, int]:
+def web_candidate_budget(family: str, candidate: Mapping[str, Any] | None = None) -> dict[str, int]:
     # The existing candidate bridge materializes HTTP steps only, with a second
     # proof run and restoration for mutations. Preserve its conservative HTTP
     # envelope, but never invent browser traffic for an HTTP-only verifier.
@@ -13,8 +13,14 @@ def web_candidate_budget(family: str) -> dict[str, int]:
     except ModuleNotFoundError:  # package import layout
         from . import injection_proof
     if injection_proof.is_injection_family(family):
-        # The server's own injection proofs: every class, each with its repeat and control.
-        return {"http_requests": injection_proof.PROOF_REQUESTS, "browser_actions": 0}
+        # The server's own injection proofs: every class, each with its repeat and control. A
+        # proof whose requests write (a GraphQL mutation locus) holds the same number of
+        # state-changing requests, so the Hunt's state-changing ceiling bounds them and a Hunt
+        # without that authority (a ceiling of zero) cannot reserve the proof.
+        return {
+            "http_requests": injection_proof.PROOF_REQUESTS, "browser_actions": 0,
+            **(injection_proof.write_hold(candidate) if candidate is not None else {}),
+        }
     try:
         import family_proof
     except ModuleNotFoundError:  # package import layout

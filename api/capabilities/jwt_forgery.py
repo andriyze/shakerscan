@@ -198,8 +198,10 @@ async def check_token_handling(
     secret = guessed_secret(token)
     if secret is None:
         return None
-    # The match above is the proof. Acceptance of a token signed with the secret is shown when
-    # the slice has the two requests left; without them the finding says it was not shown.
+    # The match above is the proof, made offline. Acceptance of a token signed with the secret is
+    # shown when the slice has the two requests left: ``forged_token_accepted`` is True when the
+    # application accepted it twice, False when it was sent and refused and None when it was not
+    # sent. Only True is a forged session; the finding's severity follows it (scan/finalizer).
     shown = None
     if left() >= MINIMUM_REQUESTS:
         shown, status = await accepted_twice(signed_with(token, secret))

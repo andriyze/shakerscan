@@ -251,6 +251,9 @@ def test_the_finalizer_reports_accepted_forgery_as_a_verified_critical_finding(t
         "algorithm": "HS256", "route_id": "r1",
         "request_url": "https://app.example.test/api/profile", "anonymous_status": 401,
         "authenticated_status": 200, "forged_status": 200, "repetitions": 2,
+        # A reproduced secret is critical only with the forged token accepted (see the test below).
+        **({"secret_in_common_list": True, "secret_length": 6, "forged_token_accepted": True}
+           if technique == "jwt_weak_hmac_secret_reproduced" else {}),
     }
     unknown = {**proof, "technique": "made_up"}
     report = finalize_scan_report(
@@ -263,6 +266,51 @@ def test_the_finalizer_reports_accepted_forgery_as_a_verified_critical_finding(t
     assert finding["tool"] == "shakerscan_authz_surface" and finding["cwe"] == cwe
     assert finding["severity"] == "critical" and finding["verified"] is True
     assert finding["evidence"]["algorithm"] == "HS256"
+
+
+@pytest.mark.parametrize(("accepted", "severity", "words"), [
+    (True, "critical", "accepted a token signed with it"),
+    (False, "high", "sent twice and refused"),
+    (None, "high", "No token signed with it was sent"),
+])
+def test_a_reproduced_secret_is_critical_only_when_the_forged_token_was_accepted(accepted, severity, words):
+    """The secret is matched offline. A token signed with it that the application refused, or
+    that was never sent, is not a forged session: verified, high, and the basis says which."""
+    from tests.test_scan_orchestrator import SCAN_ID, _action as _plan_action
+
+    verify = _plan_action("verify.authz_surface", 0, capability_name="authz_surface.verify_batch")
+    final = _plan_action("finalize.report", 1, dependencies=(verify.action_id,))
+    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+                          target_binding_digest="a" * 64, actions=(verify, final))
+    proof = {
+        "kind": "authz_surface_proof", "proof_state": "verified", "finding_verdict": "verified",
+        "proof_contract": "authz_surface_jwt_forgery/v1",
+        "technique": "jwt_weak_hmac_secret_reproduced", "algorithm": "HS256", "route_id": "r1",
+        "request_url": "https://app.example.test/api/profile", "anonymous_status": 401,
+        "authenticated_status": 200, "forged_status": 200 if accepted else None, "repetitions": 2,
+        "secret_in_common_list": True, "secret_length": 6, "forged_token_accepted": accepted,
+    }
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={verify.action_id: _result_with_observation_count(verify, 1)},
+        observations={verify.action_id: (proof,)},
+    )
+    finding, = report["findings"]
+    assert finding["verified"] is True and finding["proof_state"] == "verified"
+    assert finding["severity"] == severity
+    assert finding["cvss_score"] == {"critical": 9.5, "high": 8.0}[severity]
+    assert finding["evidence"]["forged_token_accepted"] is accepted
+    basis = finding["evidence"]["severity_basis"]
+    assert basis["severity"] == severity and words in basis["reason"]
+    assert "jwt_severity_reason" not in finding["evidence"]
+
+
+def test_the_checker_says_whether_the_forged_token_was_refused_or_not_sent():
+    refused, sent = _check(_token("secret"), lambda forged: False)
+    assert refused["technique"] == "jwt_weak_hmac_secret_reproduced"
+    assert refused["forged_token_accepted"] is False and refused["forged_status"] is None
+    unsent, _sent = _check(_token("secret"), lambda forged: False, requests=4)
+    assert unsent["forged_token_accepted"] is None
 
 
 def test_a_route_that_answers_the_principal_without_the_bearer_is_not_checked():

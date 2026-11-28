@@ -14,7 +14,6 @@ import re
 FIELD_PREFIX = "graphql:"
 MAX_DOCUMENT_CHARS = 8_000
 _NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]{0,63}\Z")
-_OPERATION = re.compile(r"\s*(query|mutation|subscription)\b")
 
 
 class GraphQLArgumentError(ValueError):
@@ -32,11 +31,121 @@ def argument_name(field_path: str) -> str:
     return name
 
 
+def _skip_string(document: str, start: int) -> int:
+    """Index just past the string or block string opening at ``start``."""
+    if document.startswith('"""', start):
+        index = start + 3
+        while index < len(document):
+            if document.startswith('\\"""', index):
+                index += 4
+            elif document.startswith('"""', index):
+                return index + 3
+            else:
+                index += 1
+        raise GraphQLArgumentError("unterminated GraphQL block string")
+    return _string_end(document, start)
+
+
+def _tokens(document: str) -> list[str]:
+    """The document's names and punctuators in order; a string is the one token ``"``.
+
+    Ignored tokens are dropped as the GraphQL grammar drops them: white space, commas, a byte
+    order mark and comments. Nothing inside a string or a comment is a token, so a keyword
+    written there is never read as one.
+    """
+    tokens: list[str] = []
+    index = 0
+    while index < len(document):
+        char = document[index]
+        if char in " \t\r\n,\ufeff":
+            index += 1
+        elif char == "#":
+            while index < len(document) and document[index] not in "\r\n":
+                index += 1
+        elif char == '"':
+            index = _skip_string(document, index)
+            tokens.append('"')
+        elif char == "_" or (char.isascii() and char.isalpha()):
+            end = index + 1
+            while end < len(document) and (document[end] == "_" or (
+                    document[end].isascii() and document[end].isalnum())):
+                end += 1
+            tokens.append(document[index:end])
+            index = end
+        else:
+            tokens.append(char)
+            index += 1
+    return tokens
+
+
+_CLOSERS = {"{": "}", "(": ")", "[": "]"}
+
+
+def operation_kinds(document: str) -> tuple[str, ...]:
+    """The kind of every operation the document defines, in order.
+
+    Each top-level definition is read: a bare selection set is a ``query``, an operation says
+    what it is, a fragment defines no operation. The keyword is found wherever its definition
+    starts -- after a fragment, another operation, a comment, a comma or a byte order mark --
+    and never inside a string, a selection set or an argument list. A document that is not a
+    sequence of complete executable definitions raises ``GraphQLArgumentError``.
+    """
+    tokens = _tokens(str(document or ""))
+    kinds: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "{":
+            kinds.append("query")
+        elif token in {"query", "mutation", "subscription"}:
+            kinds.append(token)
+        elif token != "fragment":
+            raise GraphQLArgumentError("the GraphQL document is not a list of operations and fragments")
+        # To the definition's selection set: the first brace outside its variable definitions
+        # and directive arguments, whose default values may hold braces of their own.
+        nesting: list[str] = []
+        while index < len(tokens) and not (tokens[index] == "{" and not nesting):
+            current = tokens[index]
+            if current in _CLOSERS:
+                nesting.append(_CLOSERS[current])
+            elif current in _CLOSERS.values():
+                if not nesting or nesting.pop() != current:
+                    raise GraphQLArgumentError("the GraphQL document's brackets do not balance")
+            index += 1
+        # Through the selection set.
+        while index < len(tokens):
+            current = tokens[index]
+            index += 1
+            if current in _CLOSERS:
+                nesting.append(_CLOSERS[current])
+            elif current in _CLOSERS.values():
+                if not nesting or nesting.pop() != current:
+                    raise GraphQLArgumentError("the GraphQL document's brackets do not balance")
+                if not nesting:
+                    break
+        else:
+            raise GraphQLArgumentError("a GraphQL definition has no complete selection set")
+    if not kinds:
+        raise GraphQLArgumentError("the GraphQL document defines no operation")
+    return tuple(kinds)
+
+
 def operation_kind(document: str) -> str:
-    """``query``, ``mutation`` or ``subscription``; a bare selection set is a query."""
-    text = re.sub(r"#[^\n\r]*", " ", str(document or ""))
-    match = _OPERATION.match(text)
-    return match.group(1) if match else "query"
+    """``query``, ``mutation`` or ``subscription``: what sending the document may do.
+
+    The most restrictive reading wins. ``query`` only for a document whose one operation is a
+    query. A document with a subscription is a ``subscription``; one with a mutation, with more
+    than one operation (the server picks which runs) or that cannot be read is a ``mutation``,
+    so it is sent only as a write. The keyword at the start says nothing: ``fragment F on T{id}
+    mutation{...}`` and ``query Q{a} mutation M{b}`` both begin as a read would.
+    """
+    try:
+        kinds = operation_kinds(document)
+    except GraphQLArgumentError:
+        return "mutation"
+    if "subscription" in kinds:
+        return "subscription"
+    return "query" if kinds == ("query",) else "mutation"
 
 
 def _string_end(document: str, start: int) -> int:

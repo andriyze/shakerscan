@@ -2461,8 +2461,22 @@ async def _execute_hunt_capability_lifecycle(
                                     candidate_record["family"]
                                 )
                                 charges.update(web_candidate_budget(
-                                    str(candidate_record["family"] or family)
+                                    str(candidate_record["family"] or family),
+                                    dict(candidate_record),
                                 ))
+                                # A proof whose requests write (a GraphQL mutation locus) holds
+                                # them above; it needs the same authority before anything is held.
+                                writes = injection_proof.is_injection_family(
+                                    str(candidate_record["family"] or family)
+                                ) and injection_proof.sends_writes(dict(candidate_record))
+                                if writes and not policy.get("allow_state_changing_http"):
+                                    raise HTTPException(
+                                        status_code=403,
+                                        detail=(
+                                            "Candidate verification requires state-changing "
+                                            "HTTP authority for a proof that sends writes"
+                                        ),
+                                    )
                                 if family in _AGENT_MUTATING_VERIFY_FAMILIES:
                                     if not policy.get("allow_state_changing_http"):
                                         raise HTTPException(

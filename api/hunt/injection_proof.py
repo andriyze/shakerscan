@@ -148,6 +148,23 @@ def graphql_locus(candidate: Mapping[str, Any]) -> tuple[str, str, str, str] | N
     return route, field, document, kind
 
 
+def sends_writes(candidate: Mapping[str, Any]) -> bool:
+    """Whether every request of this candidate's proof may write: a GraphQL document that is not
+    one query (a mutation, several operations). Admission holds ``state_changing_requests`` for
+    it and needs the Hunt's state-changing permission; a locus no proof can run sends nothing."""
+    try:
+        graphql = graphql_locus(candidate)
+    except InjectionProofRefused:
+        return False
+    return graphql is not None and graphql[3] != "query"
+
+
+def write_hold(candidate: Mapping[str, Any]) -> dict[str, int]:
+    """The ``state_changing_requests`` hold of this candidate's proof: every request it may send
+    when the proof writes, nothing otherwise."""
+    return {"state_changing_requests": PROOF_REQUESTS} if sends_writes(candidate) else {}
+
+
 def proof_request(candidate: Mapping[str, Any], *, origin: str) -> tuple[str, str, str]:
     """``(url, route, parameter)`` of the request the proofs mutate, from the candidate's locus:
     a GET query parameter, or one string argument of a GraphQL document (``graphql_locus``)."""
@@ -333,15 +350,16 @@ async def run_proof(
     method, body, headers, request_class = "GET", b"", (), "safe_read"
     if graphql is not None:
         _route, _field, document, kind = graphql
-        if kind == "mutation" and not policy.get("allow_state_changing_http"):
+        if kind != "query" and not policy.get("allow_state_changing_http"):
             raise InjectionProofRefused(
                 "injection_proof_write_not_permitted",
-                "A GraphQL mutation writes: proving its argument needs the Hunt's state-changing "
-                "permission (allow_state_changing_http).",
+                "A GraphQL mutation writes, and a document with more than one operation or one "
+                "that cannot be read as a single query is sent only as a write: proving its "
+                "argument needs the Hunt's state-changing permission (allow_state_changing_http).",
             )
         method, headers = "POST", (("Content-Type", "application/json"),)
         body = json.dumps({"query": document}, separators=(",", ":")).encode("utf-8")
-        request_class = "state_changing" if kind == "mutation" else "safe_read"
+        request_class = "safe_read" if kind == "query" else "state_changing"
     request = ReplayRequest(
         request_id=f"candidate:{candidate['id']}", ordinal=0, name="injection proof", folder="",
         method=method, url=url, headers=headers, body=body, body_mode="raw" if body else "none",
@@ -499,5 +517,5 @@ async def verify_candidate(
 
 __all__ = [
     "FAMILY", "InjectionProofRefused", "PROOF_REQUESTS", "finding_record", "is_injection_family",
-    "proof_request", "proofs_for", "run_proof", "verify_candidate",
+    "proof_request", "proofs_for", "run_proof", "sends_writes", "verify_candidate", "write_hold",
 ]
