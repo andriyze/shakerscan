@@ -21,11 +21,17 @@ the next request or opens the next connection:
   requests with that method and path are refused in the tunnel for ``LOCK_HOLD_SECONDS``: more
   sign-in attempts would only keep a real user locked out (nuclei's default-login templates try
   several passwords per account).
-* A ban: a ``403`` for exactly a request (method and target) the origin had answered without one,
-  or ``BAN_STREAK`` consecutive 403s across at least ``BAN_STREAK_PATHS`` paths. Ordinary 403s on
-  attack payloads (a WAF blocking one request) do not hold the origin; a ban answers everything
-  with 403, including requests it served before. Holds for a ban back off from
-  ``BAN_BASE_SECONDS`` and double while the ban persists.
+* A ban: ``BAN_REPLAY_REFUSALS`` ``403`` answers to replays of requests the origin had answered
+  without one, with nothing served in between, or ``BAN_STREAK`` consecutive 403s across at least
+  ``BAN_STREAK_PATHS`` paths. A replay is the same request from the same sender: the same
+  identity (``principal``: an opaque key the caller gives, anonymous distinct from every
+  signed-in identity), method, whole request-target (query included) and, for a request with a
+  body, the same body (``fingerprint``). So a 403 for another account reading an object the first
+  account was served, for another query value on a served path, or for one attack payload a WAF
+  blocks is that request's own answer and never a ban; a ban answers everything with 403,
+  including requests it served before. Holds for a ban back off from ``BAN_BASE_SECONDS`` and
+  double while the ban persists; ``BAN_DECAY_SECONDS`` after the last ban hold ended the count
+  starts again.
 
 An encrypted (TLS) tunnel's answers cannot be read, so they set no hold; such a tunnel still
 waits out a hold set by readable traffic to the same origin. Holds are shared by every worker
@@ -49,6 +55,15 @@ BAN_BASE_SECONDS = 30.0
 MAX_BAN_HOLD_SECONDS = 300.0
 BAN_STREAK = 20
 BAN_STREAK_PATHS = 3
+# Replays of served requests that must be refused, with nothing served in between, before the
+# origin is held: one 403 for one request is that request's answer (a rule that fired, a session
+# that ended), not a ban.
+BAN_REPLAY_REFUSALS = 2
+# After this long without a ban the next one backs off from BAN_BASE_SECONDS again.
+BAN_DECAY_SECONDS = 900.0
+# Methods whose request is the request line alone; any other is a replay only when the caller
+# says its body is the same (``fingerprint``).
+_BODILESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 MAX_KNOWN_GOOD = 4_096
 LOCK_HOLD_SECONDS = 900.0
 # A target that stops answering (timeouts, refused or unanswered connections, nothing else in
@@ -66,6 +81,8 @@ return 1
 """
 _STATUS_LINE = re.compile(rb"^HTTP/1\.[01] (\d{3})(?: .*)?$")
 _MAX_HEADER_BYTES = 64 * 1024
+# A chunk-size line is a hex number and optional extensions; a longer one is not HTTP framing.
+_MAX_CHUNK_SIZE_LINE_BYTES = 256
 
 
 def retry_after_seconds(value: Any, *, now: float | None = None) -> float | None:
@@ -167,9 +184,12 @@ class ResponseReader:
                 self._state = "status_line" if self._state == "body" else "chunk_size"
                 continue
             if self._state == "chunk_size":
-                if b"\r\n" not in self._buffer:
+                end_of_line = self._buffer.find(b"\r\n", 0, _MAX_CHUNK_SIZE_LINE_BYTES + 2)
+                if end_of_line < 0:
+                    if len(self._buffer) > _MAX_CHUNK_SIZE_LINE_BYTES:
+                        self._stop()  # no size line within the bound: never buffered further
                     return
-                size_line, rest = self._buffer.split(b"\r\n", 1)
+                size_line, rest = self._buffer[:end_of_line], self._buffer[end_of_line + 2:]
                 try:
                     size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)
                 except ValueError:
@@ -183,6 +203,8 @@ class ResponseReader:
                     else:  # trailers: skip to the blank line
                         end = rest.find(b"\r\n\r\n")
                         if end < 0:
+                            if len(rest) > _MAX_HEADER_BYTES:
+                                self._stop()
                             return
                         self._buffer, self._state = rest[end + 4:], "status_line"
                     continue
@@ -191,7 +213,7 @@ class ResponseReader:
 
 class _Origin:
     __slots__ = ("until", "reason", "throttles", "bans", "streak", "streak_paths", "known_good", "locked",
-                 "silent", "outages")
+                 "silent", "outages", "replays_refused", "ban_until")
 
     def __init__(self) -> None:
         self.until = 0.0
@@ -200,10 +222,14 @@ class _Origin:
         self.bans = 0
         self.streak = 0
         self.streak_paths: set[str] = set()
-        self.known_good: set[tuple[str, str]] = set()
+        # Requests the origin served: (sender identity, method, whole request-target, body print).
+        self.known_good: set[tuple[str, str, str, str]] = set()
         self.locked: dict[tuple[str, str], float] = {}
         self.silent = 0
         self.outages = 0
+        # Refusals of replays of served requests, since the origin last served anything.
+        self.replays_refused: dict[tuple[str, str, str, str], int] = {}
+        self.ban_until = 0.0
 
 
 class TargetBackoff:
@@ -268,12 +294,20 @@ class TargetBackoff:
         return state
 
     def observe(self, origin: str, status: int, headers: dict[bytes, bytes], request: dict | None) -> str | None:
-        """Account one answer; returns ``throttled`` or ``banned`` when it set a hold."""
+        """Account one answer; returns ``throttled`` or ``banned`` when it set a hold.
+
+        ``request`` names what was answered: ``method``, ``target`` (the whole request-target,
+        query included) and, when the caller knows them, ``principal`` (an opaque key for the
+        identity that sent it; absent or empty is anonymous) and ``fingerprint`` (an opaque print
+        of the request body). They decide what counts as a replay of a served request."""
         state = self._get(origin)
         state.silent, state.outages = 0, 0  # it answered
         method = str((request or {}).get("method") or "").upper()
         target = str((request or {}).get("target") or "")
-        key = (method, target)
+        fingerprint = str((request or {}).get("fingerprint") or "")
+        key = (str((request or {}).get("principal") or ""), method, target, fingerprint)
+        # A request with a body is comparable only when the caller says what the body was.
+        comparable = bool(target) and (method in _BODILESS_METHODS or bool(fingerprint))
         path = target.split("?", 1)[0]
         retry = retry_after_seconds(headers.get(b"retry-after", b"").decode("latin-1"))
         if status == 423 and target:
@@ -287,12 +321,19 @@ class TargetBackoff:
         if status == 403:
             state.streak += 1
             state.streak_paths.add(path)
-            refused_known = bool(target) and key in state.known_good
+            if comparable and (key in state.known_good or key in state.replays_refused):
+                state.replays_refused[key] = state.replays_refused.get(key, 0) + 1
+            refused_known = sum(state.replays_refused.values()) >= BAN_REPLAY_REFUSALS
             if refused_known or (state.streak >= BAN_STREAK and len(state.streak_paths) >= BAN_STREAK_PATHS):
+                now = self._clock()
+                if state.bans and now - state.ban_until > BAN_DECAY_SECONDS:
+                    state.bans = 0  # a quiet period: the next ban starts from the base hold
                 state.bans += 1
                 state.streak, state.streak_paths = 0, set()
-                state.known_good.discard(key)
+                state.known_good.difference_update(state.replays_refused)
+                state.replays_refused = {}
                 hold = min(MAX_BAN_HOLD_SECONDS, BAN_BASE_SECONDS * 2 ** min(state.bans - 1, 4))
+                state.ban_until = max(state.ban_until, now + hold)
                 self._hold(origin, state, hold, "403 for requests the target served before" if refused_known
                            else f"{BAN_STREAK} consecutive 403s across paths")
                 return "banned"
@@ -300,8 +341,11 @@ class TargetBackoff:
         state.streak, state.streak_paths = 0, set()
         if status < 500:
             state.throttles = 0
-            if status < 400 and target and len(state.known_good) < MAX_KNOWN_GOOD:
-                state.known_good.add(key)
+            if status < 400:
+                # It serves: whatever was refused before this was not a ban.
+                state.replays_refused = {}
+                if comparable and len(state.known_good) < MAX_KNOWN_GOOD:
+                    state.known_good.add(key)
         return None
 
     def observe_silence(self, origin: str) -> str | None:
@@ -338,16 +382,48 @@ class TargetBackoff:
         local = max(0.0, state.until - self._clock()) if state else 0.0
         return max(local, self._shared_remaining(origin))
 
-    async def wait(self, origin: str, sleep: Callable[[float], Any] = asyncio.sleep) -> float:
-        """Wait while the origin is held (here or by another worker); returns the seconds waited."""
-        waited = 0.0
+    def reason(self, origin: str) -> str:
+        """Why the origin is held by this process's own observations ("" when it is not, or when
+        only another worker's shared hold applies)."""
+        state = self._origins.get(origin)
+        return state.reason if state is not None and state.until > self._clock() else ""
+
+    async def _remaining(self, origin: str) -> float:
         self._lazy_store()
-        while (left := (self.remaining(origin) if self._store is None
-                        else await asyncio.to_thread(self.remaining, origin))) > 0:
+        if self._store is None:
+            return self.remaining(origin)
+        return await asyncio.to_thread(self.remaining, origin)
+
+    async def wait(self, origin: str, sleep: Callable[[float], Any] = asyncio.sleep, *,
+                   max_seconds: float | None = None) -> float:
+        """Wait while the origin is held (here or by another worker); returns the seconds waited.
+
+        With ``max_seconds`` the wait never exceeds it: a caller that holds something with a
+        deadline of its own (a capability action's reservation lease) checks ``wait_or_refuse``
+        instead of waiting a long hold out."""
+        waited = 0.0
+        while (left := await self._remaining(origin)) > 0:
             step = min(left, 5.0)
+            if max_seconds is not None:
+                if waited >= max_seconds:
+                    break
+                step = min(step, max_seconds - waited)
             await sleep(step)
             waited += step
         return waited
+
+    async def wait_or_refuse(self, origin: str, max_seconds: float,
+                             sleep: Callable[[float], Any] = asyncio.sleep) -> float:
+        """Wait out a hold of at most ``max_seconds``; returns 0 when the origin is then free, else
+        the seconds the hold still has (nothing was waited for a hold longer than the bound: the
+        caller reports it and sends nothing)."""
+        left = await self._remaining(origin)
+        if left <= 0:
+            return 0.0
+        if left > max_seconds:
+            return left
+        await self.wait(origin, sleep, max_seconds=max_seconds)
+        return await self._remaining(origin)
 
     def reset(self) -> None:
         self._origins.clear()

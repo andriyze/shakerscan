@@ -6,7 +6,9 @@ import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
+import secrets
 import sys
 import ssl
 import re
@@ -497,6 +499,55 @@ def request_error_class(exc: BaseException) -> str:
 MAX_PRIVATE_BODY_BYTES = 4_194_304
 
 
+# A hold the target asked for (runtime/target_backoff) is waited out inside the request only this
+# long: the caller's action holds a reservation with a lease of its own (90 s for http.request),
+# and a ban hold lasts up to five minutes. A longer hold sends nothing and says when to retry.
+MAX_IN_REQUEST_HOLD_SECONDS = 20.0
+_IDENTITY_HEADER = re.compile(r"authorization|cookie|token|api[-_]?key|session|auth", re.I)
+# Tags that compare two requests of this process (who sent them, what body they carried) are keyed
+# with a key that exists only in this process's memory: they are never stored or shown, and a
+# plain digest of a credential or a body would be a guessing oracle wherever it did turn up.
+_PROCESS_TAG_KEY = secrets.token_bytes(32)
+
+
+def _process_tag(data: bytes) -> str:
+    return hmac.new(_PROCESS_TAG_KEY, bytes(data), hashlib.sha256).hexdigest()[:32]
+
+
+def _sender_key(principal_slot: Any, headers: Mapping[str, Any], cookies: Mapping[str, Any] | None,
+                trusted: Mapping[str, Any]) -> str:
+    """An opaque key for the identity one request is sent as: "" for an anonymous request, else a
+    process-keyed tag of the principal slot and the credential material the request carries (a
+    rotated credential is another key). Kept in this process's memory only (runtime/target_backoff)."""
+    material = sorted(
+        [(str(name).lower(), str(value)) for name, value in dict(trusted or {}).items()]
+        + [(str(name).lower(), str(value)) for name, value in dict(headers or {}).items()
+           if _IDENTITY_HEADER.search(str(name))]
+        + [(f"cookie:{name}", str(value)) for name, value in dict(cookies or {}).items()])
+    slot = str(principal_slot or "anonymous")
+    if not material and slot == "anonymous":
+        return ""
+    return _process_tag(json.dumps([slot, material]).encode("utf-8", "replace"))
+
+
+def _held_result(seconds: float, reason: str, request_view: Mapping[str, Any] | None,
+                 hops_followed: int) -> dict[str, Any]:
+    """The answer for a request not sent because the target is held longer than this request
+    may wait. ``target_hold``: nothing reached the target, nothing is charged, and the same
+    request may be sent after the hold. ``target_hold_after_redirect``: the hold began after a
+    followed redirect, so the hops that were sent are reported and it is not a plain retry."""
+    retry = max(1, int(seconds + 0.999))
+    why = reason or "a hold another worker observed"
+    if request_view is not None and hops_followed:
+        return {"ok": False, "retry_after_seconds": retry, "request": dict(request_view),
+                "hops_followed": hops_followed,
+                "error": (f"target_hold_after_redirect: the target is held for another {retry} s ({why}); "
+                          f"the redirect was not followed after {hops_followed} hop(s)")}
+    return {"ok": False, "retry_after_seconds": retry,
+            "error": (f"target_hold: the target is held for another {retry} s ({why}); "
+                      "nothing was sent, retry after it")}
+
+
 async def execute_bound_http_request(
     base_url: str,
     args: Mapping[str, Any],
@@ -615,6 +666,7 @@ async def execute_bound_http_request(
     # The caller's own headers decide whether a redirect may carry identity elsewhere; the
     # declared identification below is neutral (it names the run, not a principal).
     identity_headers = dict(headers)
+    sender_key = _sender_key(principal_slot, headers, cookies, _trusted_headers(trusted_headers))
     present = {str(name).strip().lower() for name in headers}
     for name, value in agent_tools.traffic_attribution.headers().items():
         if name.lower() not in present:
@@ -722,9 +774,13 @@ async def execute_bound_http_request(
                 await origin_pace.take(current_url)
                 # The target asked to wait (429 Retry-After) or banned us: wait it out, as the
                 # scanner tunnels do (runtime/target_backoff).
+                # Bounded: a hold longer than this request may wait sends nothing (``_held_result``).
                 backoff_origin = origin_pace.origin_of(current_url)
                 if backoff_origin:
-                    await TARGET_BACKOFF.wait(backoff_origin)
+                    held = await TARGET_BACKOFF.wait_or_refuse(backoff_origin, MAX_IN_REQUEST_HOLD_SECONDS)
+                    if held > 0:
+                        return _held_result(held, TARGET_BACKOFF.reason(backoff_origin), request_view,
+                                            hops_followed)
                 hop_started = time.perf_counter()
                 hop_started_at = datetime.now(timezone.utc)
                 response = None
@@ -753,6 +809,11 @@ async def execute_bound_http_request(
                         ),
                     )
                     request.extensions["sni_hostname"] = sni_hostname
+                    sent_target = request.url.raw_path.decode("ascii", "replace") or "/"
+                    try:
+                        sent_body = _process_tag(request.content) if request.content else ""
+                    except httpx.RequestNotRead:  # a streamed body: not comparable with another request
+                        sent_body = ""
                     connection_attempts += 1
                     try:
                         response = await client.send(request, stream=True)
@@ -784,8 +845,10 @@ async def execute_bound_http_request(
                     TARGET_BACKOFF.observe(
                         backoff_origin, int(response.status_code),
                         {b"retry-after": retry_after.encode("latin-1", "replace")} if retry_after else {},
-                        {"method": str(current_method).upper(),
-                         "target": urllib.parse.urlsplit(current_url).path or "/"})
+                        # The request as sent, by who sent it: only its own replay, refused, can
+                        # read as a ban (another account's 403, another query's, never does).
+                        {"method": str(current_method).upper(), "target": sent_target,
+                         "principal": sender_key, "fingerprint": sent_body})
                 del body_lookahead[:]  # this hop's own
                 try:
                     (

@@ -6,7 +6,10 @@ import asyncio
 from collections import deque
 import re
 import contextlib
+import hashlib
+import hmac
 import ipaddress
+import secrets
 import struct
 from typing import Any, Awaitable, Callable, Iterable
 
@@ -22,6 +25,11 @@ _MAX_HEADER_BYTES = 64 * 1024
 MAX_TUNNEL_REQUEST_LINES = 5_000
 _MAX_REQUEST_TARGET_CHARS = 2_048
 _MAX_HOST_CHARS = 255
+# Headers that say who sends a request. Their keyed tag (a key of this process's memory only)
+# goes to the backoff under ``principal`` and is never exported with the request lines.
+_IDENTITY_HEADER = re.compile(rb"authorization|cookie|token|api[-_]?key|session|auth")
+_SENDER_TAG_KEY = secrets.token_bytes(32)
+SENDER_KEY = "principal"
 # Distinct destinations the tunnel refused, kept by name; any further ones are only counted.
 MAX_REFUSED_DESTINATIONS = 16
 
@@ -96,11 +104,14 @@ class RequestCounter:
                     return counted
                 header_block, self._buffer = self._buffer[:idx], self._buffer[idx + 4:]
                 length, chunked = 0, False
+                identity: list[bytes] = []
                 for raw in header_block.split(b"\r\n"):
                     name, sep, value = raw.partition(b":")
                     if not sep:
                         continue
                     key = name.strip().lower()
+                    if _IDENTITY_HEADER.search(key):
+                        identity.append(key + b":" + value.strip())
                     if key == b"content-length":
                         try:
                             length = int(value.strip())
@@ -111,6 +122,11 @@ class RequestCounter:
                         chunked = True
                     elif key == b"host" and self._current is not None and "host" not in self._current:
                         self._current["host"] = value.strip()[:_MAX_HOST_CHARS].decode("latin-1")
+                if identity and self._current is not None:
+                    # Who sent it, for the backoff's "served before, refused now" comparison: one
+                    # account's 200 and another's 403 for the same request are not a ban.
+                    self._current[SENDER_KEY] = hmac.new(
+                        _SENDER_TAG_KEY, b"\n".join(sorted(identity)), hashlib.sha256).hexdigest()[:32]
                 self._current = None
                 if chunked:
                     self._state = "chunk_size"
@@ -336,7 +352,10 @@ class PinnedSocksProxy:
             # its requests are neither counted nor listed.
             "content_readable": bool(self.wire_requests_measurable),
             "methods_observed": dict(sorted(self.methods_observed.items())),
-            "request_lines": [dict(item) for item in self.request_lines],
+            "request_lines": [
+                {name: value for name, value in item.items() if name != SENDER_KEY}
+                for item in self.request_lines
+            ],
             "request_lines_dropped": int(self.request_lines_dropped),
             "refused_destinations": [
                 {"destination": key, "attempts": count}

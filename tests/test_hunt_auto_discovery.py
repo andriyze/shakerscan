@@ -284,3 +284,54 @@ def test_an_api_description_longer_than_the_answer_sample_is_parsed_whole_and_in
     assert 'POST /users/v1/register json:{"username":"","password":"","email":""}' in worklist
     assert [values["path"] for cap, values, _key in fake.calls if cap == "javascript.analyze"].count("/openapi.json") == 1
     assert not any("API description at /openapi.json" in note for note in state.get("notes", []))
+
+
+# --- the negative control (review of 2.14.1) ------------------------------------------------------
+
+class _CatchAll(_Fake):
+    """A single-page application: every path answers 200 with the same shell. The control's answer
+    is lost in the queue ``lost`` times before it comes back."""
+
+    def __init__(self, *, lost):
+        super().__init__({})
+        self.lost = lost
+
+    async def execute(self, hunt_id, capability, values, key):
+        self.calls.append((capability, dict(values), key))
+        if capability != "http.request":
+            return {"action_result": {"status": "success", "observations": []}}
+        if values["path"] == auto_discovery.control_path(HUNT):
+            if self.lost > 0:
+                self.lost -= 1
+                return {"error": "stale_reservation_recovered", "action_result": {"observations": []}}
+        return _response(200, "<html><div id='app'></div></html>")
+
+
+def test_without_a_negative_control_no_probe_hit_enters_the_inventory():
+    assert not present(answer_of(_response(200, "anything")), None)
+    auto_discovery._STATE.clear()
+    fake = _CatchAll(lost=99)
+    runner = _runner(fake)
+    asyncio.run(runner._probe_phase(fake.run))
+    state = runner.state
+    controls = [key for _cap, values, key in fake.calls if values.get("path") == auto_discovery.control_path(HUNT)]
+    assert len(controls) == auto_discovery.CONTROL_ATTEMPTS == len(set(controls))  # bounded, each its own key
+    assert all(auto_discovery.key_digest(key) in auto_discovery.probe_key_digests() for key in controls)
+    assert len(fake.calls) == len(controls)  # no probe was sent without a control
+    assert fake.recorded == []
+    assert state["probes"] == "skipped" and state["probe_hits"] == 0
+    assert any("negative control got no answer" in note for note in state["notes"])
+    auto_discovery._STATE.clear()
+
+
+def test_a_control_lost_once_is_asked_for_again_and_a_catch_all_maps_nothing():
+    auto_discovery._STATE.clear()
+    fake = _CatchAll(lost=1)
+    runner = _runner(fake)
+    asyncio.run(runner._probe_phase(fake.run))
+    controls = [key for _cap, values, key in fake.calls if values.get("path") == auto_discovery.control_path(HUNT)]
+    assert len(controls) == 2
+    assert len(fake.calls) > 100  # the probes ran against the control that came back
+    assert fake.recorded == []  # and every one of them answered like it: nothing is a route
+    assert runner.state["probes"] == "done" and runner.state["probe_hits"] == 0
+    auto_discovery._STATE.clear()

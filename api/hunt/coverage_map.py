@@ -38,9 +38,10 @@ import urllib.parse
 from .auto_discovery import COVERAGE_TARGET_KINDS, discovery_state, key_digest, probe_key_digests
 
 SCHEMA = "hunt-open-coverage/v1"
-# Bounds: the inventory read, the routes taken from this Hunt's actions, one listed page.
+# Bounds: the inventory read, the routes kept (inventory first, then this Hunt's own), one listed page.
 MAX_INVENTORY_ENDPOINTS = 600
-MAX_ACTION_ROWS = 5_000
+# This Hunt's actions are read whole, a page at a time (``load_coverage``).
+ACTION_PAGE_ROWS = 1_000
 MAX_ENDPOINTS = 800
 MAX_PAGE = 200
 COMPACT_ITEMS = 5
@@ -276,7 +277,7 @@ _LOOKED_AT = frozenset({"review", "exposure", "unauthenticated_api"})
 _NOTHING_SERVED = frozenset({401, 403, 404, 405, 407, 410})
 # Process-state keys of the discovery runner that are not step outcomes.
 _STATE_KEYS = frozenset({"running", "products", "notes", "probe_hits", "sweep_counts", "deferred_finish",
-                         "engine_accounts", "engine_writes",
+                         "engine_accounts", "engine_writes", "deferred_finish_failed", "stopping",
                          "sweep_stats"})
 
 
@@ -358,35 +359,30 @@ def _discovered_from_action(row: Mapping[str, Any]) -> tuple[str, str, int | Non
     return (str(values.get("method") or "GET").upper(), path, status, str(row.get("content_type") or ""))
 
 
-def build_coverage(
-    *,
-    actions: Sequence[Mapping[str, Any]],
-    endpoints: Sequence[Mapping[str, Any]],
-    candidates: Sequence[Mapping[str, Any]] = (),
-    angles: Sequence[Mapping[str, Any]] = (),
-    discovery: Mapping[str, Any] | None = None,
-    probe_key_digests: Iterable[str] = (),
-    allowed: Iterable[str] | None = None,
-) -> dict[str, Any]:
-    """The coverage map from this Hunt's records (pure; ``load_coverage`` reads them).
+class CoverageFold:
+    """This Hunt's records folded into what its coverage needs, one action row at a time.
 
-    ``actions``: this Hunt's actions with ``capability_name``, ``status``, ``input`` (the redacted
-    planner input), and for requests ``http_status`` / ``content_type``. ``endpoints``: inventory
-    rows (``method``, ``path``, ``param_shape``, ``content_type``, ``source``). ``candidates``:
-    this Hunt's candidates (``family``, ``canonical_locus``). ``angles``: the latest coverage
-    angle per fingerprint (``family``, ``locus``, ``status``). ``probe_key_digests``: sha256 of the
-    engine's own probe idempotency keys, whose answers are discovery, not testing. ``allowed``:
-    the Hunt's capability manifest; a discovery step it cannot run is ``not_allowed``, not pending.
-    """
-    probe_digests = set(probe_key_digests)
-    ledger = _Ledger()
-    known: dict[tuple[str, str], dict[str, Any]] = {}
-    ran: dict[str, str] = {}
-    ran_checks: dict[str, set[str]] = {}
-    # The signed-in identity this Hunt's own request last reached each route with (2xx answer).
-    identities: dict[str, list[dict[str, str]]] = {}
+    What it keeps grows with the routes the Hunt knows, never with the actions it ran, so a Hunt's
+    whole action record is read in pages (``load_coverage``) however long it is: one engine sweep
+    runs more than five thousand actions, and a read that kept only the first five thousand never
+    saw a later request close a class or map a route."""
 
-    def add(method: str, raw_path: str, params: Iterable[str], content_type: str, source: str) -> None:
+    def __init__(self, *, endpoints: Sequence[Mapping[str, Any]], probe_key_digests: Iterable[str] = ()) -> None:
+        self.probe_digests = set(probe_key_digests)
+        self.ledger = _Ledger()
+        self.known: dict[tuple[str, str], dict[str, Any]] = {}
+        self.ran: dict[str, str] = {}
+        self.ran_checks: dict[str, set[str]] = {}
+        # The signed-in identity this Hunt's own request last reached each route with (2xx answer).
+        self.identities: dict[str, list[dict[str, str]]] = {}
+        self.actions = 0
+        for row in endpoints[:MAX_INVENTORY_ENDPOINTS]:
+            self._add(str(row.get("method") or "GET").upper(), str(row.get("path") or ""),
+                      _params(row.get("param_shape")), str(row.get("content_type") or ""),
+                      str(row.get("source") or "inventory"))
+
+    def _add(self, method: str, raw_path: str, params: Iterable[str], content_type: str, source: str) -> None:
+        known = self.known
         route = normalize_path(raw_path)
         if route is None:
             return
@@ -404,12 +400,10 @@ def build_coverage(
             entry["sources"].add(source)
             entry["content_type"] = entry["content_type"] or content_type
 
-    for row in endpoints[:MAX_INVENTORY_ENDPOINTS]:
-        add(str(row.get("method") or "GET").upper(), str(row.get("path") or ""),
-            _params(row.get("param_shape")), str(row.get("content_type") or ""),
-            str(row.get("source") or "inventory"))
-
-    for row in actions[:MAX_ACTION_ROWS]:
+    def add_action(self, row: Mapping[str, Any]) -> None:
+        """Fold one action of this Hunt (rows in the order they started)."""
+        ledger, ran, ran_checks, probe_digests = self.ledger, self.ran, self.ran_checks, self.probe_digests
+        self.actions += 1
         name = str(row.get("capability_name") or "")
         status = str(row.get("status") or "")
         for step, capability in DISCOVERY_STEPS.items():
@@ -420,7 +414,7 @@ def build_coverage(
         if name == "templates.scan" and status in {"completed", "partial"}:
             ran["templates"] = "done"
         if status not in {"completed", "partial"}:
-            continue
+            return
         values = _json(row.get("input"), {})
         if name == "authz.verify" and isinstance(values.get("routes"), list):
             for item in values["routes"][:50]:
@@ -429,11 +423,11 @@ def build_coverage(
                 if route:
                     ledger.requested.add(route)
                     ledger.close(route, _VERIFIER_CLASS[name])
-            continue
+            return
         raw_path = _input_path(name, values)
         route = normalize_path(raw_path) if raw_path else None
         if route is None:
-            continue
+            return
         is_probe = str(row.get("idempotency_key_sha256") or "") in probe_digests
         if not is_probe:
             ledger.requested.add(route)
@@ -461,106 +455,141 @@ def build_coverage(
             if not is_probe and http_status is not None and 200 <= http_status < 300 and name == "http.request":
                 identity = _capture_identity(values)
                 if identity:
-                    identities[route] = identity
+                    self.identities[route] = identity
             if not is_probe and http_status is not None and http_status != 404 and http_status < 500:
                 # The inputs the request itself carried are the route's inputs: the sweep tests them.
-                add(method, path, _request_inputs(values), content_type, "hunt_request")
+                self._add(method, path, _request_inputs(values), content_type, "hunt_request")
 
-    for row in candidates:
-        locus = _json(row.get("canonical_locus"), {})
-        ledger.close(normalize_path(_locus_path(locus)), family_classes(row.get("family")) | _LOOKED_AT)
-    for row in angles:
-        if str(row.get("status") or "") not in SETTLED_ANGLE_STATUSES:
-            continue
-        locus = _json(row.get("locus"), {})
-        ledger.close(normalize_path(_locus_path(locus)), family_classes(row.get("family")) | _LOOKED_AT)
+    def report(self, *, candidates: Sequence[Mapping[str, Any]] = (), angles: Sequence[Mapping[str, Any]] = (),
+               discovery: Mapping[str, Any] | None = None, allowed: Iterable[str] | None = None) -> dict[str, Any]:
+        """The coverage map of what was folded."""
+        ledger, known, ran, identities = self.ledger, self.known, self.ran, self.identities
+        for row in candidates:
+            locus = _json(row.get("canonical_locus"), {})
+            ledger.close(normalize_path(_locus_path(locus)), family_classes(row.get("family")) | _LOOKED_AT)
+        for row in angles:
+            if str(row.get("status") or "") not in SETTLED_ANGLE_STATUSES:
+                continue
+            locus = _json(row.get("locus"), {})
+            ledger.close(normalize_path(_locus_path(locus)), family_classes(row.get("family")) | _LOOKED_AT)
 
-    items: list[dict[str, Any]] = []
-    pairs_total = 0
-    for (method, route), entry in known.items():
-        classes = classify(method, route, entry["params"], content_type=entry["content_type"])
-        closed = set(ledger.closed_for(route))
-        if route in ledger.requested:
-            closed.add("review")
-            statuses = ledger.statuses.get(route)
-            if statuses and statuses <= _NOTHING_SERVED:
-                closed.update({"exposure", "unauthenticated_api"})
-        if route in ledger.with_params:
-            closed.add("injection")
-        if route in ledger.written:
-            closed.update({"graphql", "upload"})
-        pairs_total += len(classes)
-        open_classes = sorted(classes - closed, key=lambda name: _CLASS_RANK.get(name, 99))
-        if open_classes:
-            items.append({
-                "endpoint": f"{method} {route}",
-                "untested": open_classes,
-                "params": sorted(entry["params"])[:8],
-                "requested": route in ledger.requested,
-                "sources": sorted(entry["sources"])[:4],
-                # By reference only: the sweep sends its checks on this route as the same login.
-                **({"identity": identities[route]} if route in identities else {}),
-            })
-    items.sort(key=_item_rank)
-    # Routes reached with the Hunt's own login whose classes are all settled anonymously: the sweep
-    # still tests their inputs as that login. Not open coverage (nothing here holds a finish).
-    listed = {item["endpoint"] for item in items}
-    signed_in = [{"endpoint": f"{method} {route}", "untested": [], "params": sorted(entry["params"])[:8],
-                  "identity": identities[route]}
-                 for (method, route), entry in known.items()
-                 if route in identities and f"{method} {route}" not in listed][:MAX_PAGE]
-    pairs_open = sum(len(item["untested"]) for item in items)
-    state = dict(discovery or {})
-    allowed_names = None if allowed is None else {str(name) for name in allowed}
-    steps = {
-        step: ran.get(step) or state.get(step) or (
-            "not_allowed" if allowed_names is not None and capability not in allowed_names else "not_run")
-        for step, capability in DISCOVERY_STEPS.items()
-    }
-    for step, value in state.items():
-        if step not in steps and step not in _STATE_KEYS and isinstance(value, str):
-            steps[step] = value
-    if "templates" in ran:
-        steps["templates"] = ran["templates"]
-    # Running discovery holds a finish (what it maps is about to be listed); a step that never ran
-    # is named, with the call that runs it, but holds nothing on its own.
-    pending = sorted(step for step, value in steps.items()
-                     if value in {"running", "queued"} and step in DISCOVERY_STEPS)
-    not_run = sorted(step for step, value in steps.items() if value == "not_run" and step in DISCOVERY_STEPS)
-    # A sweep that follows the Hunt has tested what was mapped and waits for the planner's own
-    # requests: nothing of the engine's is pending then.
-    if state.get("running") and state.get("sweep") != "following":
-        pending = sorted(set(pending) | {"auto_discovery"})
-    by_class: dict[str, int] = {}
-    for item in items:
-        for name in item["untested"]:
-            by_class[name] = by_class.get(name, 0) + 1
-    return {
-        "schema_version": SCHEMA,
-        "endpoints": len(known),
-        "endpoints_requested": sum(1 for (_m, route) in known if route in ledger.requested),
-        "pairs_total": pairs_total,
-        "pairs_open": pairs_open,
-        "endpoints_open": len(items),
-        "open_by_class": dict(sorted(by_class.items(), key=lambda pair: (-pair[1], pair[0]))),
-        "discovery": {"steps": steps, "pending": pending,
-                      **({"not_run": not_run, "run_with": {step: DISCOVERY_STEPS[step] for step in not_run}}
-                         if not_run else {}),
-                      **({"products": state["products"]} if state.get("products") else {}),
-                      **({"sweep_checks": dict(state["sweep_counts"])}
-                         if isinstance(state.get("sweep_counts"), Mapping) else {}),
-                      **({"planner_finished": True} if state.get("deferred_finish") else {}),
-                      **({"sweep_stats": dict(state["sweep_stats"])}
-                         if isinstance(state.get("sweep_stats"), Mapping) else {}),
-                      **({"notes": state["notes"]} if state.get("notes") else {}),
-                      # What the engine made on the target (allow_account_creation), for clean-up.
-                      **({"engine_accounts": list(state["engine_accounts"])} if state.get("engine_accounts") else {}),
-                      **({"engine_writes": list(state["engine_writes"])} if state.get("engine_writes") else {})},
-        "open": items,
-        **({"signed_in": signed_in} if signed_in else {}),
-        **({"allowed": sorted(allowed_names)} if allowed_names is not None else {}),
-        "class_guide": {name: CLASS_GUIDE[name] for name in by_class},
-    }
+        items: list[dict[str, Any]] = []
+        pairs_total = 0
+        for (method, route), entry in known.items():
+            classes = classify(method, route, entry["params"], content_type=entry["content_type"])
+            closed = set(ledger.closed_for(route))
+            if route in ledger.requested:
+                closed.add("review")
+                statuses = ledger.statuses.get(route)
+                if statuses and statuses <= _NOTHING_SERVED:
+                    closed.update({"exposure", "unauthenticated_api"})
+            if route in ledger.with_params:
+                closed.add("injection")
+            if route in ledger.written:
+                closed.update({"graphql", "upload"})
+            pairs_total += len(classes)
+            open_classes = sorted(classes - closed, key=lambda name: _CLASS_RANK.get(name, 99))
+            if open_classes:
+                items.append({
+                    "endpoint": f"{method} {route}",
+                    "untested": open_classes,
+                    "params": sorted(entry["params"])[:8],
+                    "requested": route in ledger.requested,
+                    "sources": sorted(entry["sources"])[:4],
+                    # By reference only: the sweep sends its checks on this route as the same login.
+                    **({"identity": identities[route]} if route in identities else {}),
+                })
+        items.sort(key=_item_rank)
+        # Routes reached with the Hunt's own login whose classes are all settled anonymously: the sweep
+        # still tests their inputs as that login. Not open coverage (nothing here holds a finish).
+        listed = {item["endpoint"] for item in items}
+        signed_in = [{"endpoint": f"{method} {route}", "untested": [], "params": sorted(entry["params"])[:8],
+                      "identity": identities[route]}
+                     for (method, route), entry in known.items()
+                     if route in identities and f"{method} {route}" not in listed][:MAX_PAGE]
+        pairs_open = sum(len(item["untested"]) for item in items)
+        state = dict(discovery or {})
+        allowed_names = None if allowed is None else {str(name) for name in allowed}
+        steps = {
+            step: ran.get(step) or state.get(step) or (
+                "not_allowed" if allowed_names is not None and capability not in allowed_names else "not_run")
+            for step, capability in DISCOVERY_STEPS.items()
+        }
+        for step, value in state.items():
+            if step not in steps and step not in _STATE_KEYS and isinstance(value, str):
+                steps[step] = value
+        if "templates" in ran:
+            steps["templates"] = ran["templates"]
+        # Running discovery holds a finish (what it maps is about to be listed); a step that never ran
+        # is named, with the call that runs it, but holds nothing on its own.
+        pending = sorted(step for step, value in steps.items()
+                         if value in {"running", "queued"} and step in DISCOVERY_STEPS)
+        not_run = sorted(step for step, value in steps.items() if value == "not_run" and step in DISCOVERY_STEPS)
+        # A sweep that follows the Hunt has tested what was mapped and waits for the planner's own
+        # requests: nothing of the engine's is pending then.
+        if state.get("running") and state.get("sweep") != "following":
+            pending = sorted(set(pending) | {"auto_discovery"})
+        by_class: dict[str, int] = {}
+        for item in items:
+            for name in item["untested"]:
+                by_class[name] = by_class.get(name, 0) + 1
+        return {
+            "schema_version": SCHEMA,
+            "endpoints": len(known),
+            "endpoints_requested": sum(1 for (_m, route) in known if route in ledger.requested),
+            "pairs_total": pairs_total,
+            "pairs_open": pairs_open,
+            "endpoints_open": len(items),
+            "open_by_class": dict(sorted(by_class.items(), key=lambda pair: (-pair[1], pair[0]))),
+            "discovery": {"steps": steps, "pending": pending,
+                          **({"not_run": not_run, "run_with": {step: DISCOVERY_STEPS[step] for step in not_run}}
+                             if not_run else {}),
+                          **({"products": state["products"]} if state.get("products") else {}),
+                          **({"sweep_checks": dict(state["sweep_counts"])}
+                             if isinstance(state.get("sweep_counts"), Mapping) else {}),
+                          **({"planner_finished": True} if state.get("deferred_finish") else {}),
+                      # The engine could not complete the planner's recorded finish: the Hunt is
+                      # still open and somebody has to finish it.
+                      **({"deferred_finish_failed": str(state["deferred_finish_failed"])[:300]}
+                         if state.get("deferred_finish_failed") else {}),
+                          **({"sweep_stats": dict(state["sweep_stats"])}
+                             if isinstance(state.get("sweep_stats"), Mapping) else {}),
+                          **({"notes": state["notes"]} if state.get("notes") else {}),
+                          # What the engine made on the target (allow_account_creation), for clean-up.
+                          **({"engine_accounts": list(state["engine_accounts"])} if state.get("engine_accounts") else {}),
+                          **({"engine_writes": list(state["engine_writes"])} if state.get("engine_writes") else {})},
+            "open": items,
+            **({"signed_in": signed_in} if signed_in else {}),
+            **({"allowed": sorted(allowed_names)} if allowed_names is not None else {}),
+            "class_guide": {name: CLASS_GUIDE[name] for name in by_class},
+        }
+
+
+def build_coverage(
+    *,
+    actions: Iterable[Mapping[str, Any]],
+    endpoints: Sequence[Mapping[str, Any]],
+    candidates: Sequence[Mapping[str, Any]] = (),
+    angles: Sequence[Mapping[str, Any]] = (),
+    discovery: Mapping[str, Any] | None = None,
+    probe_key_digests: Iterable[str] = (),
+    allowed: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """The coverage map from this Hunt's records (pure; ``load_coverage`` reads them).
+
+    ``actions``: this Hunt's actions, every one, in the order they started, with
+    ``capability_name``, ``status``, ``input`` (the redacted
+    planner input), and for requests ``http_status`` / ``content_type``. ``endpoints``: inventory
+    rows (``method``, ``path``, ``param_shape``, ``content_type``, ``source``). ``candidates``:
+    this Hunt's candidates (``family``, ``canonical_locus``). ``angles``: the latest coverage
+    angle per fingerprint (``family``, ``locus``, ``status``). ``probe_key_digests``: sha256 of the
+    engine's own probe idempotency keys, whose answers are discovery, not testing. ``allowed``:
+    the Hunt's capability manifest; a discovery step it cannot run is ``not_allowed``, not pending.
+    """
+    fold = CoverageFold(endpoints=endpoints, probe_key_digests=probe_key_digests)
+    for row in actions:
+        fold.add_action(row)
+    return fold.report(candidates=candidates, angles=angles, discovery=discovery, allowed=allowed)
 
 
 def _item_rank(item: Mapping[str, Any]) -> tuple:
@@ -607,8 +636,11 @@ def compact_open_coverage(report: Mapping[str, Any], hunt_id: str) -> dict[str, 
     }
 
 
-def debrief_coverage(report: Mapping[str, Any], *, forced: bool, reason: str | None) -> dict[str, Any]:
-    """What the debrief keeps about coverage at finish."""
+def debrief_coverage(report: Mapping[str, Any], *, forced: bool, reason: str | None,
+                     engine_deferred: bool = False) -> dict[str, Any]:
+    """What the debrief keeps about coverage at finish. ``forced`` and ``reason`` are the
+    planner's own (never the engine's); ``engine_deferred`` marks a finish the planner recorded
+    while the engine's sweep ran and the engine completed when its work ended."""
     discovery = report.get("discovery") or {}
     return {
         "schema_version": SCHEMA,
@@ -625,6 +657,7 @@ def debrief_coverage(report: Mapping[str, Any], *, forced: bool, reason: str | N
         "open_sample": [_item_line(item) for item in (report.get("open") or [])[:20]],
         "forced": bool(forced),
         **({"force_reason": str(reason)[:2000]} if forced and reason else {}),
+        **({"engine_deferred": True} if engine_deferred else {}),
     }
 
 
@@ -733,8 +766,13 @@ def http_budget_left(run: Mapping[str, Any]) -> bool:
 
 def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, force: bool,
                  force_reason: str | None, now: datetime | None = None,
-                 can_test: bool = True) -> str | None:
+                 can_test: bool = True, engine_deferred: bool = False) -> str | None:
     """Why this finish is refused, or None.
+
+    ``engine_deferred`` is the engine completing a finish the planner already recorded
+    (``auto_discovery``): the planner's guards were applied when it was recorded, the engine's
+    own work has ended, and no planner is left to send a next call, so nothing here holds it.
+    Only server code sets it; no request carries it.
 
     Never refuses a Hunt that cannot test (``can_test`` false: passive, or its approval revoked
     or expired; it has no checks to close the open pairs with), a Hunt whose wall or HTTP budget
@@ -744,7 +782,7 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
     a forced finish is refused while a concrete next call exists (``_early_finish``)."""
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or report is None:
         return None
-    if not can_test:
+    if not can_test or engine_deferred:
         return None
     if force:
         if len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:
@@ -793,8 +831,11 @@ def _open_refusal(run: Mapping[str, Any], report: Mapping[str, Any], remaining: 
         f"coverage is open: {pairs} endpoint/test-class pairs untested on "
         f"{int(report.get('endpoints_open') or 0)} of {int(report.get('endpoints') or 0)} known endpoints"
         + (f"; discovery not finished: {', '.join(pending)}" if pending else "")
-        + f", with {left} and HTTP budget left. Every listed endpoint answered on this target "
-        "differently from a path that cannot exist, so it is part of this target's surface.",
+        + f", with {left} and HTTP budget left. The listed endpoints are this target's mapped "
+        "surface: routes its pages, scripts, robots and sitemap files or API description name, "
+        "paths a probe saw answer unlike a path that cannot exist, and routes this Hunt's own "
+        "requests reached (each entry's sources say which). A route that turns out not to exist "
+        "closes with the request that shows it.",
     ]
     if lines:
         parts.append("Untested first: " + "; ".join(lines) + ".")
@@ -816,27 +857,32 @@ async def load_coverage(conn: Any, run: Mapping[str, Any]) -> dict[str, Any] | N
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or not run.get("target_id"):
         return None
     hunt_uuid = run["id"]
-    # The answer's status is in the Hunt's HTTP archive (one row per request an action sent), not
-    # in the action's settled summary.
-    actions = await conn.fetch(
-        """SELECT a.capability_name, a.status, a.input_summary->'input' AS input,
-                  a.input_summary->>'idempotency_key_sha256' AS idempotency_key_sha256,
-                  t.status_code::text AS http_status, NULL::text AS content_type
-           FROM hunt_actions a
-           LEFT JOIN (SELECT DISTINCT ON (hunt_action_id) hunt_action_id, status_code
-                      FROM http_transactions
-                      WHERE hunt_run_id=$1 AND hunt_action_id IS NOT NULL
-                      ORDER BY hunt_action_id, sequence DESC) t ON t.hunt_action_id = a.id
-           WHERE a.hunt_run_id=$1
-           ORDER BY a.started_at LIMIT $2""",
-        hunt_uuid, MAX_ACTION_ROWS,
-    )
     endpoints = await conn.fetch(
         """SELECT method, path, param_shape, content_type, source
            FROM target_endpoints WHERE target_id=$1 AND test_status <> 'gone'
            ORDER BY priority_score DESC, last_seen_at DESC LIMIT $2""",
         run["target_id"], MAX_INVENTORY_ENDPOINTS,
     )
+    fold = CoverageFold(endpoints=[dict(row) for row in endpoints], probe_key_digests=probe_key_digests())
+    # Every action of the Hunt, in the order they started, a page at a time through a cursor: the
+    # fold keeps routes, not rows, so the read is whole however many actions there are (it was
+    # the first 5,000, which one sweep exceeds). The answer's status is in the Hunt's HTTP archive
+    # (one row per request an action sent), not in the action's settled summary.
+    async with conn.transaction():
+        async for row in conn.cursor(
+            """SELECT a.capability_name, a.status, a.input_summary->'input' AS input,
+                      a.input_summary->>'idempotency_key_sha256' AS idempotency_key_sha256,
+                      t.status_code::text AS http_status, NULL::text AS content_type
+               FROM hunt_actions a
+               LEFT JOIN (SELECT DISTINCT ON (hunt_action_id) hunt_action_id, status_code
+                          FROM http_transactions
+                          WHERE hunt_run_id=$1 AND hunt_action_id IS NOT NULL
+                          ORDER BY hunt_action_id, sequence DESC) t ON t.hunt_action_id = a.id
+               WHERE a.hunt_run_id=$1
+               ORDER BY a.started_at, a.id""",
+            hunt_uuid, prefetch=ACTION_PAGE_ROWS,
+        ):
+            fold.add_action(row)
     candidates = await conn.fetch(
         """SELECT c.family, c.canonical_locus FROM investigation_candidates c
            WHERE c.status <> 'expired' AND EXISTS (
@@ -851,16 +897,15 @@ async def load_coverage(conn: Any, run: Mapping[str, Any]) -> dict[str, Any] | N
            ORDER BY fingerprint, event_seq DESC""",
         hunt_uuid,
     )
-    return build_coverage(
-        actions=[dict(row) for row in actions], endpoints=[dict(row) for row in endpoints],
+    return fold.report(
         candidates=[dict(row) for row in candidates], angles=[dict(row) for row in angles],
-        discovery=discovery_state(str(hunt_uuid)), probe_key_digests=probe_key_digests(),
+        discovery=discovery_state(str(hunt_uuid)),
         allowed=list(_json(run.get("policy_json"), {}).get("allowed_capabilities") or []),
     )
 
 
 __all__ = [
-    "CLASSES", "CLASS_GUIDE", "COVERAGE_TARGET_KINDS", "MIN_FORCE_REASON_CHARS", "SCHEMA",
+    "CLASSES", "CLASS_GUIDE", "COVERAGE_TARGET_KINDS", "CoverageFold", "MIN_FORCE_REASON_CHARS", "SCHEMA",
     "build_coverage", "classify",
     "compact_open_coverage", "coverage_page", "debrief_coverage", "family_classes", "finish_guard",
     "key_digest", "load_coverage", "normalize_path", "wall_remaining_seconds",

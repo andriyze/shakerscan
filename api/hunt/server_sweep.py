@@ -25,7 +25,7 @@ check never runs twice):
 5. **Request checks** (``request.verify``): every input of every endpoint gets the injection classes
    a deterministic differential proves (SQL, command, template, path traversal; SSRF, open redirect
    and CRLF for an input named like a URL or a redirect target), a GraphQL endpoint its GraphQL
-   check, an XML endpoint XXE, a sign-in its rate-limit, LDAP and NoSQL checks, and the root and
+   check, an XML endpoint XXE, a sign-in its LDAP and NoSQL checks, and the root and
    a bounded set of API answers their CORS and header checks, and each principal's bearer token
    its JWT check on the first route it reads. Each is a short action (seconds,
    tens of requests) run from a second queue beside the long verifiers; inputs whose name points
@@ -130,13 +130,22 @@ MAX_SWEEP_LOGINS = 8
 LONG_SLOT_RETRY_SECONDS = 30.0
 LONG_SLOT_WAIT_SECONDS = 1_800.0
 _LONG_SLOTS_TAKEN = re.compile(r"long actions in flight", re.I)
+# The target asked to wait (429 Retry-After, a ban) for longer than a request waits inside its own
+# action (capabilities/http ``target_hold``): nothing was sent. The sweep waits the hold out here,
+# holding no reservation, and sends the call again (its own key), at most this many times.
+_TARGET_HOLD = re.compile(r"^target_hold: the target is held for another (\d{1,4}) s")
+MAX_TARGET_HOLD_WAITS = 3
+MAX_TARGET_HOLD_SECONDS = 300.0
 DEFAULT_PAIR_IDS = tuple(f"dc-{index:02d}" for index in range(1, 21))
 _SECRET_TEXT = re.compile(
     r"\[withheld:\d+\]|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|"
     r"<title>\s*index of /|\bindex of /|\bdirectory listing for \[?/|\blisting directory /", re.I)
 # A field or setting named like a secret, with a value: "password": "...", DB_PASSWORD=..., token: ...
+# Anchored on the name's own word, with nothing unbounded before it: a leading ``\b[\w.-]*`` matched
+# the same texts (any name ending in the word) and made the search quadratic on a long run of name
+# characters in a body the target chose (4.7 s on 16,000 characters, on the API's event loop).
 _SECRET_FIELD = re.compile(
-    r"""(?ix)["']?\b[\w.-]*(?:pass(?:word|wd)?|secret|api[_-]?key|access[_-]?key|private[_-]?key|
+    r"""(?ix)(?:pass(?:word|wd)?|secret|api[_-]?key|access[_-]?key|private[_-]?key|
     token|credential|connection[_-]?string|password_hash)\b["']?\s*[:=]\s*["']?[^\s"',}{\]\[]{3,}""")
 # JSON account records served to an anonymous caller (two or more objects with an email or username).
 _RECORDS = re.compile(r'(?s)"(?:email|username|user_name|login)"\s*:\s*"[^"]+".*?"(?:email|username|user_name|login)"\s*:\s*"[^"]+"')
@@ -194,9 +203,15 @@ _API_PREFIX = re.compile(r"^(/(?:api|rest|v[0-9]{1,2})(?:/v[0-9]{1,2})?)(?=/|$)"
 # A framework's validation answer that names the inputs a route requires (FastAPI/pydantic
 # ``"loc": ["query", "id"]``, and the plain "missing parameter 'x'" wording of other stacks).
 _LOC_FIELD = re.compile(r'"loc"\s*:\s*\[\s*"(query|body|form)"\s*,\s*"([A-Za-z_][A-Za-z0-9_.-]{0,63})"')
+# (One whitespace run on each side of the optional separator, never two adjacent ones.)
 _MISSING_FIELD = re.compile(r"(?:missing|required)\s+(?:required\s+)?(?:query\s+|body\s+|form\s+)?"
-                            r"(?:param(?:eter)?|field|argument|value)s?\s*[:=]?\s*['\"`]?([A-Za-z_][A-Za-z0-9_.-]{0,63})", re.I)
+                            r"(?:param(?:eter)?|field|argument|value)s?\s*(?:[:=]\s*)?['\"`]?([A-Za-z_][A-Za-z0-9_.-]{0,63})", re.I)
 _SECRET_FIELDS = ("password", "pass", "passwd", "pwd")
+
+# The methods the engine's own requests use. It never sends DELETE (or any other method) on its
+# own: an inventory route ``DELETE /api/users/{id}`` is the planner's to judge.
+ENGINE_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH"})
+ENGINE_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
 Call = Callable[[str, Mapping[str, Any], str], Awaitable[Any]]
 CreateCandidate = Callable[[Mapping[str, Any]], Awaitable[Any]]
@@ -454,8 +469,11 @@ class Sweep(EngineLogins):
 
     def __init__(self, *, call: Call, create_candidate: CreateCandidate, state: dict[str, Any],
                  live: Callable[[], Awaitable[bool]], pace: WirePace | None = None,
-                 request_permission: Callable[[str, list[str]], Awaitable[str]] | None = None) -> None:
+                 request_permission: Callable[[str, list[str]], Awaitable[str]] | None = None,
+                 load_policy: Callable[[], Awaitable[Mapping[str, Any] | None]] | None = None) -> None:
         self._request_permission = request_permission
+        # The Hunt's policy as it is now (the run row's); without it the policy at the sweep's start.
+        self._load_policy = load_policy
         self._pace = pace
         self._call = call
         self._create = create_candidate
@@ -550,18 +568,56 @@ class Sweep(EngineLogins):
         if len(notes) < 40 and text not in notes:
             notes.append(text[:300])
 
+    async def _guarded(self, label: str, work: Awaitable[Any], default: Any = None) -> Any:
+        """One step of a batch (a route's read, a document's parse, a round's phase): its failure
+        is counted and named and the batch goes on; it never ends the sweep."""
+        try:
+            return await work
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one route or document never fails the batch
+            self._count(f"{label}:failed")
+            self._note(f"sweep {label}: {type(exc).__name__} (skipped; the sweep went on)")
+            return default
+
+    def _background(self, label: str, work: Awaitable[Any]) -> asyncio.Task:
+        """Run ``work`` from the sweep's queue (``_long_jobs``); the sweep drains or cancels it."""
+        task = asyncio.get_running_loop().create_task(self._guarded(label, work))
+        self._long_jobs.add(task)
+        task.add_done_callback(self._long_jobs.discard)
+        return task
+
+    async def _accounts_allowed(self, policy: Mapping[str, Any]) -> bool:
+        """Whether the operator's allow_account_creation holds now: read again before each use
+        (``load_policy``), so a permission revoked while the Hunt runs stops the next sign-up."""
+        if self._load_policy is not None:
+            try:
+                policy = await self._load_policy() or {}
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - unknown is not allowed
+                self._note(f"engine accounts: the Hunt's policy could not be read ({type(exc).__name__})")
+                return False
+        return bool(policy.get("allow_account_creation"))
+
     async def _safe(self, capability: str, values: Mapping[str, Any], key: str, *,
                     slot_wait_seconds: float = 0) -> Any:
         """One capability call; a refusal is counted and named. With ``slot_wait_seconds``, a
         refusal because the Hunt's long-action slots are all taken is retried (same key) once a
         slot may have settled, for at most that long. The engine never sends its own request to a
-        route that names a destructive operation (``destructive_route``), whatever the method."""
+        route that names a destructive operation (``destructive_route``), whatever the method, and
+        never with a method outside ``ENGINE_METHODS`` (no DELETE), whatever the route."""
         paths = [values.get("path"), *(values.get("routes") or ())] if isinstance(values, Mapping) else []
         if any(destructive_route(str(path or "")) for path in paths):
             self._count(f"{capability}:destructive_route_skipped")
             return None
+        method = str(values.get("method") or "").upper() if isinstance(values, Mapping) else ""
+        if method and method not in ENGINE_METHODS:
+            self._count(f"{capability}:method_skipped")
+            return None
         waited = 0.0
         requeued = False
+        holds = 0
         while True:
             if not await self._live():
                 raise asyncio.CancelledError()
@@ -586,6 +642,13 @@ class Sweep(EngineLogins):
                 requeued = True
                 self._count(f"{capability}:requeued")
                 key = f"{key}:requeue"[:200]
+                continue
+            held = _TARGET_HOLD.match(_error_of(result))
+            if held and holds < MAX_TARGET_HOLD_WAITS:
+                holds += 1
+                self._count(f"{capability}:target_hold_waited")
+                await asyncio.sleep(min(MAX_TARGET_HOLD_SECONDS, float(held.group(1)) + 1.0))
+                key = f"{key}:held{holds}"[:200]
                 continue
             if _lost(result):
                 self._count(f"{capability}:lost")
@@ -627,7 +690,7 @@ class Sweep(EngineLogins):
         try:
             if templates:
                 # The products discovery recognised are known before the first round.
-                await self._product_templates("read_only")
+                await self._guarded("product_templates", self._product_templates("read_only"))
             follow = planner_finished is not None and load_report is not None
             first, last_look, wait = report, False, FOLLOW_POLL_SECONDS
             while rounds < (MAX_ROUNDS + MAX_FOLLOW_ROUNDS if follow else MAX_ROUNDS):
@@ -660,32 +723,37 @@ class Sweep(EngineLogins):
                 rounds += 1
                 self._stats(rounds=rounds, endpoints_known=int(current.get("endpoints") or len(items)))
                 found: list[str] = []
+                # Each phase is guarded: one that fails is counted and named, and the round goes on.
+                step = self._guarded
                 if "http.request" in allowed:
-                    found += await self._read_all(fresh, slots=slots, writes=writes)
-                    found += await self._discover_parameters(fresh)
+                    found += await step("reads", self._read_all(fresh, slots=slots, writes=writes), [])
+                    found += await step("parameters", self._discover_parameters(fresh), [])
                 if "javascript.analyze" in allowed:
-                    found += await self._javascript(items)
+                    found += await step("javascript", self._javascript(items), [])
                 if "http.request" in allowed and writes:
-                    await self._default_credentials(request_checks="request.verify" in allowed)
+                    await step("default_credentials",
+                               self._default_credentials(request_checks="request.verify" in allowed))
                     # Accounts the engine makes itself (only with the operator's explicit
-                    # allow_account_creation), then the application used as each of its logins
-                    # (engine_accounts): what that maps is tested as the login next round.
-                    if policy.get("allow_account_creation") or await self._ask_for_accounts(items):
-                        await self._make_accounts(items)
-                    await self._use_as_logins(items, writes=writes, allowed=allowed)
+                    # allow_account_creation, read again each round), then the application used as
+                    # each of its logins (engine_accounts): what that maps is tested as the login
+                    # next round.
+                    if await self._accounts_allowed(policy) or await self._ask_for_accounts(items):
+                        await step("engine_accounts", self._make_accounts(items))
+                    await step("engine_logins", self._use_as_logins(items, writes=writes, allowed=allowed))
                 if "request.verify" in allowed:
-                    self._request_checks(fresh, writes=writes, slots=slots, first=rounds == 1)
+                    await step("request_checks", self._queue_round_checks(
+                        fresh, writes=writes, slots=slots, first=rounds == 1))
                 if templates and writes and "state_changing" not in self.product_checks_run:
-                    await self._product_templates("state_changing")
+                    await step("product_templates", self._product_templates("state_changing"))
                 if "authz.verify" in allowed and {"primary", "secondary"} <= set(slots):
-                    await self._function_authz(fresh)
-                await self._injection(fresh, allowed=allowed, writes=writes, slots=slots)
+                    await step("function_authz", self._function_authz(fresh))
+                await step("injection", self._injection(fresh, allowed=allowed, writes=writes, slots=slots))
                 if {"http.request", "candidate.verify"} <= allowed:
-                    await self._graphql_arguments(writes=writes)
+                    await step("graphql_arguments", self._graphql_arguments(writes=writes))
                 if "http.request" in allowed:
                     # Last in the round: the checks queued above run while route names are tried
                     # (one engine call each, about a second apiece at the Hunt's call rate).
-                    found += await self._api_routes(items)
+                    found += await step("api_routes", self._api_routes(items), [])
                 handled = {"review", "exposure", "unauthenticated_api", "default_credentials"}
                 if {"primary", "secondary"} <= set(slots):
                     handled.add("function_authz")
@@ -714,19 +782,39 @@ class Sweep(EngineLogins):
                 if load_report is None:
                     break
             if templates and writes and "state_changing" not in self.product_checks_run:
-                await self._product_templates("state_changing")
+                await self._guarded("product_templates", self._product_templates("state_changing"))
             # The rounds found nothing new; the queued long verifiers finish before the sweep does.
             self.state["sweep"] = "draining" if self._long_jobs else "running"
             while self._long_jobs:
-                await asyncio.gather(*list(self._long_jobs))
+                await asyncio.gather(*list(self._long_jobs), return_exceptions=True)
             self.state["sweep"] = "done"
         except asyncio.CancelledError:
             self.state["sweep"] = "stopped"
-            for job in list(self._long_jobs):
-                job.cancel()
+            await self._cancel_queued()
             raise
+        except Exception as exc:  # noqa: BLE001 - the sweep never breaks its Hunt; its state says so
+            # Whatever the guarded phases did not contain (the coverage read, the bookkeeping
+            # between phases): the sweep ends here, says so, and leaves nothing queued behind it.
+            self.state["sweep"] = "failed"
+            self._count("sweep:failed")
+            self._note(f"sweep ended early: {type(exc).__name__}; what it had not tested stays on the coverage report")
+            await self._cancel_queued()
         finally:
             self._stats(rounds=rounds)
+
+    async def _cancel_queued(self) -> None:
+        """Cancel every queued check and let the cancellations land (bounded)."""
+        jobs = list(self._long_jobs)
+        for job in jobs:
+            job.cancel()
+        if jobs:
+            try:
+                await asyncio.wait(jobs, timeout=5)
+            except asyncio.CancelledError:
+                pass  # already stopping: the jobs were told
+
+    async def _queue_round_checks(self, items: Sequence[Mapping[str, Any]], **options: Any) -> None:
+        self._request_checks(items, **options)
 
     def _untested(self, item: Mapping[str, Any]) -> list[str]:
         endpoint = str(item.get("endpoint") or "")
@@ -849,7 +937,7 @@ class Sweep(EngineLogins):
             if response.get("status") == 405 and writes and not _LOGIN_PATH.search(route):
                 links.extend(await self._probe_shape(route, slots if route in self.signed_in_only else ()))
 
-        await asyncio.gather(*(read(route) for route in targets))
+        await asyncio.gather(*(self._guarded("read", read(route)) for route in targets))
         for route in json_logins:
             self.logins.setdefault(route, (route, "username", "password", True))
         return links
@@ -886,7 +974,7 @@ class Sweep(EngineLogins):
                 if _distinct(answer, control):
                     found.append(f"GET {path}")
 
-            await asyncio.gather(*(word(name) for name in API_ROUTE_WORDS))
+            await asyncio.gather(*(self._guarded("api_route", word(name)) for name in API_ROUTE_WORDS))
         self._stats(api_roots=sorted(self.prefixes_tried),
                     api_route_hits=int((self.state.get("sweep_stats") or {}).get("api_route_hits") or 0) + len(found))
         return found
@@ -948,7 +1036,7 @@ class Sweep(EngineLogins):
             self.logins_tried.add(path)
             await self._try_default_pairs(path, user, secret, json_body)
             if request_checks:
-                # After the default pairs: the rate-limit run's wrong passwords never lock them out.
+                # After the default pairs, so a sign-in check's probes never count against them.
                 await self._signin_checks(path, user, secret, json_body)
 
     async def _try_default_pairs(self, path: str, user: str, secret: str, json_body: bool, *,
@@ -1063,7 +1151,8 @@ class Sweep(EngineLogins):
                 # request with a marker in every input saw the marker come back unencoded, on every
                 # route: measured Hunts spent the whole tool-time budget on inputs that reflect
                 # nothing. A request with no answer falls back to the tool.
-                if capability == "xss.verify" and "http.request" in allowed and (method == "GET" or writes):
+                if capability == "xss.verify" and "http.request" in allowed and (
+                        method == "GET" or (writes and method in ENGINE_WRITE_METHODS)):
                     self._count("xss.verify:reflection_screened")
                     self._queue_reflection(method, route, params, identity)
                     continue
@@ -1072,7 +1161,7 @@ class Sweep(EngineLogins):
                     continue
                 if method == "GET":
                     jobs.append(_tool_job(capability, klass, method, route, params, None, identity))
-                elif writes and method in {"POST", "PUT", "PATCH"}:
+                elif writes and method in ENGINE_WRITE_METHODS:
                     for field in params[:MAX_FIELDS_PER_BODY]:
                         jobs.append(_tool_job(capability, klass, method, route, params, field, identity))
         # XSS first on every target (about 20 s a call), then SQL injection (minutes a call): the
@@ -1117,6 +1206,8 @@ class Sweep(EngineLogins):
                           identity: Mapping[str, Any]) -> None:
         """One request with a marker in every input of a route; xss.verify follows for each input
         that comes back with the marker's angle bracket unencoded."""
+        if method != "GET" and method not in ENGINE_WRITE_METHODS:
+            return  # the marker goes in a query or a form body; never with DELETE or another method
         # Keyed by the inputs too: a route that gains an input (a later request named it) is screened again.
         key = f"{method} {route} " + ",".join(sorted(params)) + " " + json.dumps(dict(identity), sort_keys=True)
         if key in self.reflection_probed:
@@ -1149,9 +1240,7 @@ class Sweep(EngineLogins):
                     if method == "GET":
                         break
 
-        task = asyncio.get_running_loop().create_task(probe())
-        self._long_jobs.add(task)
-        task.add_done_callback(self._long_jobs.discard)
+        self._background("reflection", probe())
 
     async def _discover_parameters(self, items: Sequence[Mapping[str, Any]]) -> list[str]:
         """Inputs of mapped GET routes that answered with none known: one request carries every
@@ -1224,7 +1313,8 @@ class Sweep(EngineLogins):
             routes.append(route)
         for route in routes[:max(0, MAX_PARAMETER_ROUTES - len(self.params_mined))]:
             self.params_mined.add(route)
-        await asyncio.gather(*(mine(route) for route in routes if route in self.params_mined))
+        await asyncio.gather(*(self._guarded("parameters", mine(route))
+                               for route in routes if route in self.params_mined))
         return found
 
     def _shape_from(self, route: str, response: Mapping[str, Any], method: str) -> list[str]:
@@ -1334,18 +1424,27 @@ class Sweep(EngineLogins):
             body = _response(result).get("body_sample")
             if not action or not body:
                 continue
-            for locus in graphql_sweep.argument_loci(body, path.split("?", 1)[0]):
+            try:
+                loci = graphql_sweep.argument_loci(body, path.split("?", 1)[0])
+            except Exception as exc:  # noqa: BLE001 - the target's document: one schema never ends the round
+                self._count("graphql_schema:failed")
+                self._note(f"sweep graphql schema at {path}: {type(exc).__name__} (skipped)")
+                continue
+            for locus in loci:
                 self._count("graphql_arguments")
                 await self._candidate_and_verify(graphql_sweep.candidate_values(locus, action))
 
     async def _signin_checks(self, path: str, user: str, secret: str, json_body: bool) -> None:
-        """A sign-in's own request checks: rate limiting, LDAP and NoSQL wildcards (request.verify)."""
+        """A sign-in's own request checks: LDAP and NoSQL wildcards (request.verify)."""
         if path in self.signin_checked:
             return
         self.signin_checked.add(path)
         body = {user: "shakerscan-probe", secret: "shakerscan-probe-1"}
         base = {"method": "POST", "path": path, ("json_body" if json_body else "form_body"): body}
-        self._queue_request_check({**base, "check": "rate_limit", "parameter": secret})
+        # No rate-limit check from here: the sweep has no account of the application's to name,
+        # and wrong passwords for a user that does not exist can never trip a per-account lockout,
+        # so their answers say nothing about one. The planner runs it with a real account.
+        self._count("rate_limit:skipped_no_account")
         self._queue_request_check({**base, "check": "ldap_injection", "parameter": user})
         if json_body:
             self._queue_request_check({**base, "check": "nosql_injection", "parameter": user})
@@ -1377,9 +1476,7 @@ class Sweep(EngineLogins):
             if follow_up is not None and sql_screen_escalates(result):
                 self._queue_long(follow_up)
 
-        task = asyncio.get_running_loop().create_task(one())
-        self._long_jobs.add(task)
-        task.add_done_callback(self._long_jobs.discard)
+        self._background("request_check", one())
         self.request_checks_queued += 1
 
     def _queue_long(self, job: tuple[str, dict[str, Any], str]) -> None:
@@ -1396,9 +1493,7 @@ class Sweep(EngineLogins):
                     self.injection_done += 1
                     self._stats()
 
-        task = asyncio.get_running_loop().create_task(one())
-        self._long_jobs.add(task)
-        task.add_done_callback(self._long_jobs.discard)
+        self._background("verifier", one())
         self.injection_queued += 1
 
 
@@ -1468,7 +1563,8 @@ def product_candidate(product: str, checks: str, match: Mapping[str, Any],
     }
 
 
-_ROBOTS_LINE = re.compile(r"(?im)^\s*(?:dis)?allow\s*:\s*(/[^\s*$#?]*)")
+# Blanks within the line only: ``^\s*`` also ran over every following line break, once per line.
+_ROBOTS_LINE = re.compile(r"(?im)^[ \t]*(?:dis)?allow[ \t]*:[ \t]*(/[^\s*$#?]*)")
 _SITEMAP_LOC = re.compile(r"(?i)<loc>\s*([^<\s]+)\s*</loc>")
 
 
@@ -1508,7 +1604,10 @@ def hint_entries(response: Mapping[str, Any], page: str) -> list[str]:
         found = [path for path in _ROBOTS_LINE.findall(text) if path != "/"]
     elif name.startswith("sitemap") and name.endswith(".xml"):
         for loc in _SITEMAP_LOC.findall(text):
-            parts = urllib.parse.urlsplit(loc)
+            try:
+                parts = urllib.parse.urlsplit(loc)
+            except ValueError:  # the target's text (``http://[``): that entry names nothing
+                continue
             path = parts.path if parts.scheme else loc
             if path.startswith("/") and not path.startswith("//"):
                 found.append(path + (f"?{parts.query}" if parts.scheme and parts.query else ""))
@@ -1517,7 +1616,8 @@ def hint_entries(response: Mapping[str, Any], page: str) -> list[str]:
 
 def _tool_job(capability: str, klass: str, method: str, route: str, params: Sequence[str], field: str | None,
               identity: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]:
-    """One sqli.verify or xss.verify call on a route's query (GET) or one body field."""
+    """One sqli.verify or xss.verify call on a route's query (GET) or one body field (POST, PUT or
+    PATCH; a job for any other method names it, and ``Sweep._safe`` never sends it)."""
     if method == "GET":
         path = f"{concrete(route)}?" + "&".join(f"{name}=1" for name in params[:10])
         return capability, {"path": path, **identity}, sweep_key(klass, path)

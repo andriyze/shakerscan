@@ -97,8 +97,192 @@ def test_a_waf_blocking_attacks_is_not_a_ban_but_refusing_what_it_served_before_
         if i % 10 == 0:
             _answer(backoff, 200, "/")
     assert backoff.remaining(ORIGIN) == 0
+    # One refusal of a served request is that request's answer; refused again with nothing served
+    # in between, the origin is refusing what it served.
+    assert _answer(backoff, 403, "/search?q=shoes") is None and backoff.remaining(ORIGIN) == 0
     assert _answer(backoff, 403, "/search?q=shoes") == "banned"
     assert backoff.remaining(ORIGIN) == target_backoff.BAN_BASE_SECONDS
+
+
+def _sent(backoff, status, target, *, principal="", method="GET", fingerprint=""):
+    return backoff.observe(ORIGIN, status, {}, {"method": method, "target": target, "principal": principal,
+                                                "fingerprint": fingerprint})
+
+
+def test_an_access_control_refusal_is_never_a_ban():
+    """Review finding (post-2.14.1): the ban key had no sender and http.py gave it the path alone,
+    so the secure answer to an authorization comparison held the whole origin for every worker."""
+    backoff = TargetBackoff(_Clock())
+    # The owner reads its object; the other account and an anonymous caller are refused, repeatedly.
+    assert _sent(backoff, 200, "/api/users/1", principal="owner") is None
+    for _ in range(6):
+        assert _sent(backoff, 403, "/api/users/1", principal="other") is None
+        assert _sent(backoff, 403, "/api/users/1") is None
+    # Another object by query on a path that served: its own answer.
+    assert _sent(backoff, 200, "/item?id=1", principal="owner") is None
+    for _ in range(6):
+        assert _sent(backoff, 403, "/item?id=2", principal="owner") is None
+    # A body the WAF blocks, sent to a route that took another body.
+    assert _sent(backoff, 200, "/comment", method="POST", fingerprint="plain") is None
+    for _ in range(6):
+        assert _sent(backoff, 403, "/comment", method="POST", fingerprint="attack") is None
+        assert _sent(backoff, 403, "/comment", method="POST") is None  # a body nobody described
+    assert backoff.remaining(ORIGIN) == 0
+    state = backoff._origins[ORIGIN]
+    assert state.bans == 0 and not state.replays_refused
+
+
+def test_a_ban_is_the_same_senders_served_requests_refused_with_nothing_served_between():
+    backoff = TargetBackoff(_Clock())
+    _sent(backoff, 200, "/api/users/1", principal="owner")
+    _sent(backoff, 200, "/comment", principal="owner", method="POST", fingerprint="plain")
+    # One refusal, then the origin serves again: not a ban, and the count starts over.
+    assert _sent(backoff, 403, "/api/users/1", principal="owner") is None
+    assert _sent(backoff, 200, "/", principal="owner") is None
+    assert _sent(backoff, 403, "/api/users/1", principal="owner") is None
+    assert backoff.remaining(ORIGIN) == 0
+    # Two served requests refused in a row (one of them a replayed body): a ban.
+    assert _sent(backoff, 403, "/comment", principal="owner", method="POST", fingerprint="plain") == "banned"
+    assert backoff.remaining(ORIGIN) == target_backoff.BAN_BASE_SECONDS
+
+
+def test_the_ban_count_starts_over_after_a_quiet_period():
+    clock = _Clock()
+    backoff = TargetBackoff(clock)
+
+    def ban() -> float:
+        _sent(backoff, 200, "/a")
+        _sent(backoff, 403, "/a")
+        assert _sent(backoff, 403, "/a") == "banned"
+        held = backoff.remaining(ORIGIN)
+        clock.now += held + 1
+        return held
+
+    assert [ban(), ban(), ban()] == [30.0, 60.0, 120.0]  # doubling while the ban persists
+    clock.now += target_backoff.BAN_DECAY_SECONDS + 1
+    assert ban() == target_backoff.BAN_BASE_SECONDS
+
+
+def test_a_chunk_size_line_that_never_ends_stops_the_reader():
+    seen, reader = _read(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + b"f" * 100_000, split=4096)
+    assert seen == [(200, "/0")] and not reader.readable
+    assert reader._buffer == b""  # nothing kept
+    # A size line with an extension, within the bound, is still read.
+    ok = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;name=" + b"v" * 200 + b"\r\nhello\r\n0\r\n\r\n"
+          b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+    for split in (None, 3):
+        seen, reader = _read(ok, split=split)
+        assert seen == [(200, "/0"), (404, "/1")] and reader.readable
+
+
+def test_a_long_hold_is_not_waited_out_inside_a_request():
+    """A request that would wait a hold longer than its action's lease sends nothing and says so;
+    a short hold is still waited out (the Retry-After test above)."""
+    from uuid import UUID
+    from capabilities import http as http_capability
+    from capabilities.http import execute_bound_http_request
+    from runtime.models import TargetBinding
+
+    target_backoff.BACKOFF.reset()
+
+    async def scenario():
+        arrivals = []
+
+        async def app(reader, writer):
+            while line := await reader.readline():
+                if line.startswith(b"GET "):
+                    arrivals.append(line)
+                if line == b"\r\n":
+                    writer.write(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 100\r\nContent-Length: 0\r\n\r\n")
+                    await writer.drain()
+            writer.close()
+
+        try:
+            server = await asyncio.start_server(app, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("the unit-test sandbox forbids loopback listeners")
+        base = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        target = TargetBinding(target_id=str(UUID(int=2)), target_kind="web", canonical_host="127.0.0.1",
+                               allowed_origins=(base,), allowed_addresses=("127.0.0.1",),
+                               allowed_root_domains=("127.0.0.1",), environment="lab", scope_receipt_id=str(UUID(int=3)))
+        first = await execute_bound_http_request(base, {"method": "GET", "path": "/a"}, target=target)
+        started = asyncio.get_running_loop().time()
+        second = await execute_bound_http_request(base, {"method": "GET", "path": "/b"}, target=target)
+        elapsed = asyncio.get_running_loop().time() - started
+        server.close()
+        await server.wait_closed()
+        return arrivals, first, second, elapsed
+
+    arrivals, first, second, elapsed = asyncio.run(scenario())
+    target_backoff.BACKOFF.reset()
+    assert len(arrivals) == 1 and first["response"]["status"] == 429
+    assert elapsed < 5 and elapsed < http_capability.MAX_IN_REQUEST_HOLD_SECONDS
+    assert second["ok"] is False and second["error"].startswith("target_hold:")
+    assert 90 <= second["retry_after_seconds"] <= 100
+    assert "request" not in second  # nothing was sent, so nothing is charged as sent
+
+
+def test_the_engines_own_http_client_names_the_sender_and_the_whole_request():
+    """An owner's 200 and another account's 403 for one object must not read as a ban: the HTTP
+    client gives the backoff who sent each request, its query and its body."""
+    from uuid import UUID
+    from capabilities.http import execute_bound_http_request
+    from runtime.models import TargetBinding
+
+    target_backoff.BACKOFF.reset()
+    seen = []
+    real = target_backoff.BACKOFF.observe
+
+    def observe(origin, status, headers, request):
+        seen.append((status, dict(request)))
+        return real(origin, status, headers, request)
+
+    async def scenario():
+        async def app(reader, writer):
+            owner = False
+            while line := await reader.readline():
+                if line.lower().startswith(b"authorization: bearer owner"):
+                    owner = True
+                if line == b"\r\n":
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" if owner
+                                 else b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                    await writer.drain()
+                    owner = False
+            writer.close()
+
+        try:
+            server = await asyncio.start_server(app, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("the unit-test sandbox forbids loopback listeners")
+        base = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        target = TargetBinding(target_id=str(UUID(int=2)), target_kind="web", canonical_host="127.0.0.1",
+                               allowed_origins=(base,), allowed_addresses=("127.0.0.1",),
+                               allowed_root_domains=("127.0.0.1",), environment="lab", scope_receipt_id=str(UUID(int=3)))
+        request = {"method": "GET", "path": "/api/users/1", "query": {"view": "full"}}
+        results = [await execute_bound_http_request(
+            base, request, target=target, principal_slot="primary",
+            trusted_headers={"Authorization": "Bearer owner"})]
+        for _ in range(4):
+            results.append(await execute_bound_http_request(
+                base, request, target=target, principal_slot="secondary",
+                trusted_headers={"Authorization": "Bearer other"}))
+            results.append(await execute_bound_http_request(base, request, target=target))
+        server.close()
+        await server.wait_closed()
+        return results, target_backoff.BACKOFF.remaining(next(iter(target_backoff.BACKOFF._origins)))
+
+    target_backoff.BACKOFF.observe = observe
+    try:
+        results, held = asyncio.run(scenario())
+    finally:
+        del target_backoff.BACKOFF.observe
+        target_backoff.BACKOFF.reset()
+    assert [r["response"]["status"] for r in results] == [200] + [403] * 8  # every comparison was sent
+    assert held == 0
+    assert all(request["target"] == "/api/users/1?view=full" for _status, request in seen)
+    owner, other, anonymous = (seen[index][1]["principal"] for index in (0, 1, 2))
+    assert anonymous == "" and owner and other and owner != other
+    assert "owner" not in owner and "Bearer" not in owner  # a digest, never the credential
 
 
 def test_a_long_run_of_403s_across_paths_is_a_ban():
@@ -360,3 +544,25 @@ def test_the_engines_own_http_client_counts_a_timeout_as_silence():
     target_backoff.BACKOFF.reset()
     assert not result["ok"]
     assert state is not None and state.silent == 1
+
+
+def test_the_tunnel_tags_who_sent_a_request_and_never_exports_the_tag():
+    # A scanner tool replays one request as two accounts through the tunnel; the backoff must be
+    # able to tell them apart, and the tag stays out of the Scan's request archive.
+    import pinned_socks_proxy as tunnel
+
+    seen: list[dict] = []
+    counter = tunnel.RequestCounter(on_request=seen.append)
+    counter.feed(b"GET /api/users/1 HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer one\r\n\r\n")
+    counter.feed(b"GET /api/users/1 HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer two\r\n\r\n")
+    counter.feed(b"GET /api/users/1 HTTP/1.1\r\nHost: t\r\n\r\n")
+    counter.feed(b"GET /api/users/1 HTTP/1.1\r\nHost: t\r\nCookie: sid=one\r\nAuthorization: Bearer one\r\n\r\n")
+    first, second, anonymous, both = seen
+    assert first[tunnel.SENDER_KEY] and second[tunnel.SENDER_KEY]
+    assert first[tunnel.SENDER_KEY] != second[tunnel.SENDER_KEY] != both[tunnel.SENDER_KEY]
+    assert tunnel.SENDER_KEY not in anonymous
+    assert "one" not in first[tunnel.SENDER_KEY]
+
+    backoff = TargetBackoff(_Clock())
+    for request, status in ((first, 200), (second, 403), (second, 403), (second, 403)):
+        assert backoff.observe("https://t", status, {}, request) is None

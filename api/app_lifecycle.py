@@ -33,6 +33,7 @@ LIFESPAN_TASK_NAMES = (
     "model_intake_automatic_review_runner",
     "summary_compactor",
     "target_liveness_runner",
+    "hunt_deferred_finish_runner",
 )
 
 

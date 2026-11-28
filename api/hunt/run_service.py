@@ -31,6 +31,7 @@ from .permission_grants import settle_for_ended_hunt
 from .permission_store import pending_summary
 from .finding_verifications import HUNT_FINDINGS_QUERY
 from .auto_discovery import (
+    DEFERRED_FINISH_NOTE, deferred_finish_values, deferred_from_notes, deferred_note, engine_busy,
     defer_finish, stop as stop_engine_work, sweep_following, sweep_running, testing_authority, wait_stopped,
 )
 from .coverage_map import (
@@ -63,6 +64,11 @@ logger = logging.getLogger(__name__)
 # How long a finish waits for the engine's stopped discovery calls to settle (a client's finish
 # call must still answer well within its own timeout).
 ENGINE_STOP_SETTLE_SECONDS = 15.0
+# A finish the planner recorded and no engine work in this process will complete (the API
+# restarted) is completed once the Hunt has had no action for this long: a sweep still running in
+# another API process is never cut short (its calls are at most seconds apart, and a long one is
+# an action in flight).
+DEFERRED_RECOVERY_QUIET_SECONDS = 300.0
 
 try:
     from runtime.hunt_http_exchange_contract import public_capture_references
@@ -944,6 +950,8 @@ class HuntRunService:
         self._finish_retainer = finish_retainer
         # Reads a web Hunt's open coverage (``coverage_map.load_coverage``); injectable for tests.
         self._coverage_reader = coverage_reader or load_coverage
+        # Recoveries of a recorded finish started by a read (``_recover_deferred_in_background``).
+        self._recovering: dict[str, asyncio.Task] = {}
 
     async def _finish_coverage(self, connection: Any, row: Mapping[str, Any]) -> dict[str, Any] | None:
         """The coverage map at finish; a read that fails never holds the finish (it is logged)."""
@@ -1054,6 +1062,7 @@ class HuntRunService:
             from .saved_logins import safe_hunt_view as saved_login_view
             saved_logins = await saved_login_view(connection, row)
             result = await with_live_briefing(connection, public_hunt_run(row), row)
+        self._recover_deferred_in_background(_row_dict(row))
         result["actions"] = [public_hunt_action(action) for action in actions]
         result["outcome_summary"] = hunt_action_outcome_summary(result["actions"])
         result["outcome_summary"]["finding_ids"] = sorted(str(item["id"]) for item in live_findings)
@@ -1718,11 +1727,97 @@ class HuntRunService:
             "offset": max(0, int(offset)),
         }
 
+    async def recover_deferred_finish(self, hunt_id: str) -> dict[str, Any] | None:
+        """Complete a finish the planner recorded while the engine was working, when no engine
+        work is left to complete it: the API restarted after "Recorded ... nothing else is needed"
+        (the sweep and the recorded finish were process memory), so the Hunt would stay active
+        with no planner and no sweep. The recorded finish is kept on the Hunt's row
+        (``hunt_runs.notes``); this finishes the Hunt with it, as the engine's own finish.
+
+        Nothing happens while this process still runs the Hunt's engine work, while any action is
+        in flight, or within ``DEFERRED_RECOVERY_QUIET_SECONDS`` of the Hunt's last action or of
+        the record itself (another API process may be running the sweep). Returns the finished
+        Hunt, or None when there was nothing to recover (yet)."""
+        run_uuid = _uuid_or_400(hunt_id, "hunt id")
+        if engine_busy(str(run_uuid)):
+            return None
+        async with self._pool().acquire() as connection:
+            row = await hunt_run_or_404(connection, hunt_id)
+            if row.get("completed_at") is not None or row["status"] not in {
+                    "active", "awaiting_planner", "budget_exhausted"}:
+                return None
+            deferred = deferred_from_notes(_decode_json(_row_dict(row).get("notes"), []))
+            if deferred is None:
+                return None
+            quiet = await connection.fetchval(
+                """SELECT NOT EXISTS(
+                       SELECT 1 FROM hunt_actions WHERE hunt_run_id=$1 AND (
+                           status IN ('reserved','running')
+                           OR GREATEST(started_at, COALESCE(completed_at, started_at))
+                              > NOW() - make_interval(secs => $2)))""",
+                run_uuid, float(DEFERRED_RECOVERY_QUIET_SECONDS))
+        try:
+            recorded = datetime.fromisoformat(deferred["at"])
+        except ValueError:
+            recorded = None
+        if recorded is not None and recorded.tzinfo is None:
+            recorded = recorded.replace(tzinfo=timezone.utc)
+        if not quiet or recorded is None or (
+                datetime.now(timezone.utc) - recorded).total_seconds() < DEFERRED_RECOVERY_QUIET_SECONDS:
+            return None
+        return await self.finish(hunt_id, **deferred_finish_values(deferred))
+
+    async def recover_deferred_finishes(self, *, limit: int = 200) -> list[str]:
+        """``recover_deferred_finish`` for every open Hunt that holds a recorded finish (for the
+        API's start-up and housekeeping); returns the Hunts it finished. One Hunt's failure is
+        reported and the rest still run."""
+        async with self._pool().acquire() as connection:
+            rows = await connection.fetch(
+                """SELECT id FROM hunt_runs
+                   WHERE completed_at IS NULL AND status IN ('active','awaiting_planner','budget_exhausted')
+                     AND COALESCE(notes,'[]'::jsonb) @> $1::jsonb
+                   ORDER BY updated_at LIMIT $2""",
+                json.dumps([{"kind": DEFERRED_FINISH_NOTE}]), int(limit))
+        finished: list[str] = []
+        for item in rows:
+            try:
+                if await self.recover_deferred_finish(str(item["id"])) is not None:
+                    finished.append(str(item["id"]))
+            except Exception as exc:  # noqa: BLE001 - one Hunt never stops the others
+                logger.warning("deferred finish of %s not recovered: %s", item["id"], type(exc).__name__)
+        return finished
+
+    def _recover_deferred_in_background(self, row: Mapping[str, Any]) -> None:
+        """A read of an open Hunt that holds a recorded finish and no engine work in this process
+        starts its recovery (the read itself is answered as it is)."""
+        hunt_id = str(row.get("id") or "")
+        if (row.get("completed_at") is not None or row.get("status") not in {
+                "active", "awaiting_planner", "budget_exhausted"}
+                or hunt_id in self._recovering or engine_busy(hunt_id)
+                or deferred_from_notes(_decode_json(row.get("notes"), [])) is None):
+            return
+
+        async def recover() -> None:
+            try:
+                await self.recover_deferred_finish(hunt_id)
+            except Exception as exc:  # noqa: BLE001 - retried at the next read
+                logger.warning("deferred finish of %s not recovered: %s", hunt_id, type(exc).__name__)
+            finally:
+                self._recovering.pop(hunt_id, None)
+
+        self._recovering[hunt_id] = asyncio.get_running_loop().create_task(recover())
+
     async def finish(
         self, hunt_id: str, *, summary: str, next_actions: list[str],
-        force: bool = False, force_reason: str | None = None,
+        force: bool = False, force_reason: str | None = None, engine_deferred: bool = False,
     ) -> dict[str, Any]:
         """Finish an active Hunt with its debrief.
+
+        ``engine_deferred`` is the engine completing a finish the planner recorded while the
+        engine's sweep ran (``auto_discovery``): it is the engine's own finish, not subject to the
+        planner's too-early or open-coverage guards and never deferred again, and the debrief says
+        so instead of calling it forced. It is set by server code only; the finish route never
+        passes it (``HuntFinishRequest`` has no such field and forbids extras).
 
         A web Hunt with open coverage (``coverage_map``: discovery not finished, or known
         endpoints with test classes nothing ran) and wall and HTTP budget left is refused (409)
@@ -1765,7 +1860,7 @@ class HuntRunService:
                     )
                 can_test = (str(row.get("target_kind") or "") in COVERAGE_TARGET_KINDS
                             and await self._can_test(connection, dict(row)))
-                if can_test and sweep_running(str(run_uuid)):
+                if can_test and sweep_running(str(run_uuid)) and not engine_deferred:
                     # The engine is still mapping and testing this target itself. The planner's
                     # finish ends the planner's part: its debrief (and reason) is kept and the Hunt
                     # finishes with it when the engine's sweep ends, never earlier.
@@ -1782,7 +1877,18 @@ class HuntRunService:
                         if refusal:
                             raise HTTPException(status_code=409, detail=refusal)
                     deferred = defer_finish(str(run_uuid), summary=summary, next_actions=next_actions,
-                                            reason=force_reason)
+                                            reason=force_reason, forced=bool(force))
+                    # Kept on the row as well: the sweep and its recorded finish are process
+                    # memory, and an API restart must not leave the Hunt open with nobody to
+                    # finish it (``recover_deferred_finish``). The latest record replaces an earlier one.
+                    await connection.execute(
+                        """UPDATE hunt_runs SET notes = COALESCE((
+                               SELECT jsonb_agg(item) FROM jsonb_array_elements(COALESCE(notes,'[]'::jsonb)) item
+                               WHERE item->>'kind' IS DISTINCT FROM $3), '[]'::jsonb) || $2::jsonb,
+                               updated_at=NOW()
+                           WHERE id=$1""",
+                        run_uuid, json.dumps([deferred_note(deferred, at=datetime.now(timezone.utc).isoformat())]),
+                        DEFERRED_FINISH_NOTE)
                     return {**public_hunt_run(row), "already_terminal": False, "finish_deferred": True,
                             "deferred_finish": {"reason": deferred.get("reason"), "message": (
                                 "Recorded. The engine is still running its own discovery and checks on "
@@ -1819,12 +1925,12 @@ class HuntRunService:
                     )
                 coverage = await self._finish_coverage(connection, dict(row))
                 refusal = finish_guard(dict(row), coverage, force=force, force_reason=force_reason,
-                                       can_test=can_test)
+                                       can_test=can_test, engine_deferred=engine_deferred)
                 if refusal:
                     raise HTTPException(status_code=409, detail=refusal)
                 if coverage is not None:
                     debrief["coverage"] = debrief_coverage(
-                        coverage, forced=bool(force), reason=force_reason)
+                        coverage, forced=bool(force), reason=force_reason, engine_deferred=engine_deferred)
                 if self._finish_retainer is not None:
                     debrief["saved_action"] = await self._finish_retainer(connection, dict(row))
                 row = await connection.fetchrow(
