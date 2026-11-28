@@ -73,8 +73,8 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..capabilities.product_api import product_api_for
 
 KEY_PREFIX = "auto-sweep"
-# Engine checks at once: leaves the planner a long slot (agent_job_concurrency gives a Hunt two
-# long slots per agent-tool worker).
+# Engine checks at once; admission leaves one long slot available to planner work across
+# the live worker pool (agent_job_concurrency), even when this queue has more ready jobs.
 LONG_CONCURRENCY = 2
 # Each engine call waits about two seconds end to end (measured: 80 calls a minute at three at
 # once), so short calls go several at once.
@@ -492,8 +492,6 @@ class Sweep(EngineLogins):
         # paths gets the default pairs once, so the few logins a Hunt may try are distinct ones.
         # Routes that asked an anonymous read for HTTP Basic, one per first path segment.
         self.basic_logins: dict[str, str] = {}
-        self.login_titles: dict[str, str] = {}
-        self.login_mirrors: set[tuple[str, str, str, str]] = set()
         self.signed_in_only: set[str] = set()
         self.seen: set[str] = set()
         self.js_done: set[str] = set()
@@ -521,11 +519,9 @@ class Sweep(EngineLogins):
         self.graphql_seen: list[tuple[str, str]] = []
         self.graphql_done: set[str] = set()
         self._init_engine_logins()
-        # The anonymous answer each read route gave (status, sample length, title), and the
-        # mounts already queued for testing per route tail: one application served under several
-        # mounts (/a/app.php, /b/app.php answering alike) is tested once.
+        # The anonymous answer each read route gave (status, sample length, title).
+        # Equal summaries at different mounts do not establish identical applications.
         self.answers: dict[str, tuple[Any, int, str]] = {}
-        self.mirror_tested: dict[tuple[str, str, tuple[Any, int, str]], str] = {}
         self.prefixes_tried: set[str] = set()
         self._product_prefixes: tuple[str, ...] | None = None
         self.reflection_probed: set[str] = set()
@@ -881,7 +877,6 @@ class Sweep(EngineLogins):
             if form:
                 self.logins.setdefault(form[0], (form[0], form[1], form[2], False))
                 self.login_pages.setdefault(form[0], path.split("?", 1)[0])
-                self.login_titles.setdefault(form[0], str((response.get("html") or {}).get("title") or "")[:200])
             links.extend(form_entries(response, path))
             links.extend(hint_entries(response, path))
             signal = exposure_signal(response)
@@ -1025,14 +1020,6 @@ class Sweep(EngineLogins):
                 self.logins_tried.add(path)
                 await self._try_default_pairs(path, user, secret, json_body, basic=True)
                 continue
-            segments = path.split("/")
-            title = self.login_titles.get(path, "")
-            if len(segments) >= 3 and title:
-                mirror = ("/".join(segments[2:]), user, secret, title)
-                if mirror in self.login_mirrors:
-                    self._count("mirror_skipped")
-                    continue
-                self.login_mirrors.add(mirror)
             self.logins_tried.add(path)
             await self._try_default_pairs(path, user, secret, json_body)
             if request_checks:
@@ -1124,9 +1111,6 @@ class Sweep(EngineLogins):
         jobs: list[tuple[str, dict[str, Any], str]] = []
         for item in items[:MAX_INJECTION_TARGETS]:
             method, _, route = str(item.get("endpoint") or "").partition(" ")
-            if self._mirror(method, route):
-                self._count("mirror_skipped")
-                continue
             params = [str(name) for name in item.get("params") or () if str(name)]
             # New inputs on an endpoint already looked at: the verifiers still open on it run again
             # (their keys carry the inputs, so no call repeats).
@@ -1169,17 +1153,6 @@ class Sweep(EngineLogins):
         jobs.sort(key=lambda job: 0 if job[0] == "xss.verify" else 1)
         for job in jobs:
             self._queue_long(job)
-
-    def _mirror(self, method: str, route: str) -> bool:
-        """Whether ``route`` is another mount of a route already queued for testing: the same path
-        after its first segment, answering the anonymous read exactly alike."""
-        segments = route.split("/")
-        answer = self.answers.get(route)
-        if len(segments) < 3 or answer is None or not isinstance(answer[0], int) or answer[0] >= 400:
-            return False
-        key = (method, "/".join(segments[2:]), answer)
-        first = self.mirror_tested.setdefault(key, route)
-        return first != route
 
     def _product_route(self, route: str) -> bool:
         """Whether ``route`` belongs to a product discovery recognised: under one of its mounts, one
@@ -1361,8 +1334,6 @@ class Sweep(EngineLogins):
             if not route.startswith("/") or method not in {"GET", "POST", "PUT", "PATCH"}:
                 continue
             if method != "GET" and not writes:
-                continue
-            if self._mirror(method, route):
                 continue
             if _TEMPLATE_ARTIFACT.search(route):
                 continue  # a client-side template's placeholder a crawl read as a link, not a route

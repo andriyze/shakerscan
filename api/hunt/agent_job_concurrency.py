@@ -301,10 +301,12 @@ def long_actions_per_hunt(workers: int) -> int:
 
 async def require_long_action_slot(
     conn: Any, run: Mapping[str, Any], name: str, reserved_wall_seconds: Any = None, *, workers: int = 1,
+    engine_work: bool = False,
 ) -> None:
     """Refuse a Hunt's long action while the Hunt already has the long slots' worth in flight:
     ``long_actions_per_hunt(workers)``, the long slots of the ``workers`` live agent-tool workers.
 
+    Automatic engine work may use all but one of those slots, leaving one for the planner.
     A call is long by its own reserved wall (``long_action``), and so is each live reservation it
     is counted against. Runs in admission's transaction after the Hunt row is locked, so two calls
     cannot both take the last one. A refused call reserves and records nothing: the same key may
@@ -313,17 +315,25 @@ async def require_long_action_slot(
         return
     allowed = long_actions_per_hunt(workers)
     rows = await conn.fetch(
-        """SELECT capability_name, action_id FROM budget_reservations
-           WHERE owner_kind='hunt' AND owner_id=$1 AND capability_name = ANY($2::text[])
-             AND (capability_name = ANY($3::text[])
-                  OR (jsonb_typeof(requested_json->'tool_wall_seconds') = 'number'
-                      AND (requested_json->>'tool_wall_seconds')::numeric > $4))
-             AND status IN ('reserved','running') AND lease_expires_at > NOW()
-           ORDER BY created_at, id""",
+        """SELECT r.capability_name, r.action_id,
+                  a.input_summary->>'engine_work' AS engine_work
+           FROM budget_reservations r
+           LEFT JOIN hunt_actions a ON a.id::text=r.action_id AND a.hunt_run_id=$1::text::uuid
+           WHERE r.owner_kind='hunt' AND r.owner_id=$1 AND r.capability_name = ANY($2::text[])
+             AND (r.capability_name = ANY($3::text[])
+                  OR (jsonb_typeof(r.requested_json->'tool_wall_seconds') = 'number'
+                      AND (r.requested_json->>'tool_wall_seconds')::numeric > $4))
+             AND r.status IN ('reserved','running') AND r.lease_expires_at > NOW()
+           ORDER BY r.created_at, r.id""",
         str(run["id"]), sorted(slot_capabilities()), sorted(long_capabilities()),
         LONG_ACTION_WALL_SECONDS,
     )
-    if len(rows) < allowed:
+    # Automatic checks may use every long slot except one. Planner work keeps the full
+    # allowance, and can run alongside the sweep; the short lane stays protected separately.
+    engine_limit = max(1, allowed - 1)
+    engines = sum(row.get("engine_work") in {True, "true"} for row in rows)
+    engine_full = engine_work and engines >= engine_limit
+    if len(rows) < allowed and not engine_full:
         return
     try:
         from hunt.permission_reasons import HuntRefusal
@@ -332,8 +342,10 @@ async def require_long_action_slot(
     names = ", ".join(str(row["capability_name"]) for row in rows)
     raise HuntRefusal(
         "long_actions_in_flight",
-        f"This Hunt already has {len(rows)} long actions in flight ({names}), the most that run "
-        "at once, so that short calls (http.request, artifact.inspect, a browser step) do not "
+        f"This Hunt already has {len(rows)} long actions in flight ({names}). " +
+        (f"Automatic work holds its {engine_limit} slots, keeping one available to the planner. "
+         if engine_full else "All long slots are occupied. ") +
+        "The short lane stays available so that short calls (http.request, artifact.inspect, a browser step) do not "
         "wait behind them. Nothing was reserved or recorded. Work with short capabilities or "
         "collect one of them (call it again with its idempotency_key and unchanged input), then "
         "send this call again with the same idempotency_key once one has settled.",

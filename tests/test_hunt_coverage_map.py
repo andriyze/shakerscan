@@ -90,7 +90,8 @@ def test_verifiers_candidates_and_settled_angles_close_pairs():
         actions=[
             _action("sqli.verify", path="/search?q=1"),
             _action("xss.verify", path="/search", parameter="q"),
-            _action("authz.verify", routes=["GET /hub/api/orders/1001", "/hub/api/admin/audit"]),
+            _action("authz.verify", routes=["GET /hub/api/orders/1001"]),
+            _action("authz.verify", mode="function", routes=["/hub/api/admin/audit"]),
             _action("http.request", method="POST", path="/hub/api/login",
                     request_bindings=[{"default_credential": "dc-01", "credential_field": "username"}]),
             _action("http.request", path="/fetch?url=http://x"),
@@ -111,8 +112,8 @@ def test_verifiers_candidates_and_settled_angles_close_pairs():
     assert "GET /backup/" not in open_routes
     # The default-credential attempt closed that class; the login was requested with a body.
     assert "POST /hub/api/login" not in open_routes
-    # Requested with its parameter: the unproven injection classes close, sqli/xss stay open.
-    assert open_routes["GET /fetch"] == ["sqli", "xss"]
+    # An ordinary parameterized read is mapping, not an injection check.
+    assert set(open_routes["GET /fetch"]) == {"sqli", "xss", "injection"}
 
 
 def test_engine_probes_are_discovery_not_testing_and_misses_add_no_route():
@@ -282,7 +283,7 @@ def test_a_signed_in_route_with_nothing_open_is_still_listed_for_the_sweep():
     assert report["pairs_open"] == sum(len(item["untested"]) for item in report["open"])
 
 
-def test_every_answer_names_ready_calls_and_an_early_forced_finish_gets_them_back():
+def test_every_answer_names_ready_calls_and_an_objective_can_finish_early():
     report = build_coverage(actions=[], endpoints=[_endpoint("/search", params="q"), _endpoint("/.env"),
                                                    _endpoint("/api/login", method="POST")])
     calls = coverage_map.next_calls(report)
@@ -292,10 +293,10 @@ def test_every_answer_names_ready_calls_and_an_early_forced_finish_gets_them_bac
     search = next(call for call in calls if "/search" in json.dumps(call))
     assert search["input"]["parameter"] == "q" or search["capability"] == "xss.verify"
     assert compact_open_coverage(report, "h1")["next_calls"] == calls
-    # Five minutes into a 90-minute Hunt a forced finish is refused with the calls to send.
+    # Five minutes into a 90-minute Hunt the objective may already be answered. Keep the
+    # concrete calls available, but a resource ceiling does not require more work.
     early = finish_guard(_run(), report, force=True, force_reason="I think I am done here", now=NOW)
-    assert early and "Too early to finish" in early and calls[0]["capability"] in early
-    # Not once a third of the wall has passed, nor on a spent budget, nor with nothing concrete open.
+    assert early is None
     assert finish_guard(_run(created_at=NOW - timedelta(minutes=31)), report, force=True,
                         force_reason="I think I am done here", now=NOW) is None
     assert finish_guard(_run(status="budget_exhausted"), report, force=True, force_reason="spent, stopping", now=NOW) is None
@@ -362,10 +363,10 @@ def test_the_open_coverage_refusal_does_not_claim_every_route_was_probed():
     assert "sources say which" in refusal
 
 
-def test_only_the_engines_own_finish_passes_the_guard_unconditionally():
+def test_an_explained_finish_or_server_deferred_finish_can_leave_coverage_open():
     report = build_coverage(actions=[], endpoints=[_endpoint("/search", params="q")],
                             allowed=["request.verify", "xss.verify", "http.request"])
-    assert "Too early" in finish_guard(_run(), report, force=True, force_reason="I think I am done here", now=NOW)
+    assert finish_guard(_run(), report, force=True, force_reason="I think I am done here", now=NOW) is None
     assert "coverage is open" in finish_guard(_run(), report, force=False, force_reason=None, now=NOW)
     assert finish_guard(_run(), report, force=False, force_reason=None, now=NOW, engine_deferred=True) is None
     debrief = debrief_coverage(report, forced=False, reason=None, engine_deferred=True)

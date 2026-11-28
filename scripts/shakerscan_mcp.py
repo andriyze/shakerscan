@@ -951,8 +951,8 @@ HUNT_PLAYBOOK = (
     "3. Prove each candidate with the server's verifier: candidate.verify; sqli.verify or xss.verify "
     "for injection (a URL parameter, or method + body_field_names + injection_field for a body); "
     "authz.verify across principals. 4. A refusal names what is missing and the call to send next: "
-    "send it rather than drop the lead. 5. Use the whole time and budget; finish only when what you "
-    "mapped is tested."
+    "send it rather than drop the lead. 5. Continue until the operator's objective is answered or "
+    "the authorized useful work is exhausted; report remaining coverage when finishing."
 )
 RECENT_ACTIONS = 5
 COMPACT_ACTION_KEYS = ("action_id", "capability_name", "status", "receipt_id", "completed_at")
@@ -1526,7 +1526,7 @@ def _compact_capability_answer(result: Any, *, idempotency_key: str) -> Any:
 # the bookkeeping around it. Measured 2026-11: 9-15 KB per answer filled an agent's context within
 # minutes. The bookkeeping is left out (mcp_view.reduced says what); the record stays readable
 # whole with view=full and the same idempotency_key.
-HTTP_BODY_EXCERPT_CHARS = 2_000
+HTTP_BODY_EXCERPT_CHARS = CAPABILITY_FIELD_CHARS
 HTTP_LINKS_KEPT = 40
 HTTP_STYLE_BLOCK = re.compile(r"<style\b[^>]*>.*?(?:</style>|$)", re.IGNORECASE | re.DOTALL)
 # Request fields an agent reads its own answer by; the rest is the server's address pinning.

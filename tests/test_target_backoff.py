@@ -285,13 +285,19 @@ def test_the_engines_own_http_client_names_the_sender_and_the_whole_request():
     assert "owner" not in owner and "Bearer" not in owner  # a digest, never the credential
 
 
-def test_a_long_run_of_403s_across_paths_is_a_ban():
+def test_access_denials_across_many_protected_paths_are_not_an_origin_ban():
     backoff = TargetBackoff(_Clock())
-    verdicts = [_answer(backoff, 403, f"/p{i % 4}?x={i}") for i in range(target_backoff.BAN_STREAK)]
-    assert verdicts[-1] == "banned" and not any(verdicts[:-1])
+    verdicts = [_answer(backoff, 403, f"/admin/{i % 4}?x={i}") for i in range(60)]
+    assert not any(verdicts) and backoff.remaining(ORIGIN) == 0
     # One path refused many times is that path's access control, not a ban.
     single = TargetBackoff(_Clock())
     assert not any(_answer(single, 403, f"/admin?x={i}") for i in range(60))
+
+
+def test_an_explicit_retry_instruction_on_a_403_still_holds_the_origin():
+    backoff = TargetBackoff(_Clock())
+    assert _answer(backoff, 403, "/admin", retry="30") == "throttled"
+    assert backoff.remaining(ORIGIN) == 30
 
 
 def test_a_423_refuses_that_sign_in_route_and_nothing_else():

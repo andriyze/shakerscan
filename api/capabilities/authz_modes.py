@@ -4,10 +4,10 @@ import asyncio
 import math
 import time
 from urllib.parse import urlsplit
-from .authz import _normalized_routes, AuthzVerificationContractError
+from .authz import MAX_AUTHZ_ROUTES, _normalized_routes, AuthzVerificationContractError
 from .authz_surface import PrincipalProbe, RouteComparison, boundary_established, bfla_finding
 from .http import execute_bound_http_request
-# Keyed (HMAC), not scrypt: six probes per route in one 55 s budget, compared with each other.
+# Keyed (HMAC), not scrypt: six probes per route within the call's reserved wall.
 try:
     from capabilities.secret_material import keyed_body_digest
 except ModuleNotFoundError:  # package import layout
@@ -22,8 +22,8 @@ def authz_call_budget(values):
     if values.get('mode','object') == 'function':
         # As many routes as the capability's schema accepts (it refused more than 10 of the 50).
         # Six requests a route; the wall grows with them past the first ten.
-        if not 1<=len(values['routes'])<=50:
-            raise ValueError('Function authorization checks accept 1 to 50 routes')
+        if not 1<=len(values['routes'])<=MAX_AUTHZ_ROUTES:
+            raise ValueError(f'Function authorization checks accept 1 to {MAX_AUTHZ_ROUTES} routes')
         return {'http_requests':6*len(values['routes']),
                 'tool_wall_seconds':max(60,6*len(values['routes']))}
     if values.get('mode') == 'planted_object':
@@ -37,11 +37,12 @@ def authz_call_budget(values):
 async def verify_function_authorization(base_url,routes,*,target,primary_headers,
                                         secondary_headers,transaction_recorder=None):
     normalized=_normalized_routes(base_url,routes,target=target)
-    if len(normalized)!=len(routes) or not 1<=len(normalized)<=10:
-        raise AuthzVerificationContractError('Function comparison requires 1 to 10 bound GET routes')
+    if len(normalized)!=len(routes) or not 1<=len(normalized)<=MAX_AUTHZ_ROUTES:
+        raise AuthzVerificationContractError(f'Function comparison requires 1 to {MAX_AUTHZ_ROUTES} bound GET routes')
     if not primary_headers or not secondary_headers or dict(primary_headers)==dict(secondary_headers):
         raise AuthzVerificationContractError('Function comparison requires two distinct authenticated principals')
     started=time.monotonic()
+    wall_seconds=authz_call_budget({'mode':'function','routes':routes})['tool_wall_seconds']-5
     attempted=0
     comparisons=[]
     observations=[]
@@ -55,7 +56,7 @@ async def verify_function_authorization(base_url,routes,*,target,primary_headers
         def record(value):
             archive.update(value)
             if transaction_recorder: transaction_recorder(value)
-        remaining=55-(time.monotonic()-started)
+        remaining=wall_seconds-(time.monotonic()-started)
         if remaining<=0:
             return PrincipalProbe(0,'',0,False,True)
         try:
@@ -90,7 +91,7 @@ async def verify_function_authorization(base_url,routes,*,target,primary_headers
                 'complete':not p.error} for p in values] for slot,values in probes.items()},
             'entitlement_inferred':False,'secret_values_visible':False})
         incomplete = incomplete or any(p.error for values in probes.values() for p in values)
-        if time.monotonic()-started>=55:
+        if time.monotonic()-started>=wall_seconds:
             break
     if boundary_established(comparisons):
         for row in comparisons:

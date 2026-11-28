@@ -94,6 +94,7 @@ from .device_traffic import reserve_device_traffic, require_device_admission, se
 from .sqli_target import sqli_injection_point_refusal
 from .scanner_identity import scanner_admission
 from .agent_job_concurrency import lane_queue, live_agent_tool_workers, require_long_action_slot
+from .engine_context import is_engine_work
 from .service_binding import (
     ARTIFACT_READ_CAPABILITIES, artifact_origin_required, collection_uses_service_origin,
     service_origin_changed,
@@ -1903,6 +1904,7 @@ async def _execute_hunt_capability_lifecycle(
             "input": _hunt_redacted_capability_input(name, request.input),
             "input_digest": capability_input_digest,
             "idempotency_key_sha256": idempotency_key_digest,
+            **({"engine_work": True} if is_engine_work() else {}),
         }
 
     # Grants a pre-authorization applied on an earlier attempt, or the one a parked action
@@ -2628,7 +2630,8 @@ async def _execute_hunt_capability_lifecycle(
                     # collect one first, at no cost. A call is long by the wall it is about to
                     # reserve.
                     await require_long_action_slot(conn, run, name, charges.get("tool_wall_seconds"),
-                                                   workers=live_agent_tool_workers(get_redis))
+                                                   workers=live_agent_tool_workers(get_redis),
+                                                   engine_work=is_engine_work())
                     if durable_budget:
                         durable_action_digest = hunt_capability_action_digest(
                             hunt_id=run["id"],
@@ -2726,6 +2729,7 @@ async def _execute_hunt_capability_lifecycle(
                             "input": _hunt_redacted_capability_input(name, request.input),
                             "input_digest": capability_input_digest,
                             "idempotency_key_sha256": idempotency_key_digest,
+                            **({"engine_work": True} if is_engine_work() else {}),
                         }),
                         json.dumps(admission_result_summary),
                     )

@@ -302,15 +302,6 @@ def _input_path(capability: str, values: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _has_parameters(values: Mapping[str, Any]) -> bool:
-    raw_path = str(values.get("path") or values.get("url") or "")
-    return bool(
-        "?" in raw_path or values.get("query") or values.get("params") or values.get("json_body")
-        or values.get("form_body") or values.get("body") or values.get("parameter")
-        or values.get("parameters") or values.get("injection_field") or values.get("body_field_names")
-    )
-
-
 def _uses_default_credential(values: Mapping[str, Any]) -> bool:
     bindings = values.get("request_bindings")
     return isinstance(bindings, list) and any(
@@ -326,23 +317,55 @@ def _locus_path(locus: Mapping[str, Any]) -> str | None:
 
 
 class _Ledger:
-    """Which classes this Hunt touched per normalized route (method-insensitive)."""
+    """Examination per method and route; input checks cover only the named inputs."""
 
     def __init__(self) -> None:
-        self.requested: set[str] = set()
-        self.with_params: set[str] = set()
+        self.requested: set[tuple[str, str]] = set()
         # HTTP statuses the Hunt's own requests got per route: a route that only ever refused or
         # was absent exposed nothing, so its exposure needs no judgement.
-        self.statuses: dict[str, set[int]] = {}
-        self.written: set[str] = set()
-        self.closed: dict[str, set[str]] = {}
+        self.statuses: dict[tuple[str, str], set[int]] = {}
+        self.closed: dict[tuple[str, str], set[str]] = {}
+        self.inputs: dict[tuple[str, str, str], set[str]] = {}
 
-    def close(self, route: str | None, classes: Iterable[str]) -> None:
+    def close(self, route: str | None, classes: Iterable[str], method: str = "GET", *,
+              inputs: set[str] | None = None) -> None:
         if route:
-            self.closed.setdefault(route, set()).update(classes)
+            for klass in classes:
+                if inputs is None:
+                    self.closed.setdefault((method, route), set()).add(klass)
+                elif inputs:
+                    self.inputs.setdefault((method, route, klass), set()).update(inputs)
 
-    def closed_for(self, route: str) -> set[str]:
-        return self.closed.get(route, set())
+    def closed_for(self, route: str, method: str, params: set[str]) -> set[str]:
+        closed = set(self.closed.get((method, route), set()))
+        if params:
+            for klass in ("sqli", "xss", "injection"):
+                if params <= self.inputs.get((method, route, klass), set()):
+                    closed.add(klass)
+        return closed
+
+    def close_locus(self, route: str | None, method: str, classes: Iterable[str],
+                    locus: Mapping[str, Any]) -> None:
+        field = locus.get("parameter") or locus.get("input") or locus.get("injection_field")
+        for klass in classes:
+            self.close(route, (klass,), method,
+                       inputs={str(field)} if field and klass in {"sqli", "xss", "injection"} else None)
+
+
+def _checked_inputs(values: Mapping[str, Any]) -> set[str]:
+    field = values.get("parameter") or values.get("injection_field")
+    if field:
+        return {str(field)}
+    return (_query_names(values.get("path")) | _request_inputs(values)
+            | _params(values.get("body_field_names")))
+
+
+def _locus_methods(locus: Mapping[str, Any], route: str | None, known: Mapping) -> set[str]:
+    if locus.get("method"):
+        return {str(locus["method"]).upper()}
+    # A historical note without a method is usable only when the inventory is unambiguous.
+    methods = {method for method, path in known if path == route}
+    return methods if len(methods) == 1 else set()
 
 
 def _discovered_from_action(row: Mapping[str, Any]) -> tuple[str, str, int | None, str] | None:
@@ -372,9 +395,9 @@ class CoverageFold:
         self.ledger = _Ledger()
         self.known: dict[tuple[str, str], dict[str, Any]] = {}
         self.ran: dict[str, str] = {}
-        self.ran_checks: dict[str, set[str]] = {}
+        self.ran_checks: dict[tuple[str, str, str], set[str]] = {}
         # The signed-in identity this Hunt's own request last reached each route with (2xx answer).
-        self.identities: dict[str, list[dict[str, str]]] = {}
+        self.identities: dict[tuple[str, str], list[dict[str, str]]] = {}
         self.actions = 0
         for row in endpoints[:MAX_INVENTORY_ENDPOINTS]:
             self._add(str(row.get("method") or "GET").upper(), str(row.get("path") or ""),
@@ -417,45 +440,51 @@ class CoverageFold:
             return
         values = _json(row.get("input"), {})
         if name == "authz.verify" and isinstance(values.get("routes"), list):
+            if status != "completed":
+                return  # an incomplete comparison does not examine every submitted route
+            classes = (("function_authz", "unauthenticated_api") if values.get("mode") == "function"
+                       else ("object_authz", "unauthenticated_api"))
             for item in values["routes"][:50]:
                 text = str(item or "").strip()
                 route = normalize_path(text.split(" ", 1)[-1])
                 if route:
-                    ledger.requested.add(route)
-                    ledger.close(route, _VERIFIER_CLASS[name])
+                    ledger.requested.add(("GET", route))
+                    ledger.close(route, classes)
             return
         raw_path = _input_path(name, values)
         route = normalize_path(raw_path) if raw_path else None
         if route is None:
             return
+        method = str(values.get("method") or "GET").upper()
+        endpoint = (method, route)
         is_probe = str(row.get("idempotency_key_sha256") or "") in probe_digests
         if not is_probe:
-            ledger.requested.add(route)
-            if _has_parameters(values):
-                ledger.with_params.add(route)
-            if str(values.get("method") or "GET").upper() in {"POST", "PUT", "PATCH"}:
-                ledger.written.add(route)
-            if name in _VERIFIER_CLASS:
-                ledger.close(route, _VERIFIER_CLASS[name])
-            if name == "request.verify":
+            ledger.requested.add(endpoint)
+            if name in _VERIFIER_CLASS and status == "completed":
+                ledger.close(route, _VERIFIER_CLASS[name], method, inputs=_checked_inputs(values))
+            if name == "request.verify" and status == "completed":
                 check = str(values.get("check") or "")
-                ledger.close(route, _REQUEST_CHECK_CLASS.get(check, ()))
-                ran_checks.setdefault(route, set()).add(check)
-                if _INJECTION_CHECKS <= ran_checks[route]:
-                    ledger.close(route, ("injection",))
+                inputs = _checked_inputs(values)
+                ledger.close(route, _REQUEST_CHECK_CLASS.get(check, ()), method,
+                             inputs=inputs if check == "sql_injection" else None)
+                for field in inputs:
+                    checked = ran_checks.setdefault((method, route, field), set())
+                    checked.add(check)
+                    if _INJECTION_CHECKS <= checked:
+                        ledger.close(route, ("injection",), method, inputs={field})
             if name == "http.request" and _uses_default_credential(values):
-                ledger.close(route, ("default_credentials",))
+                ledger.close(route, ("default_credentials",), method)
         found = _discovered_from_action(row)
         if found is not None and name in {"http.request", "artifact.inspect"}:
             method, path, http_status, content_type = found
             if not is_probe and http_status is not None:
-                ledger.statuses.setdefault(route, set()).add(http_status)
+                ledger.statuses.setdefault(endpoint, set()).add(http_status)
             # An answer that is not "absent" names a route that exists. The engine's own probes
             # enter the inventory through the runner's negative control, never from here.
             if not is_probe and http_status is not None and 200 <= http_status < 300 and name == "http.request":
                 identity = _capture_identity(values)
                 if identity:
-                    self.identities[route] = identity
+                    self.identities[endpoint] = identity
             if not is_probe and http_status is not None and http_status != 404 and http_status < 500:
                 # The inputs the request itself carried are the route's inputs: the sweep tests them.
                 self._add(method, path, _request_inputs(values), content_type, "hunt_request")
@@ -466,47 +495,53 @@ class CoverageFold:
         ledger, known, ran, identities = self.ledger, self.known, self.ran, self.identities
         for row in candidates:
             locus = _json(row.get("canonical_locus"), {})
-            ledger.close(normalize_path(_locus_path(locus)), family_classes(row.get("family")) | _LOOKED_AT)
+            route = normalize_path(_locus_path(locus))
+            for method in _locus_methods(locus, route, known):
+                ledger.close_locus(route, method, family_classes(row.get("family")) | _LOOKED_AT, locus)
         for row in angles:
             if str(row.get("status") or "") not in SETTLED_ANGLE_STATUSES:
                 continue
             locus = _json(row.get("locus"), {})
-            ledger.close(normalize_path(_locus_path(locus)), family_classes(row.get("family")) | _LOOKED_AT)
+            route = normalize_path(_locus_path(locus))
+            for method in _locus_methods(locus, route, known):
+                ledger.close_locus(route, method, family_classes(row.get("family")) | _LOOKED_AT, locus)
 
         items: list[dict[str, Any]] = []
         pairs_total = 0
         for (method, route), entry in known.items():
             classes = classify(method, route, entry["params"], content_type=entry["content_type"])
-            closed = set(ledger.closed_for(route))
-            if route in ledger.requested:
+            endpoint = (method, route)
+            closed = ledger.closed_for(route, method, entry["params"])
+            if endpoint in ledger.requested:
                 closed.add("review")
-                statuses = ledger.statuses.get(route)
+                statuses = ledger.statuses.get(endpoint)
                 if statuses and statuses <= _NOTHING_SERVED:
                     closed.update({"exposure", "unauthenticated_api"})
-            if route in ledger.with_params:
-                closed.add("injection")
-            if route in ledger.written:
-                closed.update({"graphql", "upload"})
             pairs_total += len(classes)
             open_classes = sorted(classes - closed, key=lambda name: _CLASS_RANK.get(name, 99))
             if open_classes:
+                untested_params = {
+                    klass: sorted(entry["params"] - ledger.inputs.get((method, route, klass), set()))[:8]
+                    for klass in open_classes if klass in {"sqli", "xss", "injection"} and entry["params"]
+                }
                 items.append({
                     "endpoint": f"{method} {route}",
                     "untested": open_classes,
                     "params": sorted(entry["params"])[:8],
-                    "requested": route in ledger.requested,
+                    **({"untested_params": untested_params} if untested_params else {}),
+                    "requested": endpoint in ledger.requested,
                     "sources": sorted(entry["sources"])[:4],
                     # By reference only: the sweep sends its checks on this route as the same login.
-                    **({"identity": identities[route]} if route in identities else {}),
+                    **({"identity": identities[endpoint]} if endpoint in identities else {}),
                 })
         items.sort(key=_item_rank)
         # Routes reached with the Hunt's own login whose classes are all settled anonymously: the sweep
         # still tests their inputs as that login. Not open coverage (nothing here holds a finish).
         listed = {item["endpoint"] for item in items}
         signed_in = [{"endpoint": f"{method} {route}", "untested": [], "params": sorted(entry["params"])[:8],
-                      "identity": identities[route]}
+                      "identity": identities[(method, route)]}
                      for (method, route), entry in known.items()
-                     if route in identities and f"{method} {route}" not in listed][:MAX_PAGE]
+                     if (method, route) in identities and f"{method} {route}" not in listed][:MAX_PAGE]
         pairs_open = sum(len(item["untested"]) for item in items)
         state = dict(discovery or {})
         allowed_names = None if allowed is None else {str(name) for name in allowed}
@@ -536,7 +571,7 @@ class CoverageFold:
         return {
             "schema_version": SCHEMA,
             "endpoints": len(known),
-            "endpoints_requested": sum(1 for (_m, route) in known if route in ledger.requested),
+            "endpoints_requested": sum(1 for endpoint in known if endpoint in ledger.requested),
             "pairs_total": pairs_total,
             "pairs_open": pairs_open,
             "endpoints_open": len(items),
@@ -677,8 +712,6 @@ def wall_remaining_seconds(run: Mapping[str, Any], *, now: datetime | None = Non
 # The planner loop: every capability answer and every finish refusal names the next concrete calls,
 # ready to send, so a planner always has a next step instead of deciding it is done.
 NEXT_CALLS = 3
-# A forced finish before this share of the wall is refused while a concrete next call exists.
-FORCE_MIN_WALL_SHARE = 1 / 3
 
 
 def _concrete(route: str) -> str:
@@ -716,15 +749,17 @@ def _next_call_options(item: Mapping[str, Any]):
     params = [str(name) for name in item.get("params") or () if str(name)]
     identity = {"request_bindings": list(item["identity"])} if item.get("identity") else {}
     for klass in item.get("untested") or ():
+        remaining = (item.get("untested_params") or {}).get(klass) or params
+        request_params = list(dict.fromkeys([*remaining, *params]))
         if klass in {"sqli", "injection"} and params:
             check = "sql_injection" if klass == "sqli" else "command_injection"
-            base = ({"query": {name: "1" for name in params[:10]}} if method == "GET"
-                    else {"json_body": {name: "1" for name in params[:20]}})
-            yield {"capability": "request.verify", "why": f"{klass} on {method} {route} ({params[0]})",
-                    "input": {"check": check, "method": method, "path": path, "parameter": params[0], **base, **identity}}
+            base = ({"query": {name: "1" for name in request_params[:10]}} if method == "GET"
+                    else {"json_body": {name: "1" for name in request_params[:20]}})
+            yield {"capability": "request.verify", "why": f"{klass} on {method} {route} ({remaining[0]})",
+                    "input": {"check": check, "method": method, "path": path, "parameter": remaining[0], **base, **identity}}
         if klass == "xss" and params and method == "GET":
             yield {"capability": "xss.verify", "why": f"xss on GET {route}",
-                    "input": {"path": f"{path}?" + "&".join(f"{name}=1" for name in params[:10])}}
+                    "input": {"path": f"{path}?" + urllib.parse.urlencode({name: "1" for name in request_params[:10]})}}
         if klass in {"exposure", "unauthenticated_api"} and method == "GET" and not identity:
             yield {"capability": "request.verify", "why": f"{klass} on GET {route}",
                     "input": {"check": "exposure" if klass == "exposure" else "unauthenticated_api",
@@ -778,8 +813,8 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
     or expired; it has no checks to close the open pairs with), a Hunt whose wall or HTTP budget
     is spent, a budget-exhausted Hunt, one with nothing open, or a forced finish with a reason
     (the engine's own sweep, not the planner, does the remaining work; a finish while it runs is
-    deferred until it ends, see ``run_service``) once a third of the wall has passed: before that
-    a forced finish is refused while a concrete next call exists (``_early_finish``)."""
+    deferred until it ends, see ``run_service``). Profile duration is a ceiling, not a minimum
+    amount of time the planner must spend after it answers the operator's objective."""
     if str(run.get("target_kind") or "") not in COVERAGE_TARGET_KINDS or report is None:
         return None
     if not can_test or engine_deferred:
@@ -788,8 +823,9 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
         if len(str(force_reason or "").strip()) < MIN_FORCE_REASON_CHARS:
             return ("force=true needs force_reason: say in a sentence why the open coverage is left "
                     "untested; it is recorded in the debrief")
-        early = _early_finish(run, report, now=now)
-        return early
+        # A resource profile is a ceiling, never a minimum investigation length. The caller
+        # records why the objective is complete and the remaining coverage in the debrief.
+        return None
     if str(run.get("status") or "") == "budget_exhausted":
         return None
     remaining = wall_remaining_seconds(run, now=now)
@@ -798,24 +834,6 @@ def finish_guard(run: Mapping[str, Any], report: Mapping[str, Any] | None, *, fo
     if not http_budget_left(run):
         return None
     return _open_refusal(run, report, remaining)
-
-
-def _early_finish(run: Mapping[str, Any], report: Mapping[str, Any], *, now: datetime | None) -> str | None:
-    """A forced finish before a third of the wall, with concrete calls still open: refused with them."""
-    if str(run.get("status") or "") == "budget_exhausted" or not http_budget_left(run):
-        return None
-    budget = _json(run.get("budget_json"), {})
-    limit = budget.get("max_duration_seconds")
-    remaining = wall_remaining_seconds(run, now=now)
-    if not isinstance(limit, int) or remaining is None or limit - remaining >= FORCE_MIN_WALL_SHARE * limit:
-        return None
-    calls = next_calls(report)
-    if not calls:
-        return None
-    return (f"Too early to finish: {int((limit - remaining) // 60)} of {int(limit // 60)} min used and concrete "
-            "work is open. Send these next (ready to send, in next_calls): "
-            + "; ".join(f"{call['capability']} — {call['why']}" for call in calls)
-            + f". A forced finish is accepted once a third of the wall has passed.")
 
 
 def _open_refusal(run: Mapping[str, Any], report: Mapping[str, Any], remaining: float | None) -> str | None:
