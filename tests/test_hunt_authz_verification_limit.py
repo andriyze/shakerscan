@@ -25,7 +25,7 @@ from hunt.action_replay import execution_started_from_budget, replay_observation
 from hunt.candidate_verification_preflight import (
     CandidateVerificationRefused, verification_service_origin, web_candidate_preflight,
 )
-from hunt import injection_proof
+import hunt.injection_proof as injection_proof
 from hunt.device_traffic import reserve_device_traffic
 from hunt.verification_budget import web_candidate_budget
 from hunt.distinct_accounting import distinct_charge
