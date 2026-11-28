@@ -21,13 +21,17 @@ random values and a control that must stay silent:
 * ``graphql``: a validating GraphQL server (``__typename`` answered, an undefined field rejected)
   that answers introspection, suggests field names, or runs 100 aliases, 100 duplicate fields or a
   batch of operations in one request;
-* ``file_upload``: an uploaded HTML file with a random marker is served back from the
-  application's origin as HTML, twice; a file name never uploaded is not;
+* ``file_upload``: an uploaded HTML file is served back from the application's origin as HTML
+  with the markup it was uploaded with (a random element that is no part of the file name),
+  twice; a file name never uploaded is answered with neither the markup nor that name;
 * ``rate_limit``: a sign-in refused for every one of a run of wrong passwords, none of them
-  answered with a lockout, a rate-limit status or a Retry-After;
+  answered with a lockout, a rate-limit status or a Retry-After. An observation, never a
+  finding: a dozen attempts for an account name the check cannot tie to a real account show
+  neither a per-account lockout nor a threshold above a dozen;
 * ``csrf``: a state-changing request sent as a cross-site browser would send it (foreign Origin
-  and Referer, no custom headers, the anti-CSRF field left out) is accepted like the original,
-  twice, while the same request without the session is refused;
+  and Referer, no custom headers, every anti-CSRF field left out) is answered exactly like the
+  original (status, redirect and page), twice, while the same request without the session is
+  answered differently and refused;
 * ``ldap_injection``: a sign-in accepted for an LDAP wildcard, twice, and refused for a random
   value and for the escaped wildcard;
 * ``jwt``: the principal's bearer token accepted with its signature altered, under ``alg: none``,
@@ -122,7 +126,6 @@ PROOF_CONTRACTS = {
     "duplicate_field_limit_absent": "graphql_duplicate_field_limit_absent/v1",
     "batch_limit_absent": "graphql_batch_limit_absent/v1",
     "file_upload": "request_upload_served_differential/v1",
-    "rate_limit": "request_sign_in_unthrottled/v1",
     "csrf": "request_cross_site_differential/v1",
     "ldap_injection": "request_ldap_wildcard_differential/v1",
     "jwt": jwt_forgery.JWT_FORGERY_CONTRACT,
@@ -130,6 +133,7 @@ PROOF_CONTRACTS = {
     "mass_assignment": "request_registration_privilege_readback/v1",
 }
 # ``exposure`` carries the Scan exposure class's own proof contract (exposure_signature_contract).
+# ``rate_limit`` has none: its run of unthrottled refusals is an observation (see ``_rate_limit``).
 MINIMUM_REQUESTS = 4
 # Reserved (RFC 6761) names: a host under one never resolves, so it can only have come from the
 # request, and following it reaches nobody.
@@ -151,6 +155,21 @@ _SIMPLE_CONTENT_TYPES = ("application/x-www-form-urlencoded", "multipart/form-da
 # Request headers a browser adds on its own or that a cross-site form can carry.
 _CROSS_SITE_KEPT_HEADERS = frozenset({"cookie", "content-type", "accept", "accept-language", "user-agent"})
 _HTML_TYPES = ("text/html", "application/xhtml+xml")
+# Anti-CSRF field names, compared with everything but letters and digits removed
+# (``__RequestVerificationToken``, ``_csrf``, ``X-XSRF-TOKEN``, ``authenticity_token``,
+# ``csrfmiddlewaretoken``): a name that contains one of the parts, is one of the whole names
+# (Laravel ``_token``, Drupal ``form_token``, Magento ``form_key``, Moodle ``sesskey``), or ends in
+# ``nonce`` (WordPress ``_wpnonce``). A forged request cannot carry any of them, so the check
+# leaves them out itself instead of trusting the planner to name the one that matters.
+_ANTI_CSRF_PARTS = ("csrf", "xsrf", "antiforgery", "requestverificationtoken", "authenticitytoken")
+_ANTI_CSRF_NAMES = frozenset({"token", "formtoken", "formkey", "sesskey", "securitytoken"})
+_NOT_ALNUM_RE = re.compile(r"[^a-z0-9]")
+_PART_NAME_RE = re.compile(rb'name="([^"\r\n]{1,100})"')
+_SAME_SITE_RE = re.compile(r"(?i);\s*samesite\s*=\s*(lax|strict|none)")
+# A word of the page: letters only, as prose and JSON keys are. Counters, dates, ids and fresh
+# tokens (anything with a digit or mixed case inside) change between two answers and are left out.
+_RUN_RE = re.compile(rb"[A-Za-z0-9_+/=-]+")
+_PROSE_WORD_RE = re.compile(rb"[A-Za-z][a-z]{1,19}")
 _META_CSP_RE = re.compile(rb"(?i)<meta[^>]{0,200}http-equiv\s*=\s*[\"']?content-security-policy")
 
 
@@ -292,6 +311,114 @@ def _multipart(fields: Sequence[tuple[str, str]], file_field: str, filename: str
     return b"".join(parts)
 
 
+def _anti_csrf_name(name: Any) -> bool:
+    key = _NOT_ALNUM_RE.sub("", str(name or "").lower())
+    return (any(part in key for part in _ANTI_CSRF_PARTS) or key in _ANTI_CSRF_NAMES
+            or key.endswith("nonce"))
+
+
+def _without_anti_csrf_fields(request: ReplayRequest) -> tuple[ReplayRequest, list[str], bool]:
+    """``(request without its anti-CSRF fields, their names, whether all could be removed)``.
+
+    Query parameters, form fields and JSON keys (at any depth) are removed. A body that cannot be
+    rewritten (multipart, XML) is only looked at: when it names such a field the third value is
+    False and the caller proves nothing, since the forged request would still carry the token.
+    """
+    removed: list[str] = []
+    parsed = urllib.parse.urlsplit(request.url)
+    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if any(_anti_csrf_name(name) for name, _value in pairs):
+        removed += [name for name, _value in pairs if _anti_csrf_name(name)]
+        kept = [(name, value) for name, value in pairs if not _anti_csrf_name(name)]
+        request = replace(request, url=urllib.parse.urlunsplit((*parsed[:3], urllib.parse.urlencode(kept), "")))
+    body = bytes(request.body or b"")
+    if not body:
+        return request, removed, True
+    content_type = _request_content_type(request)
+    text = body.decode("utf-8", "replace")
+    if content_type == "application/x-www-form-urlencoded":
+        pairs = urllib.parse.parse_qsl(text, keep_blank_values=True)
+        if any(_anti_csrf_name(name) for name, _value in pairs):
+            removed += [name for name, _value in pairs if _anti_csrf_name(name)]
+            kept = [(name, value) for name, value in pairs if not _anti_csrf_name(name)]
+            request = replace(request, body=urllib.parse.urlencode(kept).encode())
+        return request, removed, True
+    if "json" in content_type or text.lstrip()[:1] in {"{", "["}:
+        try:
+            document = json.loads(text)
+        except ValueError:
+            document = None
+        if document is not None:
+            found: list[str] = []
+
+            def strip(node: Any, depth: int = 0) -> Any:
+                if depth > 8:
+                    return node
+                if isinstance(node, dict):
+                    found.extend(str(name) for name in node if _anti_csrf_name(name))
+                    return {name: strip(child, depth + 1) for name, child in node.items()
+                            if not _anti_csrf_name(name)}
+                if isinstance(node, list):
+                    return [strip(child, depth + 1) for child in node]
+                return node
+
+            stripped = strip(document)
+            if found:
+                removed += found
+                request = replace(request, body=json.dumps(stripped, separators=(",", ":"),
+                                                           ensure_ascii=False).encode())
+            return request, removed, True
+    named = [name.decode("utf-8", "replace") for name in _PART_NAME_RE.findall(body[:500_000])]
+    unremovable = [name for name in named if _anti_csrf_name(name)]
+    return request, removed + unremovable, not unremovable
+
+
+def _same_site_restricted_cookie(request: ReplayRequest, results: Sequence[ReplayTransportResult]) -> tuple[str | None, str]:
+    """``(a cookie of the request the application set SameSite=Lax or Strict, what was seen)``.
+
+    The session's cookies reach this check as a ``Cookie`` header, without the attributes they were
+    set with, so the only evidence is a ``Set-Cookie`` of the same name in an answer of this check
+    (a session refresh). ``what was seen`` is ``lax``/``strict``/``none`` (the attribute),
+    ``unspecified`` (re-set without the attribute: a Chromium browser treats that as Lax) or
+    ``not_observed`` (no answer re-set a cookie of the request: nothing is known).
+    """
+    sent = {part.split("=", 1)[0].strip() for item in request.headers if str(item[0]).lower() == "cookie"
+            for part in str(item[1]).split(";") if "=" in part}
+    seen = "not_observed"
+    for result in results:
+        for name, value in (result.response_headers or {}).items():
+            if str(name).lower() != "set-cookie":
+                continue
+            for line in str(value).split("\n"):
+                cookie = line.split("=", 1)[0].strip()
+                if cookie not in sent:
+                    continue
+                match = _SAME_SITE_RE.search(line)
+                attribute = match.group(1).lower() if match else "unspecified"
+                if attribute in {"lax", "strict"}:
+                    return cookie, attribute
+                seen = attribute if seen in {"not_observed", "unspecified"} else seen
+    return None, seen
+
+
+def _prose_words(result: ReplayTransportResult) -> frozenset[bytes]:
+    return frozenset(run for run in _RUN_RE.findall(result.response_body[:500_000])
+                     if _PROSE_WORD_RE.fullmatch(run))
+
+
+def _same_answer(first: ReplayTransportResult, second: ReplayTransportResult) -> bool:
+    """Two answers that say the same thing: the status, where a redirect goes, and the words of
+    the body. A 200 page that says the token is invalid, or a redirect somewhere else, is another
+    answer although its status matches; a counter, a date or a fresh token in the page is not."""
+    if first.error_code or second.error_code or first.status_code != second.status_code:
+        return False
+    if first.status_code in _REDIRECT_STATUSES and (
+            str(_header(first.response_headers, "location") or "").strip()
+            != str(_header(second.response_headers, "location") or "").strip()):
+        return False
+    return _prose_words(first) == _prose_words(second)
+
+
 Send = Callable[[ReplayRequest], Awaitable[ReplayTransportResult]]
 
 
@@ -406,7 +533,19 @@ class RequestVerifier:
                 )
         return self.observation()
 
+    def _canonical_redirect(self, result: ReplayTransportResult) -> bool:
+        """A redirect to the path that was asked for (with or without a trailing slash)."""
+        if result.status_code not in _REDIRECT_STATUSES:
+            return False
+        try:
+            location = urllib.parse.urlsplit(str(_header(result.response_headers, "location") or "").strip())
+        except ValueError:
+            return False
+        own = urllib.parse.urlsplit(self.request.url).path or "/"
+        return (location.path or "/").rstrip("/") == own.rstrip("/")
+
     async def _host_header_injection(self, baseline: ReplayTransportResult) -> dict[str, Any]:
+        canonical_redirect = False
         headers = ("Host", *_HOST_OVERRIDE_HEADERS)
         if self.options.get("allow_identity_headers"):
             headers += _HOST_IDENTITY_HEADERS
@@ -422,6 +561,11 @@ class RequestVerifier:
             probe = await self.send(_with_header(self.request, header, value(first)))
             own_host = urllib.parse.urlsplit(self.request.url).netloc
             if probe.error_code or not _reflected(probe, first) or not _same_page(probe, baseline, first, own_host):
+                continue
+            if header == "Host" and self._canonical_redirect(probe):
+                # The web server's own redirect to the same path (a trailing slash, http to
+                # https) is built from Host by every server; the application trusted nothing.
+                canonical_redirect = True
                 continue
             repeat = await self.send(_with_header(self.request, header, value(second)))
             # The same host in a header no application reads: one that echoes every request
@@ -441,7 +585,8 @@ class RequestVerifier:
                     header_name=header,
                     response_pairs=[_pair(control, probe), _pair(control, repeat)],
                 )
-        return self.observation()
+        return self.observation(
+            **({"not_proven_reason": "canonical_redirect_built_from_host"} if canonical_redirect else {}))
 
     async def _cors(self, baseline: ReplayTransportResult) -> dict[str, Any]:
         def granted(result: ReplayTransportResult, origin: str) -> tuple[bool, bool]:
@@ -604,7 +749,8 @@ class RequestVerifier:
         def answered(result: ReplayTransportResult) -> bool:
             if result.error_code or result.status_code is None or not 200 <= result.status_code < 300:
                 return False
-            return bool(api.marker.search(result.response_body[:262_144].decode("utf-8", "replace")))
+            # Every key of the product's answer, together (product_api: one key is any JSON API).
+            return api.answers(result.response_body[:262_144].decode("utf-8", "replace"))
 
         if not answered(baseline) or self.left() < 2:
             return self.observation(product=api.product)
@@ -716,16 +862,20 @@ class RequestVerifier:
         parsed = urllib.parse.urlsplit(self.request.url)
         fields = list(self.options.get("form_fields") or ())
 
-        def upload(label: str) -> tuple[ReplayRequest, str, str]:
-            marker = _marker(self.seed, f"upload:{label}") + secrets.token_hex(4)
-            filename = f"{marker}.html"
+        def upload(label: str) -> tuple[ReplayRequest, str, bytes]:
+            filename = _marker(self.seed, f"upload:{label}") + secrets.token_hex(4) + ".html"
             boundary = "----shakerscan" + secrets.token_hex(12)
-            content = (f"<!doctype html><title>{marker}</title><p>{marker}</p>\n").encode()
+            # What proves the file is served is its own markup: an element whose id and text are
+            # random and are no part of the file name, so a page that prints the name it was asked
+            # for (a landing page, a soft 404) does not have it, and one that prints the stored
+            # text escaped does not have it as markup.
+            stored = (f'<p id="sk{secrets.token_hex(6)}">sk{secrets.token_hex(8)}</p>').encode()
+            content = b"<!doctype html><title>upload check</title>" + stored + b"\n"
             body = _multipart(fields, self.field, filename, content, "text/html", boundary)
             request = replace(_with_header(self.request, "Content-Type",
                                            f"multipart/form-data; boundary={boundary}"),
                               body=body, body_mode="raw")
-            return request, filename, marker
+            return request, filename, stored
 
         def fetch(filename: str) -> ReplayRequest:
             path = retrieve.replace("{filename}", urllib.parse.quote(filename))
@@ -734,27 +884,31 @@ class RequestVerifier:
                                          if str(item[0]).lower() != "content-type"),
                            url=urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, *path.partition("?")[::2], "")))
 
-        def served(result: ReplayTransportResult, marker: str) -> bool:
+        def served(result: ReplayTransportResult, stored: bytes) -> bool:
             disposition = str(_header(result.response_headers, "content-disposition") or "").lower()
-            return (result.status_code == 200 and _contains(result, marker)
+            return (result.status_code == 200 and stored in result.response_body[:2_000_000]
                     and _content_type(result) in _HTML_TYPES and "attachment" not in disposition)
 
-        request, filename, marker = upload("1")
+        request, filename, stored = upload("1")
         sent = await self.send(request)
         if not _accepted(sent):
             return self.observation(not_proven_reason="upload_refused", upload_status=sent.status_code)
         first = await self.send(fetch(filename))
-        if not served(first, marker):
+        if not served(first, stored):
             return self.observation(not_proven_reason="not_served_as_html", served_status=first.status_code,
                                     served_content_type=_content_type(first) or None)
-        request, filename_2, marker_2 = upload("2")
+        request, filename_2, stored_2 = upload("2")
         await self.send(request)
         repeat = await self.send(fetch(filename_2))
         # A file name never uploaded: a route that answers every name with the last upload, or
-        # with the name it was asked for, is not serving what was stored.
-        missing = _marker(self.seed, "upload:missing") + ".html"
-        control = await self.send(fetch(missing))
-        if served(repeat, marker_2) and not _contains(control, marker) and not _contains(control, marker_2):
+        # with a page naming what it was asked for, is not serving what was stored.
+        missing = _marker(self.seed, "upload:missing") + secrets.token_hex(4)
+        control = await self.send(fetch(missing + ".html"))
+        if _contains(control, missing):
+            return self.observation(not_proven_reason="retrieve_route_echoes_the_requested_name",
+                                    served_status=control.status_code)
+        if served(repeat, stored_2) and not any(
+                item in control.response_body[:2_000_000] for item in (stored, stored_2)):
             return self.observation(
                 proof_contract=PROOF_CONTRACTS["file_upload"], technique="html_served_from_origin_repeated",
                 served_content_type=_content_type(repeat), uploaded_extension=".html",
@@ -786,9 +940,15 @@ class RequestVerifier:
             return self.observation(not_proven_reason="throttled", throttled_after=len(verdicts),
                                     throttle_verdict=throttled[0])
         if len(verdicts) == attempts and all(item == "rejected" for item in verdicts) and len(set(statuses)) == 1:
+            # Stated, never verified. The check cannot tell whether the account name in the
+            # request is a real account (a lockout counts failures of an account that exists), and
+            # a run this short is under any threshold above it: "not rate limited" does not follow.
+            # No proof contract, so no finding; the planner has the count to reason from.
             return self.observation(
-                proof_contract=PROOF_CONTRACTS["rate_limit"], technique="wrong_password_run_unthrottled",
-                attempts=attempts, refusal_status=statuses[0], repetitions=attempts,
+                not_proven_reason="unthrottled_run_is_not_proof", technique="wrong_password_run_unthrottled",
+                attempts_unthrottled=attempts, refusal_status=statuses[0],
+                not_shown=["a per-account lockout (the account name is not known to be a real account)",
+                           f"a threshold above {attempts} attempts or a window longer than the run"],
                 response_pairs=[_pair(first, last)] if first and last else [],
             )
         return self.observation(not_proven_reason="refusal_not_recognised")
@@ -812,35 +972,63 @@ class RequestVerifier:
         if self.left() < 3:
             return self.observation(inconclusive_reason="budget")
         content_type = _request_content_type(self.request)
+        # Only what a browser adds by itself or a cross-site form can set: a custom anti-CSRF
+        # header (X-CSRF-Token, X-Requested-With) is not among them and is dropped here.
         forged = replace(self.request, headers=tuple(
             item for item in self.request.headers if str(item[0]).lower() in _CROSS_SITE_KEPT_HEADERS
         ))
-        if content_type and not content_type.startswith(_SIMPLE_CONTENT_TYPES):
-            # A cross-site form can send a JSON document only as text/plain.
-            forged = _with_header(forged, "Content-Type", "text/plain")
         token = str(self.options.get("token_field") or "")
-        if token:
+        if token and not _anti_csrf_name(token.rsplit(".", 1)[-1]):
+            # A field the planner names beside the ones recognised by name below.
             try:
                 forged = _mutate(forged, token, "")
             except SQLiProofError as exc:
                 raise RequestVerifyError(f"token_field: {exc}") from exc
+        forged, removed, all_removed = _without_anti_csrf_fields(forged)
+        if not all_removed:
+            # The token is in a body this check cannot rewrite: the forged request would carry it.
+            return self.observation(not_proven_reason="anti_csrf_field_not_removable",
+                                    anti_csrf_fields=sorted(set(removed))[:10])
+        if content_type and not content_type.startswith(_SIMPLE_CONTENT_TYPES):
+            # A cross-site form can send a JSON document only as text/plain.
+            forged = _with_header(forged, "Content-Type", "text/plain")
         site = f"https://{_marker(self.seed, 'csrf')}.{_CSRF_PROBE_DOMAIN}"
         forged = _with_header(_with_header(_with_header(forged, "Origin", site), "Referer", site + "/"),
                               "Sec-Fetch-Site", "cross-site")
+        fields = {"anti_csrf_fields_removed": sorted(set(removed))[:10],
+                  "token_field_removed": bool(token or removed)}
+        own_path = urllib.parse.urlsplit(self.request.url).path or "/"
+        if baseline.status_code in _REDIRECT_STATUSES and (urllib.parse.urlsplit(
+                str(_header(baseline.response_headers, "location") or "")).path or "/").rstrip("/") == own_path.rstrip("/"):
+            # The original is answered with a redirect back to its own page. So is a refused form
+            # (the form again, with an error only the next page shows): the answer cannot tell an
+            # accepted forgery from a rejected one, and nothing is proved from it.
+            return self.observation(not_proven_reason="redirect_to_own_page_shows_no_write", **fields)
         probe = await self.send(forged)
-        if not _accepted(probe) or probe.status_code != baseline.status_code:
-            return self.observation(not_proven_reason="cross_site_refused", forged_status=probe.status_code)
+        if not _accepted(probe) or not _same_answer(probe, baseline):
+            return self.observation(not_proven_reason="cross_site_refused", forged_status=probe.status_code,
+                                    **fields)
         repeat = await self.send(forged)
         # Without the session: the action must need it, or forging it from another site gains
         # nothing the attacker could not do directly.
         control = await self.send(_with_header(forged, "Cookie", None))
-        if _accepted(repeat) and repeat.status_code == baseline.status_code and not _accepted(control):
+        cookie, same_site = _same_site_restricted_cookie(self.request, (baseline, probe, repeat))
+        if cookie:
+            # A browser does not attach a SameSite=Lax or Strict cookie to a cross-site POST: the
+            # forged request this check sent is not one a victim's browser would send.
+            return self.observation(not_proven_reason="session_cookie_same_site", same_site_cookie=cookie[:80],
+                                    session_cookie_same_site=same_site, **fields)
+        if (_accepted(repeat) and _same_answer(repeat, baseline)
+                and not _accepted(control) and not _same_answer(control, probe)):
             return self.observation(
                 proof_contract=PROOF_CONTRACTS["csrf"], technique="cross_site_simple_request_accepted_repeated",
-                forged_content_type=_request_content_type(forged) or None, token_field_removed=bool(token),
+                forged_content_type=_request_content_type(forged) or None,
+                # ``not_observed``: no answer re-set a session cookie, so its SameSite attribute is
+                # unknown to this check (it is given the Cookie header, not how it was set).
+                session_cookie_same_site=same_site, **fields,
                 response_pairs=[_pair(control, probe), _pair(control, repeat)],
             )
-        return self.observation(not_proven_reason="session_not_required" if _accepted(control) else None)
+        return self.observation(not_proven_reason="session_not_required" if _accepted(control) else None, **fields)
 
     async def _ldap_injection(self, baseline: ReplayTransportResult) -> dict[str, Any]:
         path = urllib.parse.urlsplit(self.request.url).path or "/"

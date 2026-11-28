@@ -14,6 +14,10 @@ the server's own records of that create request). Five reads, all GET:
 3. the other principal reads the object, twice: 2xx, the value is there both times;
 4. an anonymous read of the object does not carry the value.
 
+The listing is the object's own parent collection, decided here from the two paths (the object
+is ``<listing>/<one segment>``): any other 2xx route that lacks the value (a health check, another
+collection) says nothing about what the application shows of this object.
+
 Verified only when all of them hold: the other principal received a private value of an object
 it did not create, which the application does not show it otherwise.
 """
@@ -37,6 +41,21 @@ REQUESTS = 5
 MAX_BODY_BYTES = 1_048_576
 
 
+def is_parent_collection(object_url: str, listing_url: str) -> bool:
+    """Whether ``listing_url`` is the collection ``object_url`` is one member of: same origin,
+    and the object's path is the listing's path plus exactly one more segment. Queries are not
+    compared (a listing may be paged or filtered)."""
+    item, listing = urllib.parse.urlsplit(object_url), urllib.parse.urlsplit(listing_url)
+    if (item.scheme.lower(), item.netloc.lower()) != (listing.scheme.lower(), listing.netloc.lower()):
+        return False
+    item_path = [part for part in item.path.split("/") if part]
+    listing_path = [part for part in listing.path.split("/") if part]
+    # Dot segments and encoded separators could make two unrelated routes look nested.
+    if any(part in {".", ".."} or "%2f" in part.lower() or "%5c" in part.lower() for part in item_path + listing_path):
+        return False
+    return bool(listing_path) and item_path[:-1] == listing_path
+
+
 async def verify_planted_object(
     base_url: str, routes: Sequence[Any], *, target: Any, primary_headers: Mapping[str, str],
     secondary_headers: Mapping[str, str], creator: str, planted_field: str, planted_value: str,
@@ -53,6 +72,11 @@ async def verify_planted_object(
     headers = {"primary": dict(primary_headers), "secondary": dict(secondary_headers), "anonymous": {}}
     other = "secondary" if creator == "primary" else "primary"
     object_url, listing_url = normalized
+    if not is_parent_collection(object_url, listing_url):
+        # Nothing is sent: a route unrelated to the object cannot show the value is withheld.
+        raise AuthzVerificationContractError(
+            "planted_object routes are the object, then the collection it belongs to: the object's "
+            "path must be the listing's path plus one segment (/notes/42 with /notes)")
     started = time.monotonic()
     sent = 0
     needle = planted_value.encode("utf-8")

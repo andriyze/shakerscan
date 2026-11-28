@@ -11,6 +11,11 @@ claim is about, then two with it (``parameter`` = ``privilege_value``). It signs
 filled in). Verified only when the control's profile shows the field with another value and both
 accounts that sent it show the sent value: the application stored a privilege its user chose.
 
+Which field is a privilege is decided here, not by the planner: a sign-up that stores
+``newsletter: true`` or ``theme: "dark"`` passes the same differential and is the application
+working as designed. ``privilege_refusal`` holds the vocabulary (whole field names, never a
+substring) and what value each kind must be sent with; admission and ``prove`` both ask it.
+
 The accounts stay on the target (a sign-up has no undo); the check needs the Hunt's
 ``allow_account_creation`` and names the accounts by user name in its observation.
 """
@@ -24,12 +29,92 @@ import secrets
 from typing import Any
 import urllib.parse
 
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
+
 CONTRACT = "request_registration_privilege_readback/v1"
 REQUESTS = 9
 _LOGIN_FIELD = re.compile(r"^(?:user(?:_?name)?|login|name|handle|nick(?:name)?)$", re.I)
 _EMAIL_FIELD = re.compile(r"e-?mail", re.I)
 _SECRET_FIELD = re.compile(r"pass(?:word|wd)?|pwd", re.I)
 _TOKEN_KEYS = re.compile(r"^(?:auth_?token|access_?token|token|jwt|id_?token|session_?token)$", re.I)
+
+
+# -- what counts as a privilege --------------------------------------------------------------
+# A field name is read as its words: snake_case, kebab-case, dotted and camelCase all split
+# (``isAdmin`` -> is, admin). The whole name must then be one of the kinds below; a name that only
+# contains such a word (``admin_notes``, ``role_description``, ``newsletter_active``) is not one.
+_WORD = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
+# Words that say whose attribute it is and nothing about what it is.
+_LEADING_WORDS = frozenset({"is", "has", "user", "account"})
+# The account may administer the application: the flag every framework's user model has
+# (Django is_staff / is_superuser, the ubiquitous admin / isAdmin). Sent as true.
+_ADMINISTRATOR_FLAGS = frozenset({"admin", "administrator", "superuser", "superadmin", "staff", "moderator"})
+# What the account is allowed to do, by name or id: a role, or the permission set itself
+# (Spring authorities, OAuth-style scopes). Sent as the role the control was not given.
+_ROLE_FIELDS = frozenset({"role", "roles", "permission", "permissions", "privilege", "privileges",
+                          "scope", "scopes", "authority", "authorities"})
+# A gate the application itself is meant to open (e-mail confirmation, an operator's approval,
+# activation): an account that opens it for itself skips that step. Sent as true.
+_ACCOUNT_GATES = frozenset({"verified", "approved", "confirmed", "active", "enabled"})
+_GATE_SUBJECTS = frozenset({"email", "phone", "mobile"})
+# Value the application accounts for: nobody is meant to choose their own. Sent as a positive number.
+_BALANCES = frozenset({"balance", "credit", "credits"})
+# Left out on purpose: group(s), plan, tier, type and level. A sign-up form legitimately asks for
+# them in many applications (a class group, the plan being bought), so storing the chosen value
+# proves nothing by itself.
+ACCEPTED_FIELDS = (
+    "an administrator flag (admin, is_admin, isAdmin, is_staff, is_superuser, moderator), a role or "
+    "permission set (role, roles, role_id, permissions, privileges, scopes, authorities), an account "
+    "gate (verified, email_verified, approved, confirmed, active, enabled) or a balance (balance, credits)")
+
+
+def name_words(name: Any) -> tuple[str, ...]:
+    return tuple(word.lower() for word in _WORD.findall(str(name or "")))
+
+
+def privilege_kind(name: Any) -> str | None:
+    """``administrator_flag``, ``role``, ``account_gate`` or ``balance`` when the whole field name
+    is one, else None."""
+    words = list(name_words(name))
+    while len(words) > 1 and words[0] in _LEADING_WORDS:
+        words.pop(0)
+    whole = "".join(words)  # super_user and superUser are superuser
+    if whole in _ADMINISTRATOR_FLAGS:
+        return "administrator_flag"
+    if whole in _ROLE_FIELDS or (len(words) > 1 and words[-1] in {"id", "ids"} and "".join(words[:-1]) in _ROLE_FIELDS):
+        return "role"
+    if whole in _ACCOUNT_GATES or (len(words) > 1 and words[0] in _GATE_SUBJECTS and "".join(words[1:]) in _ACCOUNT_GATES):
+        return "account_gate"
+    if whole in _BALANCES:
+        return "balance"
+    return None
+
+
+def privilege_refusal(name: Any, raw_value: Any) -> str | None:
+    """Why this field and value cannot show a privilege (what is accepted), or None when they can."""
+    kind = privilege_kind(name)
+    if kind is None:
+        return (f"mass_assignment proves a stored privilege, and {str(name)[:80]!r} is not named for one: "
+                f"parameter must be {ACCEPTED_FIELDS}. A stored field with another name is a lead, not a "
+                "verified finding")
+    value = _privilege(raw_value)
+    number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if kind in {"administrator_flag", "account_gate"} and not (
+            value is True or value == 1 or str(value).strip().lower() in {"true", "yes"}):
+        return f"mass_assignment: {name} is a flag, so privilege_value must be true"
+    if kind == "balance" and not (number and value > 0):
+        return f"mass_assignment: {name} is an amount, so privilege_value must be a positive number"
+    if kind == "role" and not (number or (isinstance(value, str) and value.strip())):
+        return f"mass_assignment: {name} names a role, so privilege_value must be the role name or id to claim"
+    return None
+
+
+def _value_digest(value: Any) -> str:
+    """What the control's profile showed, without the value: it is a field of someone's profile."""
+    return keyed_body_digest(str(value).encode("utf-8", "replace"))
 
 
 def _privilege(raw: Any) -> Any:
@@ -115,6 +200,11 @@ async def prove(verifier: Any) -> dict[str, Any]:
     request, field = verifier.request, verifier.field
     login_path = str(verifier.options.get("login_path") or "")
     profile_path = str(verifier.options.get("profile_path") or "")
+    refused = privilege_refusal(field, verifier.options.get("privilege_value"))
+    if refused:
+        # Admission refuses this before anything is reserved; a caller that reaches the check
+        # another way gets the same answer and nothing is sent.
+        return verifier.observation(not_proven_reason="field_is_not_a_privilege", refusal=refused[:300])
     sent_value = _privilege(verifier.options.get("privilege_value"))
     kind = _body_kind(request)
     if kind == "json":
@@ -184,6 +274,9 @@ async def prove(verifier: Any) -> dict[str, Any]:
         return verifier.observation(not_proven_reason="field_not_stored")
     return verifier.observation(
         proof_contract=CONTRACT, technique="sign_up_overpost_profile_readback_repeated",
-        field_path=field, control_value=str(control)[:80], sent_value=json.dumps(sent_value)[:80],
+        field_path=field, privilege_kind=privilege_kind(field),
+        # The control's own value is a profile field: its type, length and a digest say it differed.
+        control_value_type=type(control).__name__, control_value_chars=len(str(control)),
+        control_value_sha256=_value_digest(control), sent_value=json.dumps(sent_value)[:80],
         repetitions=2, accounts_created=3,
     )

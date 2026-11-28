@@ -207,6 +207,22 @@ def test_host_header_is_not_proved_by_a_catch_all_virtual_host_page():
     assert not _verified(result)
 
 
+def test_host_header_is_not_proved_by_the_web_servers_own_redirect_to_the_same_path():
+    """Every web server builds its trailing-slash (or http to https) redirect from Host."""
+    def web_server(request):
+        host = _header(request, "Host") or "app.example.test"
+        return _answer(request, b"", status=301, headers={"Location": f"https://{host}/docs/"})
+    result, _ = _run("host_header_injection", {"path": "/docs"}, web_server)
+    assert not _verified(result)
+    assert result.observations[0]["not_proven_reason"] == "canonical_redirect_built_from_host"
+
+    def application(request):  # a redirect somewhere else, built from Host by the application
+        host = _header(request, "Host") or "app.example.test"
+        return _answer(request, b"", status=302, headers={"Location": f"https://{host}/welcome"})
+    result, _ = _run("host_header_injection", {"path": "/start"}, application)
+    assert _verified(result)[0]["technique"] == "host_reflected_in_location_repeated"
+
+
 def test_forwarding_headers_that_say_where_a_client_is_need_the_identity_header_permission():
     def forwarded(request):
         host = _header(request, "X-Forwarded-Host") or "app.example.test"
@@ -386,6 +402,47 @@ def test_upload_served_as_text_or_any_name_answered_proves_nothing():
     assert not _verified(result)
 
 
+def test_upload_is_not_proved_by_a_page_that_prints_the_name_it_was_asked_for():
+    """A landing page or soft 404: HTML, 200, and the requested file name in it. Nothing stored."""
+    def landing(request):
+        if request.method == "POST":
+            return _answer(request, b'{"ok": true}', content_type="application/json")
+        name = urllib.parse.unquote(urllib.parse.urlsplit(request.url).path.rsplit("/", 1)[-1])
+        return _answer(request, f"<!doctype html><title>{name}</title><h1>Download {name}</h1>")
+    result, transport = _run("file_upload", {"method": "POST", "path": "/upload"}, landing, field="file",
+                             options={"retrieve_path": "/uploads/{filename}"})
+    assert not _verified(result)
+    # The uploaded markup is not the file name: a page cannot print it from the request it got.
+    upload = next(item for item in transport.requests if item.method == "POST")
+    name = re.search(rb'filename="([^"]+)\.html"', upload.body).group(1)
+    assert upload.body.count(name) == 1
+
+
+def test_upload_is_not_proved_when_the_stored_text_is_shown_escaped_or_the_route_echoes_names():
+    import html
+    inner = _store()
+
+    def viewer(request):  # a file viewer: the stored text, escaped, inside its own page
+        answer = inner(request)
+        if request.method == "POST" or answer.status_code != 200:
+            return answer
+        return _answer(request, "<html><pre>" + html.escape(answer.response_body.decode()) + "</pre></html>")
+    result, _ = _run("file_upload", {"method": "POST", "path": "/upload"}, viewer, field="file",
+                     options={"retrieve_path": "/view/{filename}"})
+    assert not _verified(result)
+
+    def echoing(request):  # serves what was stored, and answers every other name with a page naming it
+        answer = inner(request)
+        if request.method == "POST" or answer.status_code == 200:
+            return answer
+        name = urllib.parse.unquote(urllib.parse.urlsplit(request.url).path.rsplit("/", 1)[-1])
+        return _answer(request, f"<h1>{name}</h1>")
+    result, _ = _run("file_upload", {"method": "POST", "path": "/upload"}, echoing, field="file",
+                     options={"retrieve_path": "/uploads/{filename}"})
+    assert not _verified(result)
+    assert result.observations[0]["not_proven_reason"] == "retrieve_route_echoes_the_requested_name"
+
+
 def test_upload_needs_a_retrieve_path_with_the_file_name():
     with pytest.raises(RequestVerifyError):
         asyncio.run(RequestVerifier(
@@ -409,12 +466,23 @@ def _login(throttle_after=None):
     return respond
 
 
-def test_rate_limit_states_a_run_of_unthrottled_refusals():
+def test_rate_limit_states_a_run_of_unthrottled_refusals_and_never_verifies_it():
+    """A dozen refusals for a name that may be no account show neither a per-account lockout nor a
+    threshold above a dozen (a login that locks at 20 answers exactly like this one)."""
     result, transport = _run("rate_limit", {"method": "POST", "path": "/login",
                                             "form_body": {"username": "alice", "password": "x"}},
-                             _login(), field="password", request_class="safe_authentication")
-    proof = _verified(result)[0]
-    assert proof["attempts"] == RATE_LIMIT_ATTEMPTS and proof["refusal_status"] == 401
+                             _login(throttle_after=20), field="password", request_class="safe_authentication")
+    assert not _verified(result) and "rate_limit" not in PROOF_CONTRACTS
+    stated = result.observations[0]
+    assert stated["proof_state"] == "not_proven" and stated["proof_contract"] is None
+    assert stated["not_proven_reason"] == "unthrottled_run_is_not_proof"
+    assert stated["attempts_unthrottled"] == RATE_LIMIT_ATTEMPTS and stated["refusal_status"] == 401
+    from api.hunt.request_verification import finding_records
+    assert finding_records("h", "a", ORIGIN, "r", {"check": "rate_limit"}, list(result.observations)) == []
+    # Even an observation forged as verified has no finding to become.
+    forged = {**stated, "proof_state": "verified", "finding_verdict": "verified", "repetitions": 12,
+              "proof_contract": "request_sign_in_unthrottled/v1"}
+    assert finding_records("h", "a", ORIGIN, "r", {"check": "rate_limit"}, [forged]) == []
     passwords = {urllib.parse.parse_qs(item.body.decode())["password"][0] for item in transport.requests[1:]}
     assert len(passwords) == RATE_LIMIT_ATTEMPTS  # every attempt a fresh random wrong password
 
@@ -481,6 +549,111 @@ def test_csrf_not_proved_when_origin_is_checked_the_session_is_not_needed_or_a_b
     assert not _verified(result)
     result, _ = _csrf(_account(), headers={"Cookie": "s=abcdefgh12345678", "Authorization": "Bearer abc"})
     assert result.observations[0]["not_proven_reason"] == "header_authenticated"
+
+
+def _form_body(request):
+    return dict(urllib.parse.parse_qsl(request.body.decode(), keep_blank_values=True))
+
+
+def _token_checked(refusal):
+    """An application that checks its anti-CSRF form field; ``refusal(request)`` is its answer to a
+    request without the right token."""
+    def respond(request):
+        if not _header(request, "Cookie"):
+            return _answer(request, b"", status=302, headers={"Location": "/login"})
+        if _form_body(request).get("csrf_token") != "tok-7f3a9c2e":
+            return refusal(request)
+        return _answer(request, "<html><nav>Shop Account Orders</nav><p>Your email was updated</p></html>")
+    return respond
+
+
+def _csrf_form(respond, **extra):
+    values = {"method": "POST", "path": "/account/email",
+              "form_body": {"email": "a@example.test", "csrf_token": "tok-7f3a9c2e"},
+              "_headers": {"Cookie": "session=abcdefgh12345678"}, **extra}
+    return _run("csrf", values, respond, request_class="confirmed_mutation")
+
+
+@pytest.mark.parametrize("refusal", [
+    # The same status and layout, with a sentence saying the token was wrong.
+    lambda request: _answer(request, "<html><nav>Shop Account Orders</nav><p>Invalid CSRF token</p></html>"),
+    # A redirect like any other accepted form, back to the form instead of onwards.
+    lambda request: _answer(request, b"", status=302, headers={"Location": "/account/email?error=1"}),
+    lambda request: _answer(request, b"", status=403),
+], ids=["error-page-200", "redirect-to-form", "forbidden"])
+def test_csrf_is_not_proved_when_the_token_is_checked_although_the_planner_named_no_token_field(refusal):
+    result, transport = _csrf_form(_token_checked(refusal))
+    assert not _verified(result)
+    assert result.observations[0]["not_proven_reason"] == "cross_site_refused"
+    assert result.observations[0]["anti_csrf_fields_removed"] == ["csrf_token"]
+    # The original keeps its token; no forged request carries it.
+    assert _form_body(transport.requests[0])["csrf_token"] == "tok-7f3a9c2e"
+    assert all("csrf_token" not in _form_body(item) and _form_body(item)["email"] == "a@example.test"
+               for item in transport.requests[1:])
+
+
+def test_csrf_is_proved_when_the_token_field_is_sent_but_never_checked():
+    def unchecked(request):
+        if not _header(request, "Cookie"):
+            return _answer(request, b"", status=302, headers={"Location": "/login"})
+        return _answer(request, b"", status=302, headers={"Location": "/account/saved"})
+    result, transport = _csrf_form(unchecked)
+    proof = _verified(result)[0]
+    assert proof["anti_csrf_fields_removed"] == ["csrf_token"] and proof["token_field_removed"] is True
+    assert proof["session_cookie_same_site"] == "not_observed"
+    assert "csrf_token" not in _form_body(transport.requests[1])
+
+
+def test_csrf_proves_nothing_from_a_redirect_back_to_the_requests_own_page():
+    """Accepted or refused, the form answers with a redirect to itself: the answer shows no write."""
+    def same_page(request):
+        if not _header(request, "Cookie"):
+            return _answer(request, b"", status=302, headers={"Location": "/login"})
+        return _answer(request, b"", status=302, headers={"Location": "/account/email"})
+    result, transport = _csrf_form(same_page)
+    assert not _verified(result)
+    assert result.observations[0]["not_proven_reason"] == "redirect_to_own_page_shows_no_write"
+    assert len(transport.requests) == 1  # nothing forged was sent
+
+
+def test_csrf_is_not_proved_when_the_session_cookie_is_same_site():
+    def lax(request):
+        if not _header(request, "Cookie"):
+            return _answer(request, b'{"error": "unauthenticated"}', status=401, content_type="application/json")
+        return _answer(request, b'{"changed": true}', content_type="application/json",
+                       headers={"Set-Cookie": "session=abcdefgh12345678; Path=/; HttpOnly; SameSite=Lax"})
+    result, _ = _csrf(lax)
+    assert not _verified(result)
+    assert result.observations[0]["not_proven_reason"] == "session_cookie_same_site"
+    assert result.observations[0]["same_site_cookie"] == "session"
+
+    def unrelated(request):  # another cookie's attribute says nothing about the session's
+        answer = _account()(request)
+        return _answer(request, answer.response_body, status=answer.status_code, content_type="application/json",
+                       headers={"Set-Cookie": "theme=dark; SameSite=Strict"})
+    assert _verified(_csrf(unrelated)[0])[0]["session_cookie_same_site"] == "not_observed"
+
+
+def test_anti_csrf_fields_are_recognised_by_name_in_the_query_a_form_and_json():
+    from api.capabilities.request_verify import _anti_csrf_name, _without_anti_csrf_fields
+    for name in ("csrf", "_csrf", "csrf_token", "csrfmiddlewaretoken", "X-XSRF-TOKEN", "_token", "token",
+                 "authenticity_token", "__RequestVerificationToken", "_wpnonce", "nonce", "form_key", "sesskey"):
+        assert _anti_csrf_name(name), name
+    for name in ("email", "name", "tokens_per_minute", "description", "announcement", "state", "id"):
+        assert not _anti_csrf_name(name), name
+    request = build_request(
+        {"method": "POST", "path": "/api/profile", "query": {"_csrf": "q1", "page": "2"},
+         "json_body": {"name": "a", "meta": {"authenticity_token": "t", "keep": 1}, "items": [{"nonce": "n", "x": 1}]}},
+        base_url=ORIGIN + "/", headers={"Cookie": "s=1"}, action_id="a")
+    stripped, removed, complete = _without_anti_csrf_fields(request)
+    assert complete and sorted(removed) == ["_csrf", "authenticity_token", "nonce"]
+    assert urllib.parse.urlsplit(stripped.url).query == "page=2"
+    assert json.loads(stripped.body) == {"name": "a", "meta": {"keep": 1}, "items": [{"x": 1}]}
+    # A multipart body is not rewritten: a token in it means the forgery cannot be built.
+    from dataclasses import replace
+    multipart = replace(request, url=ORIGIN + "/api/profile", headers=(("Content-Type", "multipart/form-data; boundary=b"),),
+                        body=b'--b\r\nContent-Disposition: form-data; name="csrf_token"\r\n\r\nt\r\n--b--\r\n')
+    assert _without_anti_csrf_fields(multipart)[1:] == (["csrf_token"], False)
 
 
 # -- budget and cancellation -----------------------------------------------------------------

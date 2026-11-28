@@ -27,6 +27,13 @@ B = {"Authorization": "Bearer token-of-user-b"}
 def test_the_planted_field_value_and_creator_come_from_the_create_request():
     assert authz_planted.private_field("secret") and authz_planted.private_field("private_note")
     assert not authz_planted.private_field("book_title") and not authz_planted.private_field("title")
+    # Whole words of the name, however it is written; never a substring of another word.
+    for name in ("note", "userNotes", "home_address", "billingAddress", "card_number", "creditCard", "api_key",
+                 "apiKey", "APIKey", "passwd", "password", "accountNumber", "social_security_no", "phone", "dob"):
+        assert authz_planted.private_field(name), name
+    for name in ("footnote", "keynote_title", "ip_address", "macAddress", "server_address", "discard", "cardinal",
+                 "discarded", "tokenizer", "notebook", "emailed", "socialLinks", ""):
+        assert not authz_planted.private_field(name), name
     assert authz_planted.distinctive(SECRET) and not authz_planted.distinctive("password")
     assert not authz_planted.distinctive("123456789012345")
     body = json.dumps({"book_title": "t1", "secret": SECRET}).encode()
@@ -74,6 +81,30 @@ def _app(*, owner_check=False, listing_shows_secret=False, anonymous_reads=False
         await writer.drain()
         writer.close()
     return app
+
+
+def test_the_listing_must_be_the_objects_own_collection():
+    from capabilities.authz import AuthzVerificationContractError
+    from capabilities.authz_planted import is_parent_collection
+    from runtime.models import TargetBinding
+    base = "http://127.0.0.1:9"
+    assert is_parent_collection(f"{base}/books/v1/t1", f"{base}/books/v1")
+    assert is_parent_collection(f"{base}/books/v1/t1", f"{base}/books/v1/?page=2")
+    for listing in ("/api/health", "/", "/books", "/books/v1/t1", "/books/v1/t2", "/books/v2", "/notes/../books/v1"):
+        assert not is_parent_collection(f"{base}/books/v1/t1", base + listing), listing
+    assert not is_parent_collection(f"{base}/books/v1/t1", "http://127.0.0.1:10/books/v1")
+    # A health check answers 2xx to anyone and never carries the value: it must not stand in for
+    # "the listing withholds it". Refused before anything is sent (port 9 answers nobody).
+    target = TargetBinding(target_id=str(UUID(int=2)), target_kind="web", canonical_host="127.0.0.1",
+                           allowed_origins=(base,), allowed_addresses=("127.0.0.1",),
+                           allowed_root_domains=("127.0.0.1",), environment="lab", scope_receipt_id=str(UUID(int=3)))
+    sent = []
+    with pytest.raises(AuthzVerificationContractError, match="collection it belongs to"):
+        asyncio.run(verify_planted_object(
+            base, [f"{base}/books/v1/t1", f"{base}/api/health"], target=target, primary_headers=A,
+            secondary_headers=B, creator="primary", planted_field="secret", planted_value=SECRET,
+            transaction_recorder=sent.append))
+    assert sent == []
 
 
 def _prove(**app_options):

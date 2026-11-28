@@ -137,3 +137,20 @@ def test_one_account_named_differently_in_ignored_fields_is_refused(monkeypatch)
               B: {"method": "POST", "json_body": {"username": "alice", "email": "b@x.test", "password": "p"}}}
     with pytest.raises(CredentialReferenceError, match="could not be told apart"):
         _resolve(monkeypatch, opaque, inputs)
+
+
+@pytest.mark.parametrize("first,second,same", [
+    ("alice", "alice@x.test", True),      # one sign-in field that takes a user name or its e-mail
+    ("alice@x.test", "alice", True),
+    ("Alice ", "alice", True),
+    ("ａlice", "alice", True),            # full-width letter: one name after Unicode folding
+    ("alice", "bob", False),
+    ("alice@x.test", "bob@x.test", False),
+    ("alice@x.test", "alice@y.test", False),
+    ("alice", "bob@alice.test", False),
+])
+def test_one_account_spelt_two_ways_is_not_two_sign_in_accounts(first, second, same):
+    from hunt.authz_captured import same_account_spelling
+    assert same_account_spelling(first, second) is same
+    expected = None if same else "sign_in_account"
+    assert distinction({}, {}, ("username", first.strip().lower()), ("username", second.strip().lower())) == expected
