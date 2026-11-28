@@ -28,7 +28,8 @@ try:
     from capabilities.sqli_path_mutation import prepare_path_candidate, path_field_value, replace_path_field
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from runtime.auth_refusal import (
-        TARGET_UNAVAILABLE, refusal_error, request_refusal, unavailable_status,
+        MISSING_STATUSES, TARGET_UNAVAILABLE, refusal, refusal_error, request_refusal,
+        unavailable_status,
     )
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
@@ -45,7 +46,8 @@ except ModuleNotFoundError:
     from .sqli_path_mutation import prepare_path_candidate, path_field_value, replace_path_field
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..runtime.auth_refusal import (
-        TARGET_UNAVAILABLE, refusal_error, request_refusal, unavailable_status,
+        MISSING_STATUSES, TARGET_UNAVAILABLE, refusal, refusal_error, request_refusal,
+        unavailable_status,
     )
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
@@ -87,6 +89,47 @@ _TIME_PAYLOADS = (
     ("mssql", "'; WAITFOR DELAY '0:0:1'-- "),
 )
 _TIME_SCREEN_MS = 750
+
+
+def _mixed_order(seed: str, labels: Sequence[str]) -> tuple[str, ...]:
+    """``labels`` in an order fixed by ``seed`` that no periodic answer pattern lines up with.
+
+    A timing comparison sent as control, payload, control, payload is satisfied by anything
+    that alternates on its own: two load-balanced replicas of which one is slower answer every
+    control fast and every payload slow. The order here is a seeded shuffle (stable for a
+    candidate, so a retest sends what the Scan sent) kept only when, for every period from two
+    requests up, two requests one period apart carry different labels: whatever repeats with
+    that period then treats two different labels alike and cannot separate them.
+    """
+    count = len(labels)
+    for attempt in range(256):
+        # A digest of the candidate's seed and a position, never of anything a target sent.
+        ranked = sorted(range(count), key=lambda position: _sha256(
+            f"{seed}:order:{attempt}:{position}".encode("utf-8")))
+        order = tuple(labels[position] for position in ranked)
+        if all(
+            any(order[first] != order[second]
+                for first in range(count) for second in range(first + period, count, period))
+            for period in range(2, count)
+        ):
+            return order
+    raise SQLiProofError("no aperiodic request order exists for these labels")
+
+
+def _delay_answer_agrees(control: ReplayTransportResult, delayed: ReplayTransportResult) -> bool:
+    """Whether a delayed answer is the route's own answer, as the control's is.
+
+    The same status as the control, or the answer an application gives a statement that matched
+    nothing: a success, a redirect that is not to a sign-in page, or a missing page (404, 410).
+    Any other status (a refusal, a rejected request, a rate limit, a server error) is something
+    in front of the query answering the payload: a firewall that holds a request carrying
+    ``SLEEP(`` and then refuses it is slow on every payload and on no control.
+    """
+    if delayed.status_code == control.status_code:
+        return True
+    return refusal(delayed.status_code, delayed.response_headers) is None and (
+        200 <= delayed.status_code < 400 or delayed.status_code in MISSING_STATUSES
+    )
 
 
 class SQLiProofError(ValueError):
@@ -463,14 +506,23 @@ class SQLiProofAdapter:
                         delay_request = self.mutate(
                             self.request, self.field, time_payload,
                         )
-                        timing_pairs = [
-                            (await send(control_request), await send(delay_request))
-                            for _ in range(3)
-                        ]
+                        # Three controls and three payloads in a seeded mixed order, not
+                        # strictly alternating (see _mixed_order), paired in the order sent.
+                        sent: dict[str, list[ReplayTransportResult]] = {"control": [], "payload": []}
+                        for label in _mixed_order(
+                            f"{self.candidate.get('candidate_id') or ''}:{self.field}:time",
+                            ("control", "payload") * 3,
+                        ):
+                            sent[label].append(await send(
+                                control_request if label == "control" else delay_request,
+                            ))
+                        timing_pairs = list(zip(sent["control"], sent["payload"]))
                         control_ms = sorted(pair[0].elapsed_ms for pair in timing_pairs)
                         payload_ms = sorted(pair[1].elapsed_ms for pair in timing_pairs)
                         if (
                             all(not left.error_code and not right.error_code for left, right in timing_pairs)
+                            # Time alone is not the proof: the delayed answers are the route's.
+                            and all(_delay_answer_agrees(left, right) for left, right in timing_pairs)
                             and payload_ms[1] - control_ms[1] >= 750
                             and payload_ms[0] - control_ms[2] >= 500
                         ):

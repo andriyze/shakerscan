@@ -23,7 +23,7 @@ def _endpoint(method, path, *, query=(), body=()):
     }
 
 
-def _run(monkeypatch, endpoint, *, allow_state_changing, sign_in=None):
+def _run(monkeypatch, endpoint, *, allow_state_changing, sign_in=None, budget=None):
     scan_id = str(uuid.uuid4())
     endpoints = build_endpoint_manifest(
         scan_id=scan_id, target_binding_digest=TARGET.digest,
@@ -38,6 +38,9 @@ def _run(monkeypatch, endpoint, *, allow_state_changing, sign_in=None):
         "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
         "slice": {"start": 0, "count": 1}, "profile": "balanced_batch_v1",
         "proof_policy": "verified_only"})
+    if budget is not None:
+        import dataclasses
+        action = dataclasses.replace(action, requested_budget=dict(budget), action_digest=None)
     plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
                           target_binding_digest=TARGET.digest, actions=(action,))
     backend = Backend(manifests={endpoints.manifest_id: endpoints,
@@ -119,3 +122,36 @@ def test_the_credential_profiles_sign_in_endpoint_is_sent_nothing(monkeypatch):
     assert requests == []
     public = json.dumps(result.public_dict())
     assert "sign_in_endpoint_candidate" in public
+
+
+def test_a_body_candidate_spends_the_slices_state_changing_hold_and_no_more(monkeypatch):
+    """Every request of a body candidate is a write: it is reserved, bounded and settled as one."""
+    result, observations, requests = _run(
+        monkeypatch, _endpoint("POST", "/notes", body=("title",)), allow_state_changing=True,
+        budget={"http_requests": 40, "state_changing_requests": 6, "tool_wall_seconds": 40})
+    assert 0 < len(requests) <= 6 and all(request.method == "POST" for request in requests)
+    attempt, = [item for item in observations if item.get("kind") == "candidate_attempt"]
+    assert attempt["budget_consumed"]["state_changing_requests"] == len(requests)
+    assert attempt["budget_consumed"]["http_requests"] == len(requests)
+    assert result.public_dict()["budget_consumed"]["state_changing_requests"] == len(requests)
+
+
+def test_a_body_candidate_in_a_slice_without_a_state_changing_hold_is_sent_nothing(monkeypatch):
+    """The authority alone is not a reservation: with no hold the write is left unattempted (a
+    partial batch), never sent as a plain request."""
+    result, observations, requests = _run(
+        monkeypatch, _endpoint("POST", "/notes", body=("title",)), allow_state_changing=True,
+        budget={"http_requests": 40, "tool_wall_seconds": 40})
+    assert requests == [] and observations == []
+    assert result.redacted_execution["unattempted_count"] == 1
+    assert result.status != "success"
+
+
+def test_a_read_candidate_spends_none_of_the_state_changing_hold(monkeypatch):
+    result, observations, requests = _run(
+        monkeypatch, _endpoint("GET", "/render", query=("q",)), allow_state_changing=True,
+        budget={"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 40})
+    assert requests and all(request.method == "GET" for request in requests)
+    attempt, = [item for item in observations if item.get("kind") == "candidate_attempt"]
+    assert "state_changing_requests" not in attempt["budget_consumed"]
+    assert result.public_dict()["budget_consumed"].get("state_changing_requests", 0) == 0

@@ -127,3 +127,94 @@ def test_preflight_admits_a_graphql_argument_and_explains_a_bad_one():
     with pytest.raises(Exception) as refused:
         web_candidate_preflight(_candidate("sqli", parameter="missing"), injection_proofs=True)
     assert "operation" in str(refused.value.args) or "operation" in str(getattr(refused.value, "detail", ""))
+
+
+@pytest.mark.parametrize("document", [
+    'fragment F on Paste{id} mutation{deletePaste(id:"1"){result}}',     # a fragment first
+    ',mutation{deletePaste(id:"1"){result}}',                             # a leading comma
+    '﻿mutation{deletePaste(id:"1"){result}}',                        # a byte order mark
+    '# query\nmutation{deletePaste(id:"1"){result}}',                     # a comment first
+    'query Q{pastes{id}} mutation M{deletePaste(id:"1"){result}}',        # a query first
+    'query Q($f: In = {a: "}"}) @d(x: {y: 1}) {pastes{id}} mutation M{deletePaste(id:"1"){result}}',
+    '{pastes{id}} mutation{deletePaste(id:"1"){result}}',
+    'query A{pastes(filter:"1"){id}} query B{pastes{id}}',                # two operations: the server picks
+    'mutation{deletePaste(id:"1"){result}',                               # unbalanced
+    'query{pastes(filter:"1"){id}}}',
+    'type Paste{id: ID} mutation{deletePaste(id:"1"){result}}',           # not an executable document
+    'query{pastes(filter:"""a){id}}',                                     # unterminated block string
+    '',
+])
+def test_a_document_that_is_not_one_query_is_a_write(document):
+    assert graphql_argument.operation_kind(document) == "mutation"
+
+
+@pytest.mark.parametrize("document", [
+    'query{pastes(filter:"1"){id}}',
+    '{pastes(filter:"1"){id}}',
+    '﻿,, # mutation\n query Q { pastes(filter: "mutation{x}") { id } }',
+    'query Q($f: In = {a: "mutation {"}) @d(x: {y: "}"}) { pastes(filter: "1") { id ...F } } fragment F on Paste { mutation subscription }',
+    'fragment mutation on Paste{id} query{pastes(filter:"1"){...mutation}}',
+    'query{pastes(note:"""a "quoted" mutation{ \\""" }""", filter:"1"){id}}',
+])
+def test_one_query_is_a_read_whatever_its_strings_fragments_and_field_names_say(document):
+    assert graphql_argument.operation_kind(document) == "query"
+    assert graphql_argument.operation_kinds(document) == ("query",)
+
+
+def test_a_subscription_anywhere_in_the_document_is_a_subscription():
+    assert graphql_argument.operation_kind('fragment F on T{id} subscription{pasteAdded{id}}') == "subscription"
+    assert graphql_argument.operation_kind('query{a} subscription{pasteAdded{id}}') == "subscription"
+
+
+@pytest.mark.parametrize("operation", [
+    'fragment F on Paste{id} mutation{importPaste(host:"h"){result}}',
+    ',mutation{importPaste(host:"h"){result}}',
+    'query Q{pastes{id}} mutation M{importPaste(host:"h"){result}}',
+])
+def test_a_mutation_behind_a_fragment_a_comma_or_a_query_is_not_sent_as_a_read(operation):
+    """The keyword at the very start said ``query`` (or nothing): up to 96 injection payloads
+    went out as reads, without the state-changing permission."""
+    candidate = _candidate("command_injection", operation=operation, parameter="host")
+    transport = Resolver()
+    with pytest.raises(injection_proof.InjectionProofRefused) as refused:
+        asyncio.run(injection_proof.run_proof(
+            run=RUN, context=CONTEXT, policy={}, candidate=candidate,
+            action_id="40000000-0000-4000-8000-000000000001", transport=transport))
+    assert refused.value.reason == "injection_proof_write_not_permitted"
+    assert transport.requests == []
+    assert injection_proof.sends_writes(candidate) is True
+
+
+def test_a_mutation_locus_holds_a_state_changing_request_for_every_request_of_its_proof():
+    from api.hunt.verification_budget import web_candidate_budget
+
+    mutation = _candidate("command_injection", operation='mutation{importPaste(host:"h"){result}}', parameter="host")
+    hidden = _candidate("injection", operation='fragment F on P{id} mutation{importPaste(host:"h"){result}}', parameter="host")
+    for candidate in (mutation, hidden):
+        charges = web_candidate_budget(candidate["family"], candidate)
+        assert charges["http_requests"] == injection_proof.PROOF_REQUESTS
+        assert charges["state_changing_requests"] == injection_proof.PROOF_REQUESTS
+    # A query locus, a GET locus and a caller that names no candidate hold none.
+    assert "state_changing_requests" not in web_candidate_budget("command_injection", _candidate("command_injection"))
+    assert "state_changing_requests" not in web_candidate_budget(
+        "ssti", {"id": "x", "family": "ssti", "canonical_locus": {"route": "/render", "parameter": "q"}})
+    assert "state_changing_requests" not in web_candidate_budget("command_injection")
+    assert web_candidate_budget("bola", mutation) == web_candidate_budget("bola")
+
+
+def test_a_permitted_mutation_proof_settles_every_request_as_state_changing():
+    candidate = _candidate("command_injection", operation='mutation{importPaste(host:"h"){result}}', parameter="host")
+    class Importer(Resolver):
+        async def send(self, request, **_kwargs):
+            self.requests.append(request)
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={"Content-Type": "application/json"},
+                response_body=b'{"data":{"importPaste":{"result":"ok"}}}', elapsed_ms=8)
+
+    transport = Importer()
+    proof = asyncio.run(injection_proof.run_proof(
+        run=RUN, context=CONTEXT, policy={"allow_state_changing_http": True}, candidate=candidate,
+        action_id="40000000-0000-4000-8000-000000000001", transport=transport))
+    assert transport.requests and proof["traffic"]["state_changing_requests"] == len(transport.requests)
+    assert proof["traffic"]["state_changing_requests"] <= injection_proof.write_hold(candidate)["state_changing_requests"]

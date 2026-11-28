@@ -38,6 +38,21 @@ def test_a_wildcard_dns_name_is_classed_by_the_address_written_in_it():
         "https://--1.sslip.io",                      # sslip IPv6 ::1
         "https://www.fd00--5.sslip.io",              # sslip IPv6 ULA
         "https://fe80--1.sslip.io",                  # sslip IPv6 link-local
+        # Eight hexadecimal digits are an IPv4 address, as nip.io documents.
+        "https://0a000005.nip.io",
+        "https://c0a80105.nip.io",
+        "https://app-7f000001.nip.io",
+        "https://a9fea9fe.nip.io",                   # 169.254.169.254
+        "https://www.0a000005.sslip.io",
+        # An address in a label that is not the last one.
+        "https://10-0-0-5.foo.sslip.io",
+        "https://10.0.0.5.foo.nip.io",
+        "https://app-10-0-0-5.a.b.sslip.io",
+        "https://0a000005.foo.nip.io",
+        "https://fd00--5.foo.sslip.io",
+        # A public address beside an internal one: the name may resolve to either.
+        "https://8-8-8-8.10-0-0-5.sslip.io",
+        "https://10-0-0-5.8-8-8-8.sslip.io",
     )
     for url in internal:
         assert target_exposure_class(url) == "internal", url
@@ -49,7 +64,10 @@ def test_a_wildcard_dns_name_is_classed_by_the_address_written_in_it():
         "https://2001-4860-4860--8888.sslip.io",     # public IPv6
         "https://deadbeef.sslip.io",                 # hex-like, not an address
         "https://cafe-babe.sslip.io",
-        "https://c0a80105.nip.io",
+        "https://08080808.nip.io",                   # hexadecimal for a public address
+        "https://c0a8010.nip.io",                    # seven hexadecimal digits
+        "https://c0a80105a.nip.io",                  # nine
+        "https://2001-4860-10-0-0-1--5.sslip.io",    # groups of an IPv6 address are not octets
         "https://abc-10-0-0.sslip.io",               # three octets only
         "https://app-10-0-0-256.sslip.io",           # an octet over 255
         "https://app-10-0-0-1000.sslip.io",
@@ -66,6 +84,10 @@ def test_a_wildcard_dns_name_is_classed_by_the_address_written_in_it():
 
     assert str(wildcard_dns_address("billing.shop-10-0-0-5.sslip.io")) == "10.0.0.5"
     assert str(wildcard_dns_address("--1.sslip.io")) == "::1"
+    assert str(wildcard_dns_address("0a000005.nip.io")) == "10.0.0.5"
+    assert str(wildcard_dns_address("app-7f000001.nip.io")) == "127.0.0.1"
+    assert str(wildcard_dns_address("10-0-0-5.foo.sslip.io")) == "10.0.0.5"
+    assert str(wildcard_dns_address("app.8.8.8.8.nip.io")) == "8.8.8.8"
     assert wildcard_dns_address("example.com") is None
     # Explicit operator metadata still wins over the host.
     assert target_cohort(url="https://10-0-0-5.sslip.io", metadata={"cohort": "staging"}) == "staging"

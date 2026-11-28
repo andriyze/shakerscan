@@ -6,10 +6,10 @@ response must show:
 * template injection: the product of two random numbers, written in a template expression, appears
   in the response; the same numbers without template syntax produce no product;
 * path traversal: a traversal to a well-known file returns that file's signature; a traversal to a
-  file that does not exist does not;
+  file that does not exist does not, and neither do the file's words without the traversal;
 * command injection: a shell arithmetic expansion between two markers is echoed evaluated, or a
-  command substitution joins the two halves of a marker; or a one-second delay repeats over three
-  control/payload pairs;
+  command substitution joins the two halves of a marker; or a delay follows the number of
+  seconds asked for (none, one, two) in a mixed order, with the same answer each time;
 * XML external entity: an entity declared in an injected document type is expanded into the
   response, and an external entity returns a well-known file's signature;
 * server-side request forgery: the application, given its own loopback address as a URL, returns
@@ -39,7 +39,10 @@ except ModuleNotFoundError:  # package import layout
 
 try:
     from capabilities.sqli_path_mutation import path_field_value, prepare_path_candidate
-    from capabilities.sqli_proof import SQLiProofError, _field_value, _mutate
+    from capabilities.sqli_proof import (
+        SQLiProofError, _field_value, _mixed_order, _mutate, _reflection_free_key,
+        _reflection_variants,
+    )
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from runtime.auth_refusal import refusal_error, request_refusal
     from runtime.capability_registry import CapabilitySpec
@@ -47,7 +50,10 @@ try:
     from runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
 except ModuleNotFoundError:
     from .sqli_path_mutation import path_field_value, prepare_path_candidate
-    from .sqli_proof import SQLiProofError, _field_value, _mutate
+    from .sqli_proof import (
+        SQLiProofError, _field_value, _mixed_order, _mutate, _reflection_free_key,
+        _reflection_variants,
+    )
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..runtime.auth_refusal import refusal_error, request_refusal
     from ..runtime.capability_registry import CapabilitySpec
@@ -96,6 +102,8 @@ _TRAVERSALS_UNIX = (
 _TRAVERSALS_WINDOWS = (
     ("dot_dot_backslash", "..\\..\\..\\..\\..\\..\\..\\..\\windows\\win.ini"),
 )
+# The words of a traversal: ``etc`` and ``passwd``, ``windows`` and ``win.ini``, a URL's ``file``.
+_PATH_WORD = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)*")
 # A file signature is structure, not a word: the account line of ``root`` and the section
 # headers ``win.ini`` has carried since Windows 3.
 _FILE_SIGNATURES = {
@@ -120,6 +128,10 @@ _COMMAND_WRAPPERS_WINDOWS = (
     ("cmd_pipe", "|%s"),
 )
 _TIME_SCREEN_MS = 750
+# The blind confirmation after a screen that delayed: no delay three times, one second twice and
+# two seconds twice, sent in a seeded mixed order (sqli_proof._mixed_order).
+_TIME_CONFIRMATION = ("control",) * 3 + ("one",) * 2 + ("two",) * 2
+_TIME_SECONDS = {"control": 0, "one": 1, "two": 2}
 # Loopback spellings of the application's own address. A URL parameter that fetches any of them
 # reaches an interface no outside client can.
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -136,6 +148,11 @@ _XML_TYPES = ("application/xml", "text/xml", "+xml")
 
 class InjectionVerifyError(ValueError):
     """An injection verification request does not match immutable candidate authority."""
+
+
+class _FieldNotMutable(InjectionVerifyError):
+    """The request holds no such field in a form this class can rewrite (an XML body, a
+    multipart one): the class does not apply to the candidate, and the next class still runs."""
 
 
 def _content_type(request: ReplayRequest) -> str:
@@ -205,7 +222,9 @@ def _ssrf_reference_chunks(page: bytes, *others: bytes) -> list[bytes]:
     return chunks
 
 
-Send = Callable[[ReplayRequest], Awaitable[ReplayTransportResult]]
+# ``send(request, minimum_seconds=...)``: the keyword keeps a request that is meant to take
+# seconds from being cut off by an even split of the wall.
+Send = Callable[..., Awaitable[ReplayTransportResult]]
 
 
 class InjectionVerifyAdapter:
@@ -239,6 +258,15 @@ class InjectionVerifyAdapter:
         unknown = [name for name in classes if name not in INJECTION_CLASSES]
         if unknown:
             raise InjectionVerifyError(f"unknown injection class: {unknown[0]}")
+        # A GraphQL query sent by POST is a read; a mutation is not.
+        writes = request.method not in {"GET", "HEAD", "OPTIONS"} and not (
+            field.startswith("graphql:") and candidate.get("request_class") == "safe_read")
+        if writes and int(requested_budget.get("state_changing_requests") or 0) < MINIMUM_REQUESTS:
+            # Every request of a write candidate may write: it is sent only against a
+            # state-changing hold, which then bounds it (execute spends no more than the hold).
+            raise InjectionVerifyError(
+                "injection verification of a write requires a state-changing request reservation"
+            )
         self.specification = specification
         self.target = target
         try:
@@ -250,9 +278,10 @@ class InjectionVerifyAdapter:
         self.requested_budget = {str(k): int(v) for k, v in requested_budget.items()}
         self.field = field
         self.classes = tuple(classes)
-        # A GraphQL query sent by POST is a read; a mutation is not.
-        self.writes = self.request.method not in {"GET", "HEAD", "OPTIONS"} and not (
-            field.startswith("graphql:") and self.candidate.get("request_class") == "safe_read")
+        self.writes = writes
+        # Wall seconds left of the reservation; set by execute for the stage that must fit
+        # several seconds of deliberate delay inside it.
+        self._wall_left: Callable[[], float] = lambda: math.inf
         self.seed = f"{self.candidate.get('candidate_id') or ''}:{field}"
 
     # -- request building -------------------------------------------------------------------
@@ -261,7 +290,7 @@ class InjectionVerifyAdapter:
         try:
             return _mutate(self.request, self.field, value, path_index=self.path_index)
         except SQLiProofError as exc:
-            raise InjectionVerifyError(str(exc)) from exc
+            raise _FieldNotMutable(str(exc)) from exc
 
     def _original(self) -> str:
         if self.path_index is not None:
@@ -270,7 +299,8 @@ class InjectionVerifyAdapter:
 
     def _spent(self, started: float, attempted: int) -> dict[str, int]:
         spent = {"http_requests": attempted}
-        if "state_changing_requests" in self.requested_budget and self.writes:
+        if self.writes:
+            # Every request of a write candidate is counted as one, whatever it did.
             spent["state_changing_requests"] = attempted
         reserved = self.requested_budget.get("tool_wall_seconds")
         if reserved is not None:
@@ -350,7 +380,8 @@ class InjectionVerifyAdapter:
             return self._observation("path_traversal", inconclusive_reason="marker_in_baseline")
         missing = _marker(self.seed, "missing")
         for name, traversal in (*_TRAVERSALS_UNIX, *_TRAVERSALS_WINDOWS):
-            if left() < 3:
+            # The probe, its repeat and the two controls.
+            if left() < 4:
                 break
             probe = await send(self._with(traversal))
             signature = None if probe.error_code else _signature(probe.response_body)
@@ -361,17 +392,25 @@ class InjectionVerifyAdapter:
             # request with a page showing such a file is not reading the one that was named.
             leaf = "passwd" if "passwd" in traversal else "win.ini"
             control = await send(self._with(traversal.replace(leaf, missing)))
+            # The file's own words with no traversal and no path: a search over documentation
+            # finds the page that quotes the file for ``etc passwd`` as it does for
+            # ``../../etc/passwd``, and finds nothing for the missing name above. Nothing reads a
+            # file from these words.
+            words = await send(self._with(" ".join(_PATH_WORD.findall(traversal))))
             if (
-                not repeat.error_code and not control.error_code
+                not repeat.error_code and not control.error_code and not words.error_code
                 and _signature(repeat.response_body) == signature
                 and _signature(control.response_body) is None
+                and _signature(words.response_body) is None
             ):
                 return self._observation(
                     "path_traversal",
                     proof_contract=PROOF_CONTRACTS["path_traversal"],
                     technique=f"file_signature_{name}_repeated",
                     payload_shape=traversal, file_signature=signature,
-                    response_pairs=[_pair(control, probe), _pair(control, repeat)],
+                    response_pairs=[
+                        _pair(control, probe), _pair(control, repeat), _pair(words, probe),
+                    ],
                 )
         return self._observation("path_traversal")
 
@@ -470,36 +509,89 @@ class InjectionVerifyAdapter:
                     response_pairs=[_pair(control, probe), _pair(control, repeat)],
                 )
         # Blind: nothing is echoed, so the only signal is time. One screening request per wrapper;
-        # a wrapper that delays is confirmed over three control/payload pairs, as SQL injection is.
+        # a wrapper that delays is confirmed once, by _confirm_delay.
         quiet_ms = baseline.elapsed_ms
         for name, wrapper in _COMMAND_WRAPPERS:
-            if left() < 7:
+            if left() < 1 + len(_TIME_CONFIRMATION):
                 break
-            delayed = self._with(original + wrapper % "sleep 1")
-            screen = await send(delayed)
+            screen = await send(
+                self._with(original + wrapper % "sleep 1"), minimum_seconds=quiet_ms / 1000 + 3,
+            )
             if screen.error_code or screen.elapsed_ms - quiet_ms < _TIME_SCREEN_MS:
                 continue
-            # The control is the same payload with no delay, not the unchanged value: an
-            # endpoint that is slow for any unusual input (a failed name lookup, a validation
-            # path) is as slow for ``sleep 0`` and shows no difference.
-            control_request = self._with(original + wrapper % "sleep 0")
-            pairs = [(await send(control_request), await send(delayed)) for _ in range(3)]
-            control_ms = sorted(pair[0].elapsed_ms for pair in pairs)
-            payload_ms = sorted(pair[1].elapsed_ms for pair in pairs)
-            if (
-                all(not control.error_code and not payload.error_code for control, payload in pairs)
-                and payload_ms[1] - control_ms[1] >= 750
-                and payload_ms[0] - control_ms[2] >= 500
-            ):
-                return self._observation(
-                    "command_injection",
-                    proof_contract=PROOF_CONTRACTS["command_injection_time"],
-                    technique=f"time_median_{name}_repeated",
-                    payload_shape="<original>" + wrapper % "sleep 1", repetitions=3,
-                    timing_ms={"control_median": control_ms[1], "payload_median": payload_ms[1]},
-                    response_pairs=[_pair(control, payload) for control, payload in pairs],
-                )
-            break  # one confirmation per candidate: a slow route is not retried per wrapper
+            # One confirmation per candidate: a slow route is not retried per wrapper.
+            return await self._confirm_delay(send, name, wrapper, original, quiet_ms)
+        return self._observation("command_injection")
+
+    async def _confirm_delay(
+        self, send: Send, name: str, wrapper: str, original: str, quiet_ms: int,
+    ) -> dict[str, Any]:
+        """Is the delay the command's? Seven requests after a screen that delayed.
+
+        ``sleep 0`` three times, ``sleep 1`` twice and ``sleep 2`` twice. The control is the same
+        payload with no delay, not the unchanged value: an endpoint that is slow for any unusual
+        input (a failed name lookup, a validation path) is as slow for ``sleep 0``. Elapsed time
+        alone proved too little, so three more things must hold:
+
+        * the order is mixed, not control/payload in turn: two replicas of which one is slower
+          answer an alternating sequence exactly as a delay would;
+        * every answer has the control's status, and the control's body once the echoed payload
+          is removed (when the controls agree among themselves): a firewall that holds a request
+          carrying ``sleep 1`` and then refuses it is slow on every payload and on no control;
+        * two seconds take about a second longer than one: something that penalises the
+          payload by a fixed time does not follow the number.
+        """
+        seconds = quiet_ms / 1000
+        if self._wall_left() < 7 * seconds + 2 * 1 + 2 * 2 + 2:
+            # The reservation cannot hold the delays themselves: a timeout would be read as no.
+            return self._observation(
+                "command_injection", inconclusive_reason="time_proof_wall_unfunded",
+            )
+        values = {
+            label: original + wrapper % f"sleep {delay}" for label, delay in _TIME_SECONDS.items()
+        }
+        sent: dict[str, list[ReplayTransportResult]] = {label: [] for label in values}
+        for label in _mixed_order(f"{self.seed}:time:{name}", _TIME_CONFIRMATION):
+            sent[label].append(await send(
+                self._with(values[label]), minimum_seconds=seconds + _TIME_SECONDS[label] + 2,
+            ))
+        answers = [item for items in sent.values() for item in items]
+        control_ms, one_ms, two_ms = (
+            sorted(item.elapsed_ms for item in sent[label]) for label in ("control", "one", "two")
+        )
+        variants = _reflection_variants((original, *values.values()))
+        keys = {
+            label: [_reflection_free_key(item, variants) for item in items]
+            for label, items in sent.items()
+        }
+        same_answer = len({item.status_code for item in answers}) == 1 and (
+            # A page that differs from one control to the next (a clock, a token) has no body
+            # to compare with; its status still has to agree.
+            len(set(keys["control"])) > 1
+            or all(key == keys["control"][0] for key in (*keys["one"], *keys["two"]))
+        )
+        first_delay = one_ms[0] - control_ms[1]
+        second_delay = two_ms[0] - one_ms[0]
+        if (
+            all(not item.error_code for item in answers) and same_answer
+            and first_delay >= 750 and one_ms[0] - control_ms[2] >= 500
+            and two_ms[0] - one_ms[1] >= 500
+            and 0.6 * first_delay <= second_delay <= 1.5 * first_delay + 250
+        ):
+            return self._observation(
+                "command_injection",
+                proof_contract=PROOF_CONTRACTS["command_injection_time"],
+                technique=f"time_median_{name}_repeated",
+                payload_shape="<original>" + wrapper % "sleep <0|1|2>", repetitions=2,
+                timing_ms={
+                    "control_median": control_ms[1], "payload_median": one_ms[0],
+                    "longer_payload_median": two_ms[0],
+                },
+                response_pairs=[
+                    _pair(control, payload)
+                    for control, payload in zip(sent["control"] * 2, (*sent["one"], *sent["two"]))
+                ],
+            )
         return self._observation("command_injection")
 
     async def _xxe(
@@ -637,28 +729,40 @@ class InjectionVerifyAdapter:
         attempted = 0
         results: list[ReplayTransportResult] = []
         budget = self.requested_budget["http_requests"]
+        if self.writes:
+            # Every request of a write candidate spends the state-changing hold too: none is
+            # sent once that hold is used, whatever the request hold still allows.
+            budget = min(budget, int(self.requested_budget.get("state_changing_requests") or 0))
+        wall_reserved = "tool_wall_seconds" in self.requested_budget
+        wall = max(1, int(self.requested_budget.get("tool_wall_seconds") or 1))
+        self._wall_left = lambda: (
+            wall - (time.monotonic() - started) if wall_reserved else math.inf
+        )
 
         def left() -> int:
             return budget - attempted
 
-        async def send(request: ReplayRequest) -> ReplayTransportResult:
+        async def send(
+            request: ReplayRequest, *, minimum_seconds: float = 0.0,
+        ) -> ReplayTransportResult:
             nonlocal attempted
             if cancelled():
                 raise InjectionVerifyError("cancelled")
             if attempted >= budget:
                 raise InjectionVerifyError("budget_exhausted")
-            wall = max(1, int(self.requested_budget.get("tool_wall_seconds") or 1))
             # Split the wall that is left, not the whole reservation (as sqli_proof does).
             wall_left = wall - (time.monotonic() - started)
-            if "tool_wall_seconds" in self.requested_budget and wall_left < 0.5:
+            if wall_reserved and wall_left < 0.5:
                 raise InjectionVerifyError("deadline")
             remaining = max(1, budget - attempted)
+            timeout = max(0.5, min(15.0, wall_left / remaining))
+            if minimum_seconds > timeout:
+                # A deliberate delay gets the time it needs, never more than the wall has left.
+                timeout = max(0.5, min(15.0, minimum_seconds, wall_left if wall_reserved else 15.0))
             # Counted before it is sent: a request cut off in flight still reached the target.
             attempted += 1
             result = await self.transport.send(
-                request, target=self.target,
-                timeout_seconds=max(0.5, min(15.0, wall_left / remaining)),
-                follow_redirects=False,
+                request, target=self.target, timeout_seconds=timeout, follow_redirects=False,
             )
             results.append(result)
             await heartbeat()
@@ -668,6 +772,7 @@ class InjectionVerifyAdapter:
         observations: list[Mapping[str, Any]] = []
         refused: tuple[int, str] | None = None
         completed: list[str] = []
+        inapplicable: dict[str, str] = {}
         stages = {
             "template_injection": self._template_injection,
             "path_traversal": self._path_traversal,
@@ -687,14 +792,27 @@ class InjectionVerifyAdapter:
                         continue
                     if left() < 3:
                         break
-                    observations.append(await stages[name](send, baseline, left))
+                    try:
+                        observations.append(await stages[name](send, baseline, left))
+                    except _FieldNotMutable as exc:
+                        # This class cannot write its payload into this request (template
+                        # syntax into an XML body): the class does not apply here. One class
+                        # never ends the candidate; the next one runs.
+                        inapplicable[name] = str(exc)
+                        observations.append(self._observation(
+                            name, inapplicable_reason="field_not_mutable",
+                        ))
+                        continue
                     completed.append(name)
+            if inapplicable and not completed:
+                # No class could mutate the request: nothing was tested, as before.
+                raise InjectionVerifyError(next(iter(inapplicable.values())))
         except InjectionVerifyError as exc:
             reason = str(exc)
             timed_out = reason == "deadline"
             status = (
                 "cancelled" if reason == "cancelled"
-                else "partial" if timed_out or observations else "blocked"
+                else "partial" if timed_out or completed else "blocked"
             )
             return CapabilityAdapterResult(
                 status=status, observations=tuple(observations), errors=(reason,),
@@ -717,7 +835,10 @@ class InjectionVerifyAdapter:
         applicable = [
             name for name in self.classes if name != "xxe" or _is_xml(self.request)
         ]
-        classes_exhausted = refused is None and not errors and len(completed) < len(applicable)
+        classes_exhausted = (
+            refused is None and not errors
+            and len(completed) + len(inapplicable) < len(applicable)
+        )
         return CapabilityAdapterResult(
             status="partial" if errors or classes_exhausted else "success",
             observations=tuple(observations), errors=errors,
@@ -730,6 +851,7 @@ class InjectionVerifyAdapter:
                 "request_ref_id": self.candidate.get("request_ref_id"),
                 "method": self.request.method, "field_path": self.field,
                 "classes": completed,
+                **({"inapplicable_classes": sorted(inapplicable)} if inapplicable else {}),
                 "proof_contract": verified[0].get("proof_contract") if verified else None,
                 "secret_values_visible": False,
             },

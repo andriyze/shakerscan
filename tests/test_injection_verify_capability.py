@@ -292,10 +292,14 @@ def test_an_endpoint_that_strips_shell_syntax_and_reflects_is_not_command_inject
     assert result.observations[0]["proof_state"] == "not_proven"
 
 
-def test_blind_command_injection_is_proven_by_a_repeated_delay():
-    transport = Recorder(lambda request, value: _answer(
-        request, b"ok", elapsed_ms=1100 if "|sleep 1" in value else 15,
-    ))
+def _blind_shell(request, value):
+    """Runs what follows a pipe and shows nothing: the answer takes as long as the sleep asks."""
+    slept = re.search(r"\|sleep (\d+)$", value)
+    return _answer(request, b"ok", elapsed_ms=15 + (1000 * int(slept.group(1)) if slept else 0))
+
+
+def test_blind_command_injection_is_proven_by_a_delay_that_follows_the_seconds_asked_for():
+    transport = Recorder(_blind_shell)
     result = _run(
         _request(url="https://app.example.test/render?q=127.0.0.1"), _candidate(), transport,
         classes=("command_injection",),
@@ -303,8 +307,19 @@ def test_blind_command_injection_is_proven_by_a_repeated_delay():
     proof = result.observations[0]
     assert proof["proof_state"] == "verified"
     assert proof["proof_contract"] == PROOF_CONTRACTS["command_injection_time"]
-    assert proof["repetitions"] == 3 and len(proof["response_pairs"]) == 3
-    assert proof["timing_ms"]["payload_median"] - proof["timing_ms"]["control_median"] >= 750
+    # No delay three times, one second twice, two seconds twice: each delay is repeated.
+    assert proof["repetitions"] == 2 and len(proof["response_pairs"]) == 4
+    timing = proof["timing_ms"]
+    assert timing["payload_median"] - timing["control_median"] >= 750
+    assert timing["longer_payload_median"] - timing["payload_median"] >= 750
+    confirmation = [value[-1] for value in transport.values if "|sleep" in value][1:]
+    assert sorted(confirmation) == ["0", "0", "0", "1", "1", "2", "2"]
+    # Not control, payload, control, payload: nothing with a period lines up with the order.
+    for period in range(2, 7):
+        assert any(
+            confirmation[first] != confirmation[second]
+            for first in range(7) for second in range(first + period, 7, period)
+        ), period
 
 
 def test_one_slow_answer_is_not_command_injection():

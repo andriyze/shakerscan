@@ -25,7 +25,9 @@ from hunt.action_replay import execution_started_from_budget, replay_observation
 from hunt.candidate_verification_preflight import (
     CandidateVerificationRefused, verification_service_origin, web_candidate_preflight,
 )
+from hunt import injection_proof
 from hunt.device_traffic import reserve_device_traffic
+from hunt.verification_budget import web_candidate_budget
 from hunt.distinct_accounting import distinct_charge
 from hunt.port_accounting import distinct_port_charge
 from runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
@@ -208,7 +210,8 @@ def admission(store, **overrides):
         "CredentialReferenceError": CredentialReferenceError,
         "select_hunt_immediate_principal_reference": select_hunt_immediate_principal_reference,
         "family_proof": SimpleNamespace(canonical_family=lambda family: family),
-        "web_candidate_budget": lambda family: {}, "_AGENT_MUTATING_VERIFY_FAMILIES": frozenset(),
+        "web_candidate_budget": lambda family, candidate=None: {}, "_AGENT_MUTATING_VERIFY_FAMILIES": frozenset(),
+        "injection_proof": injection_proof,
         "PostgresBudgetReservationStore": ReservationStore,
         "reserve_device_traffic": reserve_device_traffic,
         "require_http_request_authority": require_http_request_authority,
@@ -443,3 +446,17 @@ def test_a_network_candidate_must_name_its_service_on_the_target_host(locus, adm
     assert error.value.status_code == 422
     assert error.value.detail["reason_code"] == "verification_service_unresolved"
     assert store.run["budget_used_json"] == {"verifications": 0} and not store.actions
+
+
+def test_an_injection_proof_that_writes_needs_the_state_changing_authority_at_admission():
+    """A GraphQL document that is not one query (a mutation, also behind a leading fragment) is
+    sent as writes: admission refuses it without ``allow_state_changing_http`` and holds nothing."""
+    for operation in ('mutation{importPaste(host:"h"){result}}',
+                      'fragment F on P{id} mutation{importPaste(host:"h"){result}}'):
+        store = AdmissionStore()
+        store.candidate = {"status": "new", "family": "command_injection", "canonical_locus": {
+            "route": "/graphql", "method": "POST", "parameter": "host", "operation": operation}}
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(call(store, name="candidate.verify", web_candidate_budget=web_candidate_budget))
+        assert refused.value.status_code == 403 and "state-changing" in refused.value.detail
+        assert not store.actions and not store.run["budget_used_json"].get("verifications")

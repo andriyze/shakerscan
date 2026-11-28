@@ -43,7 +43,9 @@ def test_compiler_emits_a_local_injection_batch_when_the_family_is_named():
     action = next(a for a in plan.actions if a.capability_name == "injection.verify_batch")
     assert list(action.placement["eligible_backends"]) == ["local"]
     assert action.action_id.startswith("verify.server_injection")
-    # Query candidates are read with GET: no write is reserved for them.
+    # State-changing HTTP is not authorized in this plan: no write is sent, none is reserved.
+    # (With the authority a slice holds what its body candidates may send: see
+    # test_an_injection_slice_holds_the_writes_of_the_body_candidates_it_holds.)
     assert "state_changing_requests" not in action.requested_budget
     _plan, others = capabilities(("xss", "sqli"))
     assert "injection.verify_batch" not in others
@@ -52,6 +54,103 @@ def test_compiler_emits_a_local_injection_batch_when_the_family_is_named():
     _plan, unnamed = capabilities((), exclude=("nuclei_passive", "nuclei_active"))
     assert "injection.verify_batch" not in unnamed
     assert "nosqli.verify_batch" in unnamed
+
+
+def _injection_slices(**shape):
+    from tests.scan_round_fixtures import (
+        admitted_round_fixture, appended_actions, compile_round, settle_round,
+    )
+
+    fixture = admitted_round_fixture(
+        "balanced", families=("recon", "nuclei_passive", "server_injection"), **shape,
+    )
+    settle_round(fixture)
+    parent_count = len(fixture["parent_plan"].actions)
+    return [
+        action for action in appended_actions(compile_round(fixture, 1), parent_count)
+        if action.capability_name == "injection.verify_batch"
+    ]
+
+
+def test_an_injection_slice_holds_the_writes_of_the_body_candidates_it_holds():
+    """A body candidate is sent as POST/PUT writes once state-changing HTTP is authorized. The
+    slice held requests only, so those writes settled as plain requests and a lowered
+    max_state_changing_requests did not bound them (budget is reserved before execution)."""
+    mixed, = _injection_slices(endpoints=3, queries=2, body=1)
+    assert dict(mixed.capability_args["slice"]) == {"start": 0, "count": 3}
+    assert mixed.requested_budget["http_requests"] == 120
+    # One candidate's share of the request hold for the one body candidate.
+    assert mixed.requested_budget["state_changing_requests"] == 40
+    bodies, = _injection_slices(endpoints=4, queries=0, body=3)
+    assert bodies.requested_budget["state_changing_requests"] == bodies.requested_budget["http_requests"] == 120
+    # A slice of query candidates is read with GET: it holds no write.
+    queries, = _injection_slices(endpoints=3, queries=3, body=0)
+    assert "state_changing_requests" not in queries.requested_budget
+    # Without the authority no body candidate is sent, and nothing is held.
+    unauthorized, = _injection_slices(endpoints=3, queries=2, body=1, state_changing=False)
+    assert "state_changing_requests" not in unauthorized.requested_budget
+
+
+def test_the_injection_write_hold_by_slice_composition():
+    from api.scan.action_plan import injection_slice_write_hold
+
+    digest = "d" * 64
+    args = {"candidate_manifest_ref": {"manifest_digest": digest}, "slice": {"start": 2, "count": 4}}
+    budget = {"http_requests": 160, "state_changing_requests": 160, "tool_wall_seconds": 160}
+    assert injection_slice_write_hold(args, budget, (digest, frozenset({0, 1}))) == 0
+    assert injection_slice_write_hold(args, budget, (digest, frozenset({1, 2, 5, 6}))) == 80
+    assert injection_slice_write_hold(args, budget, (digest, frozenset(range(10)))) == 160
+    # Unknown composition (no positions, or another manifest's): one candidate's share, and the
+    # adapter sends no write past it.
+    assert injection_slice_write_hold(args, budget, None) == 40
+    assert injection_slice_write_hold(args, budget, ("e" * 64, frozenset({2}))) == 40
+    # The registry declares the dimension the adapter binds.
+    assert CAPABILITY_REGISTRY.require("injection.verify_batch").budget_cost["state_changing_requests"] > 0
+
+
+def test_family_coverage_says_which_injection_classes_no_candidate_was_examined_for():
+    """A Scan whose candidates hold no XML body completes the family without one XXE probe.
+    The family row names the classes that were not examined instead of reading as all five."""
+    from api.scan.action_plan import ScanActionPlan
+    from api.scan.finalizer import finalize_scan_report, injection_class_coverage
+    from tests.test_scan_finalizer import _result_with_observation_count
+    from tests.test_scan_orchestrator import SCAN_ID, _action
+
+    def tried(injection_class, candidate, **changes):
+        return _proof(injection_class, None, proof_state="not_proven", finding_verdict="not_proven",
+                      candidate_id=candidate, **changes)
+
+    verify = _action("verify.server_injection", 0, capability_name="injection.verify_batch")
+    final = _action("finalize.report", 1, dependencies=(verify.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(verify, final),
+    )
+    observations = (
+        tried("template_injection", "get-1"), tried("command_injection", "get-1"),
+        tried("path_traversal", "get-1"), tried("ssrf", "get-1", inconclusive_reason="no_reference_page"),
+        _proof("template_injection", "injection_template_differential/v1", candidate_id="get-2"),
+        # A POST: no traversal through a write, and template syntax could not be written in.
+        tried("template_injection", "post-1", inapplicable_reason="field_not_mutable"),
+        tried("path_traversal", "post-1", inconclusive_reason="not_a_read"),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={verify.action_id: _result_with_observation_count(verify, len(observations))},
+        observations={verify.action_id: observations},
+    )
+    row, = [item for item in report["coverage"]["family_coverage"] if item["family"] == "server_injection"]
+    assert row["injection_classes_not_examined"] == ["ssrf", "xxe"]
+    assert row["injection_classes"]["template_injection"] == {
+        "examined_candidates": 2, "not_examined_candidates": 1,
+    }
+    assert row["injection_classes"]["path_traversal"] == {
+        "examined_candidates": 1, "not_examined_candidates": 1,
+    }
+    assert row["injection_classes"]["xxe"] == {"examined_candidates": 0, "not_examined_candidates": 0}
+    # An XML candidate whose entity probes ran makes the class examined.
+    with_xml = injection_class_coverage((*observations, tried("xxe", "xml-1", internal_entities_expanded=True)))
+    assert with_xml["injection_classes_not_examined"] == ["ssrf"]
 
 
 def _proof(injection_class, contract, **changes):

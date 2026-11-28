@@ -8,7 +8,7 @@ import re
 import urllib.parse
 from collections import Counter
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from . import scoring
 from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
@@ -398,6 +398,39 @@ _JWT_FINDINGS: Mapping[str, tuple[str, str, str]] = {
     ),
 }
 
+
+
+def _jwt_severity(item: Mapping[str, Any]) -> tuple[str, str]:
+    """``(severity, why)`` of a token-forgery proof.
+
+    Critical is for a token the application accepted: whoever can make one can be any user it
+    has. A guessable secret reproduced from the signature is proven offline, without a request;
+    when the token signed with it was refused, or no request was left to send it, acceptance
+    was not shown and the finding is high.
+    """
+    if item.get("technique") != "jwt_weak_hmac_secret_reproduced":
+        return "critical", (
+            "The application accepted a token this check altered: whoever can make a token it "
+            "accepts can be any user it has."
+        )
+    if item.get("forged_token_accepted") is True:
+        return "critical", (
+            "The secret was reproduced from the token's signature and the application accepted "
+            "a token signed with it: whoever knows the secret can be any user it has."
+        )
+    if item.get("forged_token_accepted") is False:
+        return "high", (
+            "The secret was reproduced offline from the token's signature. A token signed with "
+            "it was sent twice and refused, so the application accepting a forged token was not "
+            "shown: high, not critical."
+        )
+    return "high", (
+        "The secret was reproduced offline from the token's signature. No token signed with it "
+        "was sent (no request was left for it), so the application accepting a forged token "
+        "was not shown: high, not critical."
+    )
+
+
 # injection.verify_batch: (title, severity, CWE, why it is verified) by injection class.
 _INJECTION_FINDINGS: Mapping[str, tuple[str, str, str, str]] = {
     "template_injection": (
@@ -495,6 +528,55 @@ try:
     from scanner_tools.corporate_identity import corporate_surface as _corporate_surface
 except ModuleNotFoundError:
     from scanner.scanner_tools.corporate_identity import corporate_surface as _corporate_surface
+
+
+def injection_class_coverage(observations: Iterable[Any]) -> dict[str, Any]:
+    """Per injection class, how many candidates ``injection.verify_batch`` examined for it.
+
+    A candidate counts for a class when the class's probes were sent and compared: its
+    observation is verified, or carries no reason it could not be judged (``not_a_read``, a
+    body the class cannot be written into, a marker already in the page). A class no candidate
+    was examined for is named in ``injection_classes_not_examined``.
+    """
+    examined = {name: set() for name in _INJECTION_FINDINGS}
+    skipped = {name: set() for name in _INJECTION_FINDINGS}
+    for item in observations:
+        if not isinstance(item, Mapping) or item.get("kind") != "injection_proof":
+            continue
+        name = item.get("injection_class")
+        if name not in examined:
+            continue
+        candidate = str(item.get("candidate_id") or item.get("attempt_id") or "")
+        judged = item.get("proof_state") == "verified" or not (
+            item.get("inconclusive_reason") or item.get("inapplicable_reason")
+        )
+        (examined if judged else skipped)[name].add(candidate)
+    return {
+        "injection_classes": {
+            name: {
+                "examined_candidates": len(examined[name]),
+                "not_examined_candidates": len(skipped[name] - examined[name]),
+            }
+            for name in sorted(examined)
+        },
+        "injection_classes_not_examined": sorted(
+            name for name, candidates in examined.items() if not candidates
+        ),
+    }
+
+
+def _with_jwt_severity_basis(finding: dict[str, Any]) -> dict[str, Any]:
+    """A token-forgery finding's severity basis says why it has its severity.
+
+    The calibration records one reason per producer, and this producer's is written for a
+    function anonymous users can call. A forged-token finding states its own: accepted
+    (critical), or a secret reproduced offline whose token was refused or not sent (high).
+    """
+    evidence = finding.get("evidence")
+    reason = evidence.pop("jwt_severity_reason", None) if isinstance(evidence, dict) else None
+    if reason and isinstance(evidence.get("severity_basis"), dict):
+        evidence["severity_basis"] = {**evidence["severity_basis"], "reason": reason}
+    return finding
 
 
 def _base_finding(
@@ -1711,11 +1793,13 @@ def _findings_for_action(
             and item.get("technique") in _JWT_FINDINGS
         ):
             title, cwe, reason = _JWT_FINDINGS[item["technique"]]
+            jwt_severity, jwt_severity_reason = _jwt_severity(item)
             finding = _base_finding(
                 tool="shakerscan_authz_surface", title=title,
-                # Whoever can make a token the application accepts can be any user it has.
-                severity="critical", cwe=cwe, url=item.get("request_url"),
+                severity=jwt_severity, cwe=cwe, url=item.get("request_url"),
                 evidence={
+                    # Read by _with_jwt_severity_basis once the calibration has run.
+                    "jwt_severity_reason": jwt_severity_reason,
                     "route_id": item.get("route_id"),
                     "request_url": item.get("request_url"),
                     "technique": item.get("technique"),
@@ -2059,7 +2143,7 @@ def _findings_for_action(
             })
             findings.append(finding)
     # One calibrated severity per class, with its reason kept in the evidence.
-    return calibrate_findings(findings)
+    return [_with_jwt_severity_basis(finding) for finding in calibrate_findings(findings)]
 
 
 def exposure_path(url: Any) -> str:
@@ -3750,6 +3834,16 @@ def finalize_scan_report(
             if outcomes:
                 row["budget_inconclusive_candidates"] = outcomes
                 row["_slow_endpoints"].extend(item["url"] for item in outcomes)
+        if family == "server_injection":
+            # The family is five classes and a candidate is not tested for all of them: XML
+            # external entities need an XML request body, a traversal a read. Stated per class,
+            # so a complete family with no XML candidate does not read as XXE examined.
+            row.update(injection_class_coverage(
+                item
+                for action in expected_actions
+                if action.capability_name == "injection.verify_batch"
+                for item in observations.get(action.action_id, ())
+            ))
         sign_in_limited = row.pop("_sign_in_limited", [])
         proofs_attempted = row.pop("_proofs_attempted", set())
         proofs_paced_out = [

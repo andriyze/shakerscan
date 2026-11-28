@@ -132,10 +132,12 @@ _BATCH_ATTEMPT_COSTS: Mapping[str, Mapping[str, int]] = {
     # Per manifest entry: most routes have no redirect-named parameter and cost nothing; one
     # that has costs one GET per parameter (open_redirect.MAX_PARAMETERS_PER_ROUTE at most).
     "redirect.verify_batch": {"http_requests": 1, "tool_wall_seconds": 1},
-    # The baseline, then per class a handful of probes, the repeat and the control: template
-    # syntaxes (6), traversals (5), command wrappers (9) and their blind screen (7), and for a
+    # The baseline, then per class a handful of probes, the repeat and the controls: template
+    # syntaxes (6), traversals (5), command wrappers (11) and their blind screen (7), and for a
     # read the two reference pages and loopback addresses of the request-forgery check (8). A hit
-    # ends a class early; 40 requests cover every class on a candidate that has none of them.
+    # ends a class early (a traversal hit adds three requests, a blind delay seven); 40 requests
+    # cover every class on a candidate that has none of them. A slice of the candidate manifest
+    # holds the state-changing share of its body candidates only (injection_slice_write_hold).
     "injection.verify_batch": {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 40},
 }
 _BATCH_WALL_SHARE: Mapping[str, float] = {
@@ -338,6 +340,39 @@ def slice_body_mutation_hold(
         if name != "state_changing_requests" and int(amount) > 0
     ])
     return int(body_floor.get("state_changing_requests", 0)) * fundable
+
+
+def injection_slice_write_hold(
+    capability_args: Mapping[str, Any],
+    budget: Mapping[str, int],
+    body_positions: tuple[str, frozenset[int]] | None,
+) -> int:
+    """The state-changing hold of one ``injection.verify_batch`` slice of the candidate manifest.
+
+    The verifier sends a body candidate as POST or PUT writes once state-changing HTTP is
+    authorized, and every request of such a candidate is counted as a write. The slice
+    therefore holds one candidate's share of its request hold for each body candidate it holds,
+    and nothing when it holds none. When the slice's composition is unknown (no positions for
+    its manifest) it holds one candidate's share: the adapter sends no write past the hold, so a
+    body candidate the hold cannot fund is left unattempted rather than sent unaccounted.
+    Without this dimension the writes settled as plain requests and a lowered
+    ``max_state_changing_requests`` did not bound them.
+    """
+    requests = int(budget.get("http_requests", 0))
+    raw_slice = capability_args.get("slice")
+    count = max(1, int(raw_slice.get("count") or 0)) if isinstance(raw_slice, Mapping) else 1
+    share = max(1, -(-requests // count))
+    reference = capability_args.get("candidate_manifest_ref")
+    if (
+        body_positions is None
+        or not isinstance(reference, Mapping)
+        or str(reference.get("manifest_digest") or "") != body_positions[0]
+        or not isinstance(raw_slice, Mapping)
+    ):
+        return min(requests, share)
+    start = int(raw_slice.get("start") or 0)
+    bodies = sum(1 for index in range(start, start + count) if index in body_positions[1])
+    return min(requests, share * bodies)
 
 
 def slice_body_attempt_floor(
@@ -1733,10 +1768,24 @@ class ScanActionPlanCompiler:
                 ):
                     budget.pop("state_changing_requests", None)
                 if (
-                    blueprint.capability_name in {"nosqli.verify_batch", "injection.verify_batch"}
+                    blueprint.capability_name == "nosqli.verify_batch"
                     and "candidate_manifest_ref" in blueprint.capability_args
                 ):
                     budget.pop("state_changing_requests", None)
+                if (
+                    blueprint.capability_name == "injection.verify_batch"
+                    and "candidate_manifest_ref" in blueprint.capability_args
+                    and "state_changing_requests" in budget
+                ):
+                    # The slice's body candidates are sent as writes when the authority allows
+                    # them, so the slice holds what they may send; a slice of query candidates
+                    # holds none.
+                    write_hold = injection_slice_write_hold(
+                        blueprint.capability_args, budget, body_positions,
+                    )
+                    budget.pop("state_changing_requests", None)
+                    if write_hold > 0:
+                        budget["state_changing_requests"] = write_hold
                 if budget_sufficiency(execution_plan.budget_profile) and (
                     policy.allow_state_changing_http
                 ):
