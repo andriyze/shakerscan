@@ -5,7 +5,9 @@ into the agent's own configuration (user-wide or one project), so every session 
 
 Only that entry is ever changed. The rest of each file is kept byte for byte: JSON and JSONC are
 edited in place (comments, trailing commas, key order and formatting stay), and Codex's TOML
-table is replaced as a block. A file that cannot be read safely (malformed, not UTF-8, a symbolic
+table is replaced as a block that ends at its own last line (the comments and blank lines before
+the next table are that table's), with the result compared against the original, table by table,
+where this Python can read TOML. A file that cannot be read safely (malformed, not UTF-8, a symbolic
 or hard link, an entry defined in a form this does not edit) is refused with nothing written.
 Every changed file is backed up beside itself first, and written as a new file renamed into place
 (``_workspace.Root``), never through a link.
@@ -22,6 +24,8 @@ unreachable engine, a wrong path or the one-tool public mode are refused, not re
 from __future__ import annotations
 
 import argparse
+import copy
+import http.client
 import json
 import os
 import re
@@ -53,6 +57,8 @@ CODEX_STARTUP_SECONDS = 30
 CODEX_TOOL_SECONDS = 180
 PROTOCOL_VERSION = "2025-06-18"
 PROBE_SECONDS = 90.0
+# The most one HTTP answer may hold. A longer one is refused as such, never cut and parsed.
+MAX_RESPONSE_BYTES = 4_000_000
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _CHECKS = {
     "opencode": "start `opencode` and type /mcps",
@@ -65,6 +71,52 @@ _CHECKS = {
 
 class InstallError(Exception):
     """Refused; nothing was written."""
+
+
+class ResponseTooLarge(OSError):
+    """An HTTP answer longer than MAX_RESPONSE_BYTES: not read further, and not parsed."""
+
+    def __init__(self) -> None:
+        super().__init__(f"its answer is larger than {MAX_RESPONSE_BYTES} bytes")
+
+
+# What may go wrong on the wire; ``http.client`` raises its own (InvalidURL, IncompleteRead).
+HTTP_ERRORS = (urllib.error.URLError, OSError, http.client.HTTPException)
+
+# An endpoint's address is written into agent files, and agents expand placeholders in it
+# (``${NAME}``, ``{env:NAME}``, ``{file:PATH}``), so it holds nothing but plain URL characters.
+_URL_HOST = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?$")
+_URL_PATH = re.compile(r"^(?:/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})*)*$")
+_URL_QUERY = re.compile(r"^(?:[A-Za-z0-9._~=&-]|%[0-9A-Fa-f]{2})*$")
+
+
+def plain_https_url(url: str, *, scheme: str = "https") -> str | None:
+    """Why ``url`` is not a plain https address that is safe to write into an agent's file, or
+    None when it is one: https, a host (and port), a path and query of unreserved characters;
+    no user or password, backslash, space or control character, fragment, or ``$ { }``.
+    ``scheme``: the one required instead of https (a discovery document read over loopback http
+    names endpoints on that same origin)."""
+    if not isinstance(url, str) or not url:
+        return "it is empty"
+    if any(ord(char) <= 0x20 or ord(char) >= 0x7F for char in url):
+        return "it has a space, a control character or a non-ASCII character"
+    for char, name in (("\\", "a backslash"), ("$", "a `$`"), ("{", "a `{`"), ("}", "a `}`"), ("#", "a fragment")):
+        if char in url:
+            return f"it has {name}"
+    try:
+        parts = urllib.parse.urlsplit(url)
+        parts.port  # noqa: B018 - raises for a port that is not a number
+    except ValueError:
+        return "it is not a URL"
+    if parts.scheme != scheme:
+        return f"it is not {scheme}"
+    if "@" in parts.netloc:
+        return "it has a user name or password"
+    if not _URL_HOST.match(parts.netloc):
+        return "its host is not a plain host name"
+    if not _URL_PATH.match(parts.path) or not _URL_QUERY.match(parts.query):
+        return "its path or query has characters other than letters, digits and . _ ~ - / = & %"
+    return None
 
 
 # --- JSON and JSONC, edited in place -------------------------------------------------------------
@@ -309,9 +361,10 @@ def _insert(text: str, node: _Node, key: str, value: Any, unit: str) -> str:
 
 
 def jsonc_remove(text: str, path: Sequence[str]) -> str:
-    """``text`` without the member at ``path`` (unchanged when it is not there)."""
-    node = parse_jsonc(text)
-    parent = node
+    """``text`` without the member at ``path`` (unchanged when it is not there). A comment on the
+    removed member's own line goes with it; its neighbours' comments stay."""
+    root = parse_jsonc(text)
+    parent = root
     member = None
     for depth, key in enumerate(path):
         member = _member(parent, key, ".".join(path[:depth + 1]))
@@ -322,25 +375,63 @@ def jsonc_remove(text: str, path: Sequence[str]) -> str:
                 return text
             parent = member.node
     assert member is not None
+    result = _without_member(text, parent, member)
+    expected = copy.deepcopy(root.value)
+    holder = expected
+    for key in path[:-1]:
+        holder = holder[key]
+    del holder[path[-1]]
+    if parse_jsonc(result).value != expected:
+        raise JsoncError("removing the entry would change more than the entry; edit it by hand")
+    return result
+
+
+def _same_line_comment_end(text: str, index: int) -> int:
+    """``index`` moved past blanks and one comment that sits on the same line (``//`` up to, not
+    including, its newline; ``/* */`` when it closes on that line); else ``index`` itself."""
+    position = _skip_blanks(text, index)
+    if text.startswith("//", position):
+        newline = text.find("\n", position)
+        return len(text) if newline < 0 else newline
+    if text.startswith("/*", position):
+        close = text.find("*/", position + 2)
+        if close >= 0 and "\n" not in text[position:close]:
+            return close + 2
+    return index
+
+
+def _without_member(text: str, parent: _Node, member: _Member) -> str:
     members = parent.members
     index = members.index(member)
     if len(members) == 1:
         return text[:parent.start + 1] + text[parent.end - 1:]
+    parser = _Parser(text)
     if index < len(members) - 1:
-        return text[:member.key_start] + text[members[index + 1].key_start:]
+        following = members[index + 1].key_start
+        comma = parser.skip(member.node.end)  # this member's comma (a comment may sit before it)
+        end = _same_line_comment_end(text, comma + 1)
+        line_start = text.rfind("\n", 0, member.key_start) + 1
+        newline = text.find("\n", end)
+        if (not text[line_start:member.key_start].strip() and 0 <= newline < following
+                and not text[end:newline].strip()):
+            # The member has its own line(s): those lines go; what follows (a comment above the
+            # next member) stays as written.
+            return text[:line_start] + text[newline + 1:]
+        return text[:member.key_start] + text[min(_skip_blanks(text, end), following):]
     # The last member: drop the comma before it unless it had a trailing one of its own, and keep
     # a comment on the previous member's line.
-    comma = _skip_blanks(text, members[index - 1].node.end)
-    after = _skip_blanks(text, comma + 1)
-    if text.startswith("//", after):
-        newline = text.find("\n", after)
-        after = len(text) if newline < 0 else newline
-    else:
-        after = comma + 1
+    comma = parser.skip(members[index - 1].node.end)
+    after = _same_line_comment_end(text, comma + 1)
+    line_comment = text.startswith("//", _skip_blanks(text, comma + 1))
     end = _skip_blanks(text, member.node.end)
     if end < len(text) and text[end] == ",":
-        return text[:after] + text[end + 1:]
-    return text[:comma] + text[comma + 1:after] + text[member.node.end:]
+        head, tail = text[:after], text[end + 1:]
+    else:
+        head, tail = text[:comma] + text[comma + 1:after], text[member.node.end:]
+    if line_comment and tail.lstrip(" \t")[:1] not in ("\n", "\r", ""):
+        # What followed the member on its line (the closing brace) must not join the // comment.
+        tail = "\n" + _line_indent(text, parent.start) + tail.lstrip(" \t")
+    return head + tail
 
 
 def _skip_blanks(text: str, index: int) -> int:
@@ -400,12 +491,25 @@ def _toml_render(entry: Mapping[str, Any], name: str = SERVER) -> str:
     return f"[mcp_servers.{name}]\n" + "".join(f"{key} = {_toml_value(value)}\n" for key, value in entry.items())
 
 
+def _toml_own_end(lines: list[str], start: int, end: int) -> int:
+    """Where a table's own lines end: after its last line that is neither blank nor a comment.
+    The comments and the blank separator before the next header belong to that next table."""
+    while end > start + 1 and (not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("#")):
+        end -= 1
+    return end
+
+
 def _toml_owned(text: str, name: str = SERVER) -> tuple[list[str], list[tuple[int, int]]]:
     if '"""' in text or "'''" in text:
         if _tomllib is None:
             raise JsoncError("it has multi-line strings, which this Python (3.10) cannot check; edit it by hand")
     lines = text.splitlines(keepends=True)
-    owned = [(start, end) for start, end, key in _toml_blocks(lines) if key[:2] == ["mcp_servers", name]]
+    blocks = _toml_blocks(lines)
+    mine = [key[:2] == ["mcp_servers", name] for _start, _end, key in blocks]
+    # A table of the entry followed by another of its own (``.env``) runs up to it; the last one
+    # ends at its own last line.
+    owned = [(start, end if index + 1 < len(blocks) and mine[index + 1] else _toml_own_end(lines, start, end))
+             for index, (start, end, _key) in enumerate(blocks) if mine[index]]
     data = _toml_load(text)
     defined = isinstance(data, dict) and isinstance(data.get("mcp_servers"), dict) and name in data["mcp_servers"]
     if data is None:
@@ -432,11 +536,10 @@ def toml_set(text: str, entry: Mapping[str, Any], name: str = SERVER) -> str:
     block = _toml_render(entry, name)
     if owned:
         first = owned[0][0]
-        keep_gap = owned[0][1] < len(lines) and not lines[owned[0][1] - 1].strip()
         out = []
         for number, line in enumerate(lines):
             if number == first:
-                out.append(block + ("\n" if keep_gap else ""))
+                out.append(block)
             if any(start <= number < end for start, end in owned):
                 continue
             out.append(line)
@@ -448,20 +551,54 @@ def toml_set(text: str, entry: Mapping[str, Any], name: str = SERVER) -> str:
         if result.strip():
             result += "\n"
         result += block
-    check = _toml_load(result)
-    if check is not None and (check.get("mcp_servers") or {}).get(name) != dict(entry):
-        raise JsoncError("the edited file did not read back as expected; edit it by hand")
+    _toml_only_entry_changed(text, result, name, entry)
     return result
+
+
+def _toml_only_entry_changed(original: str, result: str, name: str, entry: Mapping[str, Any] | None) -> None:
+    """Refuse an edit after which anything but ``mcp_servers.<name>`` reads differently (a table
+    header inside another table's multi-line string, a value this did not mean to touch). Without
+    tomllib (Python 3.10) a file with multi-line strings was refused before any edit."""
+    before, after = _toml_load(original), _toml_load(result)
+    if before is None or after is None:
+        return
+    expected = copy.deepcopy(before)
+    servers = expected.get("mcp_servers")
+    if entry is None:
+        if isinstance(servers, dict):
+            servers.pop(name, None)
+    else:
+        if not isinstance(servers, dict):
+            servers = expected["mcp_servers"] = {}
+        servers[name] = dict(entry)
+
+    def tidy(document: dict) -> dict:
+        return {key: value for key, value in document.items() if not (key == "mcp_servers" and value == {})}
+
+    if tidy(after) != tidy(expected):
+        raise JsoncError("the edit would change more than the shakerscan entry; edit it by hand")
 
 
 def toml_remove(text: str, name: str = SERVER) -> str:
     lines, owned = _toml_owned(text, name)
     if not owned:
         return text
-    out = [line for number, line in enumerate(lines) if not any(s <= number < e for s, e in owned)]
-    result = re.sub(r"\n{3,}", "\n\n", "".join(out)).rstrip("\n") + "\n" if any(line.strip() for line in out) else ""
-    if _toml_load(result) is None and _tomllib is not None:
-        raise JsoncError("the edited file did not read back; edit it by hand")
+    out: list[str] = []
+    removed = False  # the last line looked at was removed: the next kept line is at a seam
+    for number, line in enumerate(lines):
+        if any(start <= number < end for start, end in owned):
+            removed = True
+            continue
+        # Blank lines only at the seam: one separator stays where the table was, never two.
+        if removed and not line.strip() and (not out or not out[-1].strip()):
+            continue
+        removed = False
+        out.append(line)
+    if removed:  # the table was the last thing in the file: its separator goes with it
+        while out and not out[-1].strip():
+            out.pop()
+    result = "".join(out)
+    _toml_only_entry_changed(text, result, name, None)
     return result
 
 
@@ -493,6 +630,7 @@ class Target:
     scope: str  # user | project
     path: Path | None  # None: Claude Code's user scope, written by its own CLI
     form: str  # opencode | claude | cursor | copilot | vscode | codex | claude-cli
+    project: Path | None = None  # project scope: the directory the person named
 
 
 def _home(environ: Mapping[str, str]) -> Path:
@@ -516,20 +654,20 @@ def target(client: str, project: Path | None, environ: Mapping[str, str]) -> Tar
     scope = "project" if project is not None else "user"
     if client == "opencode":
         base = project if project is not None else Path(environ.get("XDG_CONFIG_HOME") or home / ".config") / "opencode"
-        return Target(client, scope, _first_existing(base, ("opencode.jsonc", "opencode.json")), "opencode")
+        return Target(client, scope, _first_existing(base, ("opencode.jsonc", "opencode.json")), "opencode", project)
     if client == "claude":
         if project is not None:
-            return Target(client, scope, project / ".mcp.json", "claude")
+            return Target(client, scope, project / ".mcp.json", "claude", project)
         return Target(client, scope, None, "claude-cli")
     if client == "codex":
         base = project / ".codex" if project is not None else Path(environ.get("CODEX_HOME") or home / ".codex")
-        return Target(client, scope, base / "config.toml", "codex")
+        return Target(client, scope, base / "config.toml", "codex", project)
     if client == "cursor":
         base = project if project is not None else home
-        return Target(client, scope, base / ".cursor" / "mcp.json", "cursor")
+        return Target(client, scope, base / ".cursor" / "mcp.json", "cursor", project)
     if client == "vscode":
         if project is not None:
-            return Target(client, scope, project / ".vscode" / "mcp.json", "vscode")
+            return Target(client, scope, project / ".vscode" / "mcp.json", "vscode", project)
         base = Path(environ.get("COPILOT_HOME") or home / ".copilot")
         return Target(client, scope, base / "mcp-config.json", "copilot")
     raise InstallError(f"unknown client {client!r}")
@@ -632,6 +770,26 @@ def _same(left: Any, right: Any) -> bool:
 # --- reading and writing one file ----------------------------------------------------------------
 
 
+def refuse_linked_directory(target_: Target) -> None:
+    """In a project, the agent's own directory (``.codex``, ``.cursor``, ``.vscode``) comes with
+    the repository: one that is a symbolic link (``.codex -> ~/.codex``) would have this edit a
+    file outside the project the person named. The project directory itself is the person's."""
+    if target_.project is None or target_.path is None:
+        return
+    try:
+        inner = target_.path.parent.relative_to(target_.project).parts
+    except ValueError:
+        return
+    directory = target_.project
+    for part in inner:
+        directory = directory / part
+        if directory.is_symlink():
+            raise InstallError(
+                f"{directory} is a symbolic link (to {os.readlink(directory)}): writing {target_.path.name} there "
+                "would change a file outside this project. Replace the link with a directory, or register "
+                "the agent for the user instead (--user). Nothing was written.")
+
+
 def read_text(path: Path) -> tuple[str | None, int | None]:
     """(text, permission bits), (None, None) when the file is not there. A symbolic or hard link,
     anything but a plain file, or text that is not UTF-8 is refused."""
@@ -707,6 +865,7 @@ def plan_install(target_: Target, server: Server, major: Callable[[], int | None
             plan.wanted = None
         return plan
     assert target_.path is not None
+    refuse_linked_directory(target_)
     if after is not None:
         text = after.text if after.text is not None else after.original
         mode = after.mode
@@ -759,6 +918,7 @@ def plan_uninstall(target_: Target, environ: Mapping[str, str] | None = None) ->
         plan.current = plan.names or None
         return plan
     assert target_.path is not None
+    refuse_linked_directory(target_)
     text, mode = read_text(target_.path)
     plan.original, plan.mode = text, mode
     if not text or not text.strip():
@@ -831,12 +991,26 @@ def apply(plan: Plan) -> str:
             return f"{label}unchanged {plan.name} ({where})"
         if plan.current is not None:
             _claude(["mcp", "remove", "--scope", "user", plan.name])
-        _claude(["mcp", "add-json", "--scope", "user", plan.name, json.dumps(plan.wanted)])
+        try:
+            _claude(["mcp", "add-json", "--scope", "user", plan.name, json.dumps(plan.wanted)])
+        except InstallError as exc:
+            if plan.current is None:
+                raise
+            # The entry that was there was removed to make room: put it back.
+            previous = json.dumps(plan.current)
+            try:
+                _claude(["mcp", "add-json", "--scope", "user", plan.name, previous])
+            except InstallError:
+                raise InstallError(
+                    f"{exc}. The {plan.name} entry that was there had been removed and could not be put back; "
+                    f"restore it with: claude mcp add-json --scope user {plan.name} '{previous}'") from exc
+            raise InstallError(f"{exc}. The {plan.name} entry that was there was put back unchanged.") from exc
         return f"{label}registered {plan.name} in {where} (`claude mcp add-json --scope user`)"
     assert target_.path is not None
     if plan.text is None:
         state = "not registered in" if plan.removing else "unchanged:"
         return f"{label}{state} {target_.path}"
+    refuse_linked_directory(target_)
     backup = write_text(target_.path, plan.text, plan.mode, plan.original, target_.scope)
     verb = "removed from" if plan.removing else (
         f"{plan.name} updated in" if plan.current is not None else f"{plan.name} added to")
@@ -975,7 +1149,10 @@ def _http(method: str, url: str, body: bytes | None, headers: Mapping[str, str],
     opener = urllib.request.build_opener(_NoRedirect())
     try:
         with opener.open(request, timeout=timeout) as response:
-            return response.status, {k.lower(): v for k, v in response.headers.items()}, response.read(4_000_000)
+            body = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise ResponseTooLarge
+            return response.status, {k.lower(): v for k, v in response.headers.items()}, body
     except urllib.error.HTTPError as exc:
         return exc.code, {k.lower(): v for k, v in (exc.headers or {}).items()}, exc.read(65_536) if exc.fp else b""
 
@@ -1040,8 +1217,10 @@ def probe_http(url: str, token: str, timeout: float = 30.0, post=None) -> int:
             if not cursor:
                 break
         return count
-    except (urllib.error.URLError, OSError) as exc:
-        reason = getattr(exc, "reason", exc)
+    except ResponseTooLarge as exc:
+        raise InstallError(f"{url}: {exc}. Nothing was written.") from exc
+    except HTTP_ERRORS as exc:
+        reason = getattr(exc, "reason", None) or exc
         raise InstallError(f"cannot reach {url}: {reason}. Nothing was written.") from exc
 
 
@@ -1057,8 +1236,10 @@ def discover(base: str, get=None, timeout: float = 20.0) -> dict[str, Any]:
     url = base.rstrip("/") + DISCOVERY_PATH
     try:
         status, _headers, body = get(url, {"Accept": "application/json"}, timeout)
-    except (urllib.error.URLError, OSError) as exc:
-        raise InstallError(f"cannot reach {url}: {getattr(exc, 'reason', exc)}. Nothing was written.") from exc
+    except ResponseTooLarge as exc:
+        raise InstallError(f"{url}: {exc}. Nothing was written.") from exc
+    except HTTP_ERRORS as exc:
+        raise InstallError(f"cannot reach {url}: {getattr(exc, 'reason', None) or exc}. Nothing was written.") from exc
     if status != 200:
         raise InstallError(f"{url} answered HTTP {status}: no discovery document there. Pass the MCP endpoint's "
                            "own URL to --http instead. Nothing was written.")
@@ -1075,7 +1256,18 @@ def discover(base: str, get=None, timeout: float = 20.0) -> dict[str, Any]:
         raise InstallError(f"{url} lists no MCP server. Nothing was written.")
     found = []
     for item in listed:
-        endpoint = urllib.parse.urljoin(base.rstrip("/") + "/", str(item["url"]))
+        try:
+            endpoint = urllib.parse.urljoin(base.rstrip("/") + "/", str(item["url"]))
+        except ValueError:
+            endpoint = ""
+        # The address is the deployment's word and is written into agent files, which expand
+        # placeholders in it: nothing but a plain https URL on this origin is taken.
+        flaw = plain_https_url(endpoint, scheme=urllib.parse.urlsplit(base).scheme)
+        if any(ord(char) <= 0x20 or ord(char) >= 0x7F for char in str(item["url"])):
+            flaw = "it has a space, a control character or a non-ASCII character"  # urljoin drops tabs and newlines
+        if flaw is not None:
+            raise InstallError(f"{url} names an MCP server address that is not a plain URL ({flaw}): "
+                               f"{str(item['url'])[:200]!r}. Nothing was written.")
         if not cli.same_origin(endpoint, base):
             raise InstallError(f"{url} names an MCP server on another origin ({endpoint}); pass it to --http "
                                "yourself if you trust it. Nothing was written.")
@@ -1092,7 +1284,7 @@ def discover(base: str, get=None, timeout: float = 20.0) -> dict[str, Any]:
     api_url = document.get("api_url") if isinstance(document.get("api_url"), str) else None
     if api_url:
         api_url = urllib.parse.urljoin(base.rstrip("/") + "/", api_url).rstrip("/")
-        if not cli.same_origin(api_url, base) or urllib.parse.urlsplit(api_url).scheme != "https":
+        if plain_https_url(api_url) is not None or not cli.same_origin(api_url, base):
             api_url = None
     return {"servers": found, "api_url": api_url}
 
@@ -1126,10 +1318,18 @@ def http_servers(args: argparse.Namespace, environ: Mapping[str, str]) -> dict[s
     document names its engine API, the engine's own server (``engine``, or None and ``engine_note``)."""
     from . import cli
 
-    parts = urllib.parse.urlsplit(args.http)
+    try:
+        parts = urllib.parse.urlsplit(args.http)
+    except ValueError as exc:
+        raise InstallError(f"--http {args.http!r} is not a URL ({exc}). Nothing was written.") from exc
     if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.fragment:
         raise InstallError("--http needs an https:// address (a deployment, or its MCP endpoint) without credentials in it "
                            "(a bearer token is never sent over plain http). Nothing was written.")
+    flaw = plain_https_url(args.http)
+    if flaw is not None:
+        # Agents expand placeholders (${NAME}, {env:NAME}, {file:PATH}) in the address they are given.
+        raise InstallError(f"--http {args.http!r}: {flaw}. An endpoint's address is written into the agent's "
+                           "file as a plain https URL. Nothing was written.")
     if args.url or args.lan:
         raise InstallError("--http names the endpoint itself; leave out --url and --lan")
     variable = args.token_env or DEFAULT_TOKEN_ENV

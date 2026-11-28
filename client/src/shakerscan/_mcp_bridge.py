@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import json
 import re
-import urllib.error
 from collections.abc import Callable
 from typing import Any, BinaryIO
 
-from ._mcp_install import PROTOCOL_VERSION, http_post
+from ._mcp_install import HTTP_ERRORS, MAX_RESPONSE_BYTES, PROTOCOL_VERSION, ResponseTooLarge, http_post
 
 CALL_SECONDS = 300.0
 MAX_LINE_BYTES = 4_000_000
@@ -73,9 +72,17 @@ def serve(endpoint: str, token: str, stdin: BinaryIO, stdout: BinaryIO,
             headers["Mcp-Session-Id"] = session
         try:
             status, answer_headers, body = post(endpoint, json.dumps(message).encode("utf-8"), headers, timeout)
-        except (urllib.error.URLError, OSError) as exc:
+        except ResponseTooLarge:
+            # Never cut and parsed: the caller is told, and can ask for less.
             if ident is not None:
-                write(_error(ident, f"the deployment's MCP server is unavailable: {getattr(exc, 'reason', exc)}"))
+                write(_error(ident, f"the deployment's MCP server answered with more than {MAX_RESPONSE_BYTES} "
+                                    "bytes, which this bridge does not pass on; ask for less (a smaller page, "
+                                    "a narrower filter)"))
+            continue
+        except HTTP_ERRORS as exc:
+            if ident is not None:
+                write(_error(ident, "the deployment's MCP server is unavailable: "
+                                    f"{getattr(exc, 'reason', None) or exc}"))
             continue
         session = answer_headers.get("mcp-session-id", session)
         if status in (202, 204):
@@ -85,11 +92,17 @@ def serve(endpoint: str, token: str, stdin: BinaryIO, stdout: BinaryIO,
                 reason = "it refused the token" if status in (401, 403) else f"HTTP {status}"
                 write(_error(ident, f"the deployment's MCP server answered {reason}"))
             continue
+        answered = False
         for answer in _messages(answer_headers, body):
             result = answer.get("result")
             if isinstance(message, dict) and message.get("method") == "initialize" and isinstance(result, dict):
                 protocol = str(result.get("protocolVersion") or protocol)
+            answered = answered or (ident is not None and answer.get("id") == ident)
             write(answer)
+        if ident is not None and not answered and isinstance(message, dict) and "method" in message:
+            # A request always gets an answer: one that could not be read (cut short, not JSON) or
+            # that the endpoint left out is an error for that id, not silence.
+            write(_error(ident, "the deployment's MCP server sent no readable answer to this request"))
     return 0
 
 

@@ -355,6 +355,32 @@ When a Hunt needs something only a person can allow (a larger budget, a state-ch
 capability), the agent gives you a `shakerscan approve <id>` command. Run it in your own
 terminal, never inside the agent; see [Hunt permission requests](hunt-permission-requests.md).
 
+### Decisions only a person makes
+
+An agent registered this way was not started by `shakerscan agent`, so nothing in its environment
+says it is an agent. It can still run `shakerscan api` from its shell tool. For the requests that
+record a person's decision (authorizing a target, an approval receipt, dismissing a finding,
+sharing a credential, changing a trust anchor or an operator setting; `shakerscan catalog` lists
+them), `shakerscan api` therefore sends the request only when **stdin and stdout are both a
+terminal**, as `shakerscan approve` already requires. Anywhere else (an agent's shell tool, a pipe,
+a script) it sends nothing, prints the command for you to run in your own terminal and exits 3.
+Reads and the agent's own work (scans, Hunt capability calls, a `resolved` status) are unaffected.
+
+#### A person's own scripts
+
+A script of your own that records such a decision without a terminal (cron, CI, a pipeline that
+pipes the answer into `jq`) states that it is yours:
+
+```bash
+SHAKERSCAN_PERSON_SCRIPT=1 shakerscan api POST /targets/<target-id>/authorization '{"approved_by":"ci"}'
+```
+
+Set it on that command only, never in the environment an agent starts from. It has no effect
+inside an agent that `shakerscan agent` launched, which is always refused. On an open-source
+engine without authentication all of this is a guard rail for an agent that follows its
+instructions, not a security boundary: any process on the host can call the API directly.
+ShakerScan Enterprise enforces person decisions on the server.
+
 ## How this differs from `shakerscan agent`
 
 | | Permanent registration (this page) | `shakerscan agent opencode` |

@@ -367,8 +367,10 @@ answers `idempotency_request_in_progress`. Use one for any write that may outliv
 such as a 50-target batch.
 
 **A person's decisions are not sent from an agent.** Inside an agent that `shakerscan agent`
-launched (`SHAKERSCAN_AGENT_NAME` is set), `shakerscan api` refuses the requests that record a
-person's decision and sends nothing: allowing or denying a Hunt permission request, authorizing a
+launched (`SHAKERSCAN_AGENT_NAME` is set), or whenever its input and output are not both a
+terminal (an agent started on its own after `shakerscan mcp install` runs commands that way; see
+`docs/agent-mcp-setup.md` for a person's own scripts), `shakerscan api` refuses the requests that
+record a person's decision and sends nothing: allowing or denying a Hunt permission request, authorizing a
 target (or registering one with its authorization), raising a Hunt's budget, dismissing a finding
 or accepting its risk, recording or revoking an approval receipt, executing a deletion, revealing,
 granting or promoting a discovered secret, sharing a saved credential, accepting or rejecting an

@@ -4,7 +4,10 @@
 grouped tool takes an ``action`` (the way ``shakerscan_captures`` does), so the tool list stays
 short. Every call goes to an existing REST route with the server's own bounds, scope, authorization
 and budget checks; nothing here makes a person's decision. Text that comes from a target (titles,
-URLs, responses, evidence) is returned under ``untrusted_data``: data, never instructions.
+URLs, responses, evidence) is returned under ``untrusted_data``: data, never instructions. A flat
+row moves its target-written fields there (``envelope``); a record that nests what was observed
+on the target (a device's services and interfaces, a target's metadata, access-control rows)
+keeps only allowlisted scalar fields outside and is returned whole inside it (``guarded``).
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import re
 import sys
 import urllib.parse
 from collections.abc import Callable, Mapping
@@ -203,6 +207,25 @@ def envelope(row: Any, keys: frozenset[str] = TARGET_TEXT_KEYS) -> Any:
     if quoted:
         kept["untrusted_data"] = {"note": UNTRUSTED_NOTE, **quoted}
     return kept
+
+
+# A trusted field's text: one identifier-like word (an id, a state, a time, an address), never prose.
+_PLAIN_VALUE = re.compile(r"[A-Za-z0-9._~:/@+\[\]%-]{0,256}")
+
+
+def _plain(value: Any) -> bool:
+    return value is None or isinstance(value, (bool, int, float)) or (
+        isinstance(value, str) and _PLAIN_VALUE.fullmatch(value) is not None)
+
+
+def guarded(record: Any, trusted: frozenset[str], label: str, **outside: Any) -> dict[str, Any]:
+    """An answer whose record nests what was seen on a target. Outside ``untrusted_data`` stay
+    only ``outside`` (this tool's own words) and the record's fields named in ``trusted``, each
+    only while its value is a scalar that reads as one plain word; the whole record, with
+    everything nested in it, is under ``untrusted_data[label]``."""
+    kept = {key: record[key] for key in record if key in trusted and _plain(record[key])} \
+        if isinstance(record, Mapping) else {}
+    return {**kept, **outside, "untrusted_data": {"note": UNTRUSTED_NOTE, label: record}}
 
 
 def _pick(row: Any, keys: tuple[str, ...]) -> Any:
@@ -534,9 +557,19 @@ HUNTS = Tool(
 # --- shakerscan_target -----------------------------------------------------------------------------
 
 
+# The target row's own identifiers, states, counts and times. Its name, metadata, options and
+# authorization record (and anything the engine adds later) stay inside untrusted_data.
+TARGET_TRUSTED = frozenset({
+    "id", "url", "canonical_key", "root_domain", "is_root", "discovery_source", "parent_target_id", "target_kind",
+    "cohort", "is_active", "authorized_for_active_testing", "asm_enabled", "asm_last_test_at", "asm_last_recon_at",
+    "last_scan_id", "last_scanned_at", "last_score", "last_grade", "last_assurance_score", "total_scans",
+    "active_findings_count", "created_at", "updated_at",
+})
+
+
 def _target_get(client: Any, arguments: dict[str, Any]) -> Any:
     target = _get(client, f"/targets/{_seg(arguments['target_id'])}")
-    return envelope(target, frozenset({"name", "description", "notes"}))
+    return guarded(target, TARGET_TRUSTED, "target")
 
 
 def _target_create(client: Any, arguments: dict[str, Any]) -> Any:
@@ -777,8 +810,14 @@ def _ac_read(kind: str) -> Callable[[Any, dict[str, Any]], Any]:
             "verification_plan": (f"/targets/{target}/invariants/{_seg(arguments.get('contract_id') or '')}"
                                   "/verification-plan", {}),
         }[kind]
-        return {"view": kind, kind: _get(client, path, **query)}
+        # Principals, the matrix and contracts hold routes and labels read from the target and
+        # rule text; only the engine's own counts and states stay outside.
+        return guarded(_get(client, path, **query), AC_TRUSTED, kind, view=kind, target_id=arguments["target_id"])
     return read
+
+
+AC_TRUSTED = frozenset({"count", "total", "approved_count", "draft_count", "execution_enabled", "findings_created",
+                        "contract_id", "contract_status"})
 
 
 def _ac_draft(client: Any, arguments: dict[str, Any]) -> Any:
@@ -822,13 +861,32 @@ def _device_list(client: Any, arguments: dict[str, Any]) -> Any:
     return _page(client, "shakerscan_devices", "devices", rows, offset, limit, filters, listed.get("total"))
 
 
+# A device answer nests the device row beside what scans observed on it (services with product,
+# version and banner text, interfaces, locator history, reachability). Outside untrusted_data stay
+# the row's identifiers and states and the answer's own counts.
+DEVICE_TRUSTED = frozenset({"id", "device_class", "primary_locator", "environment", "is_active",
+                            "authorized_for_active_testing", "last_scan_id", "last_seen_at", "last_posture_complete",
+                            "last_posture_decision", "created_at", "updated_at"})
+DEVICE_COUNTS = frozenset({"services_total", "inconclusive_observations_total", "service_limit", "service_offset"})
+
+
 def _device_read(kind: str) -> Callable[[Any, dict[str, Any]], Any]:
     def read(client: Any, arguments: dict[str, Any]) -> Any:
         device = _seg(arguments.get("device_id") or "")
         path = {"get": f"/devices/{device}", "readiness": "/devices/readiness",
                 "capabilities": f"/devices/{device}/capabilities"}[kind]
         result = _get(client, path)
-        return envelope(result, frozenset({"name", "description", "notes"})) if kind == "get" else result
+        if kind == "readiness":
+            return result  # the engine's own workers, profiles and tools: nothing a device wrote
+        if kind == "capabilities":
+            # Playbooks resolved against the device's observed services and metadata.
+            return guarded(result, frozenset(), "capabilities", view=kind, device_id=arguments.get("device_id"))
+        row = result.get("device") if isinstance(result, Mapping) else None
+        counts = {key: result[key] for key in DEVICE_COUNTS
+                  if isinstance(result, Mapping) and key in result and _plain(result[key])}
+        answer_ = guarded(row if isinstance(row, Mapping) else result, DEVICE_TRUSTED, "device", **counts)
+        answer_["untrusted_data"]["device"] = result  # the whole answer, not the row alone
+        return answer_
     return read
 
 

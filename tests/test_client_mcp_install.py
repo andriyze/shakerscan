@@ -721,3 +721,271 @@ def test_codex_table_takes_the_remote_name_beside_a_local_one(tmp_path):
     assert '[mcp_servers.shakerscan-enterprise]\nurl = "https://scanner.example.com/mcp"' in plan.text
     removed = mi.plan_uninstall(mi.Target("codex", "project", tmp_path / ".codex" / "config.toml", "codex"))
     assert removed.text is not None and "mcp_servers.shakerscan]" not in removed.text
+
+
+# --- review findings: addresses, table boundaries, links, restore, long answers ------------------
+
+HOSTILE_ADDRESSES = [
+    "/mcp?token=${SHAKERSCAN_API_TOKEN}",           # Claude Code, Copilot: ${NAME}
+    "/mcp/${env:AWS_SECRET_ACCESS_KEY}",            # Cursor, VS Code: ${env:NAME}
+    "/mcp/{env:GITHUB_TOKEN}",                      # OpenCode: {env:NAME}
+    "/mcp?k={file:~/.ssh/id_ed25519}",              # OpenCode: {file:PATH}
+    "https://evil.example\\@scanner.example.com/mcp",
+    "https://user:pass@scanner.example.com/mcp",
+    "https://user@scanner.example.com/mcp",
+    "/mcp#fragment",
+    "/m cp",
+    "/mcp\tx",
+    "/mcp\nHost: evil.example",
+    "/mcp?a=`id`",
+    "/mcp/​x",
+    "/mcp?next=//evil.example",
+    "/mcp%zz",
+]
+
+
+@pytest.mark.parametrize("address", HOSTILE_ADDRESSES)
+def test_discovery_refuses_an_address_an_agent_would_expand_or_misread(address):
+    document = {**DISCOVERY, "mcp_servers": [{"url": address}]}
+    get = lambda url, headers, timeout: (200, {}, json.dumps(document).encode())  # noqa: E731
+    with pytest.raises(mi.InstallError, match="not a plain URL|another origin"):
+        mi.discover("https://scanner.example.com", get=get)
+
+
+@pytest.mark.parametrize("address, expected", [
+    ("/mcp", "https://scanner.example.com/mcp"),
+    ("/_enterprise/mcp/v1.2?tenant=a-b_c&x=%20y", "https://scanner.example.com/_enterprise/mcp/v1.2?tenant=a-b_c&x=%20y"),
+    ("https://scanner.example.com:443/mcp/", "https://scanner.example.com:443/mcp/"),
+])
+def test_discovery_still_takes_plain_addresses(address, expected):
+    document = {**DISCOVERY, "mcp_servers": [{"url": address}]}
+    get = lambda url, headers, timeout: (200, {}, json.dumps(document).encode())  # noqa: E731
+    assert mi.discover_endpoint("https://scanner.example.com", get=get) == expected
+
+
+def test_discovery_drops_an_engine_address_with_a_placeholder():
+    document = {**DISCOVERY, "api_url": "https://scanner.example.com/${HOME}"}
+    get = lambda url, headers, timeout: (200, {}, json.dumps(document).encode())  # noqa: E731
+    assert mi.discover("https://scanner.example.com", get=get)["api_url"] is None
+
+
+@pytest.mark.parametrize("address", [
+    "https://scanner.example.com/mcp?t=${SHAKERSCAN_API_TOKEN}",
+    "https://scanner.example.com/{env:HOME}/mcp",
+    "https://evil.example\\@scanner.example.com/mcp",
+    "https://scanner.example.com/mcp x",
+])
+def test_a_typed_http_address_with_a_placeholder_is_refused_and_nothing_written(address, project, home, probes,
+                                                                             monkeypatch, capsys):
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN", TOKEN)
+    assert run("install", "claude", "--project", str(project), "--http", address) == 2
+    assert "Nothing was written" in capsys.readouterr().err
+    assert files(project) == {} and probes == []
+
+
+def test_an_address_the_http_library_rejects_is_a_refusal_not_a_traceback():
+    import http.client
+
+    def post(url, body, headers, timeout):
+        raise http.client.InvalidURL("nonnumeric port: 'x'")
+
+    with pytest.raises(mi.InstallError, match="cannot reach .*nonnumeric port"):
+        mi.probe_http("https://scanner.example.com/mcp", TOKEN, post=post)
+
+    def get(url, headers, timeout):
+        raise http.client.InvalidURL("URL can't contain control characters")
+
+    with pytest.raises(mi.InstallError, match="cannot reach"):
+        mi.discover("https://scanner.example.com", get=get)
+
+
+NEIGHBOURS = textwrap.dedent('''\
+    # mine
+    model = "o3"
+
+    [notes]
+    text = """
+    line one
+
+
+
+    line five
+    """
+
+    [mcp_servers.shakerscan]
+    command = "old"
+
+    [mcp_servers.shakerscan.env]
+    A = "b"
+
+    # The fast profile: do not lose this comment.
+    # (two lines of it)
+
+    [profiles.fast]
+    model = "y"
+    ''')
+
+
+@pytest.mark.skipif(mi._tomllib is None, reason="multi-line strings need tomllib (Python 3.11+)")
+def test_codex_edits_keep_the_next_tables_comments_and_other_tables_strings():
+    entry = mi.entry("codex", STDIO)
+    before_table, after_table = NEIGHBOURS.split('[mcp_servers.shakerscan]\ncommand = "old"\n\n'
+                                                 '[mcp_servers.shakerscan.env]\nA = "b"\n')
+    new = mi.toml_set(NEIGHBOURS, entry)
+    # Byte for byte around the table: the comment and the separator before [profiles.fast] stay.
+    assert new == before_table + mi._toml_render(entry) + after_table
+    removed = mi.toml_remove(new)
+    assert removed == before_table + after_table.lstrip("\n")
+    assert "\n\n\n\nline five" in removed, "another table's multi-line string is untouched"
+    assert mi._tomllib.loads(removed) == {k: v for k, v in mi._tomllib.loads(NEIGHBOURS).items() if k != "mcp_servers"}
+    assert mi.toml_set(new, entry) == new and mi.toml_remove(removed) == removed
+
+
+def test_codex_remove_of_the_last_table_keeps_what_is_above_it():
+    text = '# mine\nmodel = "o3"\n\n# scanner\n\n[mcp_servers.shakerscan]\ncommand = "x"\n\n# trailing note\n'
+    assert mi.toml_remove(text) == '# mine\nmodel = "o3"\n\n# scanner\n\n# trailing note\n'
+    assert mi.toml_remove('[mcp_servers.shakerscan]\ncommand = "x"\n') == ""
+
+
+@pytest.mark.skipif(mi._tomllib is None, reason="multi-line strings need tomllib (Python 3.11+)")
+def test_codex_refuses_an_edit_that_would_change_another_tables_value():
+    # A line that looks like the entry's header inside another table's multi-line string.
+    text = '[notes]\ntext = """\n[mcp_servers.shakerscan]\ncommand = "in a string"\n"""\nkeep = 1\n'
+    for edit in (lambda: mi.toml_set(text, mi.entry("codex", STDIO)), lambda: mi.toml_remove(text)):
+        with pytest.raises(mi.JsoncError):
+            edit()
+
+
+@pytest.mark.parametrize("text, kept", [
+    # A comment above the next member is that member's.
+    ('{\n  "s": {\n    "shakerscan": {"a": 1},\n    // about x\n    "x": 1\n  }\n}\n', ["// about x"]),
+    ('{\n  "s": {\n    "shakerscan": {"a": 1}, // ours\n    /* about x */\n    "x": 1\n  }\n}\n', ["/* about x */"]),
+    ('{\n  "s": {\n    "a": 1, // about a\n    "shakerscan": {\n      "b": 2\n    },\n    // about x\n    "x": 1\n  }\n}\n',
+     ["// about a", "// about x"]),
+    # The closing brace on the removed member's line, after a // comment on the line before.
+    ('{"s": {"x": 1, // keep\n  "shakerscan": {"a": 1}}}\n', ["// keep"]),
+    ('{"s": {"x": 1, /* keep */\n  "shakerscan": {"a": 1}}}\n', ["/* keep */"]),
+    ('{\n  "s": {\n    "x": 1 /* before the comma */, // keep\n    "shakerscan": {"a": 1}\n  }\n}\n',
+     ["/* before the comma */", "// keep"]),
+])
+def test_jsonc_remove_keeps_the_neighbours_comments_and_valid_json(text, kept):
+    new = mi.jsonc_remove(text, ["s", "shakerscan"])
+    assert mi.parse_jsonc(new).value == {"s": {"x": 1} if '"a": 1,' not in text else {"a": 1, "x": 1}}
+    for comment in kept:
+        assert comment in new
+    assert "shakerscan" not in new and mi.jsonc_remove(new, ["s", "shakerscan"]) == new
+
+
+def test_jsonc_remove_of_a_member_on_its_own_line_leaves_the_other_lines_as_written():
+    text = '{\n  "s": {\n    "a": 1,\n    "shakerscan": {"a": 1},\n    // about x\n    "x": 1\n  }\n}\n'
+    assert mi.jsonc_remove(text, ["s", "shakerscan"]) == '{\n  "s": {\n    "a": 1,\n    // about x\n    "x": 1\n  }\n}\n'
+
+
+@pytest.mark.parametrize("client, directory", [("codex", ".codex"), ("cursor", ".cursor"), ("vscode", ".vscode")])
+def test_a_projects_agent_directory_that_is_a_link_is_refused(client, directory, tmp_path, home, client_exe, probes, capsys):
+    # A repository can ship `.codex -> ~/.codex`: the install would then edit the user's own file.
+    project = tmp_path / "repo"
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    name = "config.toml" if client == "codex" else "mcp.json"
+    (outside / name).write_text("" if client == "codex" else "{}")
+    (project / directory).symlink_to(outside, target_is_directory=True)
+    for action in (["install", client, "--project", str(project), "--url", "http://127.0.0.1:8080",
+                    "--server-command", client_exe], ["uninstall", client, "--project", str(project)]):
+        assert run(*action) == 2
+        assert "symbolic link" in capsys.readouterr().err
+    assert files(outside) == {name: "" if client == "codex" else "{}"} and probes == []
+    # The project directory itself may be reached through a link: the person named it.
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+    assert run("install", client, "--project", str(tmp_path / "linked"), "--url", "http://127.0.0.1:8080",
+               "--server-command", client_exe) == 0
+    assert (real / directory / name).is_file()
+
+
+def test_claude_user_scope_puts_the_entry_back_when_the_new_one_cannot_be_added(home, monkeypatch):
+    previous = {"type": "stdio", "command": "/old/shakerscan", "args": ["mcp"], "env": {}}
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"shakerscan": previous}}))
+    calls = []
+
+    def fake_claude(argv):
+        calls.append(list(argv))
+        data = json.loads((home / ".claude.json").read_text())
+        if argv[1] == "remove":
+            data["mcpServers"].pop(argv[-1])
+        elif "/new/" in argv[-1]:
+            raise mi.InstallError("`claude mcp add-json --scope` failed: invalid configuration")
+        else:
+            data["mcpServers"][argv[-2]] = json.loads(argv[-1])
+        (home / ".claude.json").write_text(json.dumps(data))
+
+    monkeypatch.setattr(mi, "_claude", fake_claude)
+    target = mi.target("claude", None, os.environ)
+    plan = mi.plan_install(target, mi.Server(command="/new/shakerscan", args=("mcp",)))
+    with pytest.raises(mi.InstallError, match="put back unchanged"):
+        mi.apply(plan)
+    assert [call[1] for call in calls] == ["remove", "add-json", "add-json"]
+    assert mi.claude_user_entry(os.environ) == previous
+
+    def failing(argv):
+        calls.append(list(argv))
+        if argv[1] != "remove":
+            raise mi.InstallError("`claude mcp add-json --scope` failed: no")
+
+    monkeypatch.setattr(mi, "_claude", failing)
+    with pytest.raises(mi.InstallError, match="could not be put back.*claude mcp add-json --scope user shakerscan"):
+        mi.apply(mi.plan_install(target, mi.Server(command="/new/shakerscan", args=("mcp",))))
+
+
+def test_an_answer_longer_than_the_limit_is_refused_not_cut_and_parsed(fake_deployment, monkeypatch):
+    base, _seen = fake_deployment
+    assert mi.probe_http(base + "/mcp-endpoint", TOKEN) == 2
+    monkeypatch.setattr(mi, "MAX_RESPONSE_BYTES", 40)
+    with pytest.raises(mi.InstallError, match="larger than 40 bytes"):
+        mi.probe_http(base + "/mcp-endpoint", TOKEN)
+    with pytest.raises(mi.ResponseTooLarge):
+        mi.http_get(base + "/.well-known/shakerscan", {}, 10)
+
+
+def test_the_bridge_answers_every_request_it_could_not_pass_on():
+    import io
+
+    from shakerscan import _mcp_bridge as bridge
+
+    def post(url, body, headers, timeout):
+        message = json.loads(body)
+        if message.get("method") == "tools/call":
+            raise mi.ResponseTooLarge
+        if message.get("method") == "resources/read":       # cut short: not JSON
+            return 200, {"content-type": "application/json"}, b'{"jsonrpc":"2.0","id":3,"result":{"text":"aaaa'
+        if message.get("method") == "prompts/list":         # an event stream without this request's answer
+            return 200, {"content-type": "text/event-stream"}, b'data: {"jsonrpc":"2.0","method":"notifications/x"}\n\n'
+        if message.get("method") == "ping":
+            import http.client
+            raise http.client.IncompleteRead(b"")
+        if "method" not in message:                          # the agent's answer to a server request
+            return 200, {}, b""
+        return 200, {"content-type": "application/json"}, json.dumps(
+            {"jsonrpc": "2.0", "id": message["id"], "result": {}}).encode()
+
+    lines = [{"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+             {"jsonrpc": "2.0", "id": 2, "method": "tools/call"},
+             {"jsonrpc": "2.0", "id": 3, "method": "resources/read"},
+             {"jsonrpc": "2.0", "id": 4, "method": "prompts/list"},
+             {"jsonrpc": "2.0", "id": 5, "method": "ping"},
+             {"jsonrpc": "2.0", "id": 9, "result": {}},
+             {"jsonrpc": "2.0", "id": 6, "method": "tools/list"}]
+    stdin = io.BytesIO("".join(json.dumps(line) + "\n" for line in lines).encode())
+    stdout = io.BytesIO()
+    assert bridge.serve("https://scanner.example.com/_enterprise/mcp", "tok", stdin, stdout, post=post) == 0
+    written = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    answered = {item["id"]: item for item in written if "id" in item}
+    assert sorted(answered) == [1, 2, 3, 4, 5, 6], "every request has exactly one answer; the agent's own has none"
+    assert "result" in answered[1] and "result" in answered[6]
+    assert "more than" in answered[2]["error"]["message"] and "bytes" in answered[2]["error"]["message"]
+    assert "no readable answer" in answered[3]["error"]["message"]
+    assert "no readable answer" in answered[4]["error"]["message"]
+    assert "unavailable" in answered[5]["error"]["message"]
+    assert len([item for item in written if item.get("id") in answered]) == 6
