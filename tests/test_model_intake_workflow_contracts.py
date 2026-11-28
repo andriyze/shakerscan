@@ -895,6 +895,8 @@ def test_signer_image_and_database_role_are_narrow_and_releasable():
     assert "apt-get install -y --no-install-recommends --only-upgrade libssl3 openssl apt libapt-pkg6.0 " in upgrade
     # The libpam packages likewise (CVE-2025-6020, fixed in 1.5.2-6+deb12u3).
     assert "libpam-modules libpam-modules-bin libpam-runtime libpam0g" in upgrade
+    # libzstd1 likewise (CVE-2026-124851, fixed in 1.5.4+dfsg2-5+deb12u1).
+    assert "libpam0g libzstd1" in upgrade
     assert "boto3==" in (ROOT / "api" / "model_intake_signer.requirements.lock").read_text()
     assert "NOSUPERUSER NOCREATEDB NOCREATEROLE" in role_script
     assert "UPDATE (state, updated_at)" in role_script

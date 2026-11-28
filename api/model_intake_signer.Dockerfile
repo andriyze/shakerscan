@@ -8,10 +8,11 @@ FROM python:3.15-slim-bookworm@sha256:96599df822d0e1c6bb700014a05c7f3c8cabc6e0f7
 # named so a build cache that still holds an earlier upgrade of this step cannot keep the fix out.
 # 2026-11-05: apt and libapt-pkg6.0 2.6.1 -> 2.6.2 (CVE-2026-109518), named for the same reason.
 # 2026-11-27: the libpam packages 1.5.2-6+deb12u2 -> 1.5.2-6+deb12u3 (CVE-2025-6020), named likewise.
+# 2026-11-28: libzstd1 1.5.4+dfsg2-5 -> 1.5.4+dfsg2-5+deb12u1 (CVE-2026-124851), named likewise.
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends --only-upgrade libssl3 openssl apt libapt-pkg6.0 \
-        libpam-modules libpam-modules-bin libpam-runtime libpam0g \
+        libpam-modules libpam-modules-bin libpam-runtime libpam0g libzstd1 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
