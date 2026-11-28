@@ -61,6 +61,18 @@ def test_next_call_keeps_an_unchecked_input_beyond_the_short_parameter_window():
     assert sql["input"]["parameter"] == "p08" and "p08" in sql["input"]["query"]
 
 
+def test_next_injection_call_advances_from_command_to_template_instead_of_repeating():
+    actions = [{**_action(parameter="url", check=check), "input": {
+        **_action(parameter="url", check=check)["input"], "path": "/fetch"}}
+        for check in ("sql_injection", "command_injection")]
+    actions.append({"capability_name": "xss.verify", "status": "completed",
+                    "input": {"path": "/fetch?url=1"}})
+    report = build_coverage(actions=actions, endpoints=[{
+        "method": "GET", "path": "/fetch", "param_shape": ["url"]}])
+    call = next_calls(report)[0]
+    assert call["input"]["check"] == "template_injection" and call["input"]["parameter"] == "url"
+
+
 def test_a_bare_write_does_not_examine_upload_or_graphql_security():
     for path, klass in (("/upload", "upload"), ("/graphql", "graphql")):
         report = build_coverage(endpoints=[{"method": "POST", "path": path}], actions=[

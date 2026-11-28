@@ -524,11 +524,16 @@ class CoverageFold:
                     klass: sorted(entry["params"] - ledger.inputs.get((method, route, klass), set()))[:8]
                     for klass in open_classes if klass in {"sqli", "xss", "injection"} and entry["params"]
                 }
+                injection_checks = {
+                    field: sorted(_INJECTION_CHECKS - self.ran_checks.get((method, route, field), set()))
+                    for field in untested_params.get("injection", ())
+                }
                 items.append({
                     "endpoint": f"{method} {route}",
                     "untested": open_classes,
                     "params": sorted(entry["params"])[:8],
                     **({"untested_params": untested_params} if untested_params else {}),
+                    **({"untested_injection_checks": injection_checks} if injection_checks else {}),
                     "requested": endpoint in ledger.requested,
                     "sources": sorted(entry["sources"])[:4],
                     # By reference only: the sweep sends its checks on this route as the same login.
@@ -752,7 +757,8 @@ def _next_call_options(item: Mapping[str, Any]):
         remaining = (item.get("untested_params") or {}).get(klass) or params
         request_params = list(dict.fromkeys([*remaining, *params]))
         if klass in {"sqli", "injection"} and params:
-            check = "sql_injection" if klass == "sqli" else "command_injection"
+            pending = (item.get("untested_injection_checks") or {}).get(remaining[0])
+            check = "sql_injection" if klass == "sqli" else (pending or ["command_injection"])[0]
             base = ({"query": {name: "1" for name in request_params[:10]}} if method == "GET"
                     else {"json_body": {name: "1" for name in request_params[:20]}})
             yield {"capability": "request.verify", "why": f"{klass} on {method} {route} ({remaining[0]})",
