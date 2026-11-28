@@ -244,3 +244,45 @@ def test_real_secret_shapes_stay_withheld(text, secret):
     masked, values = _mask(text)
     assert secret not in masked
     assert any(secret in value for value in values)
+
+
+# A page that carries an inline script and, outside it, a settings block. The script makes the body
+# read as code; the settings are not in it.
+_SCRIPTED_PAGE = (
+    "<html><head><script>const menu = function () { return a === b; }; var go = () => 1;</script>"
+    "</head><body><pre>{block}</pre></body></html>"
+)
+
+
+@pytest.mark.parametrize("line, secret", [
+    ("DB_PASSWORD=Winter2024", "Winter2024"),
+    ("password: hunter2", "hunter2"),
+    ("api_key = a1b2c3d4e5f6a7b8c9d0", "a1b2c3d4e5f6a7b8c9d0"),
+    ("Admin password is: tiger", "tiger"),
+    ("client_secret: correcthorsebatterystaple", "correcthorsebatterystaple"),
+])
+def test_a_setting_beside_an_inline_script_is_withheld(line, secret):
+    masked = masking.mask_body_text(_SCRIPTED_PAGE.replace("{block}", f"APP_ENV=production\n{line}\n"))
+    assert secret not in masked
+    assert "const menu = function ()" in masked  # the script itself comes back as written
+
+
+def test_an_expression_inside_the_script_of_such_a_page_is_still_shown():
+    page = (
+        "<html><script>const run = function (options) { return options === null; };\n"
+        "var settings = {\n  token: options.token,\n  nonce: options && options.nonce\n};\n"
+        "tokenCache = createCache();</script><pre>API_TOKEN=Winter2024x</pre></html>"
+    )
+    masked = masking.mask_body_text(page)
+    assert "token: options.token," in masked and "tokenCache = createCache();" in masked
+    assert "Winter2024x" not in masked
+
+
+def test_an_env_line_in_a_body_that_reads_as_script_is_withheld():
+    # No tags at all: a debug dump with a source excerpt above the process environment.
+    body = (
+        "function handler(req) {\n  const user = () => req.user;\n  return user === null;\n}\n\n"
+        "DB_PASSWORD=Winter2024\nSESSION_SECRET=correcthorse\n"
+    )
+    masked = masking.mask_body_text(body)
+    assert "Winter2024" not in masked and "correcthorse" not in masked

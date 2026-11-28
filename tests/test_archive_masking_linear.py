@@ -232,3 +232,15 @@ def test_copy_block_tracking_work_grows_linearly(make):
 
     small, large = _line_events(track, make(500)), _line_events(track, make(2_000))
     assert large <= 6 * small, (small, large)
+
+
+def test_the_script_hint_scan_is_linear_in_a_run_of_blanks():
+    # ``function`` then blanks and no ``(``: two blank runs around an optional name retried every
+    # split of the run (32,000 blanks took 0.9 s, 4x per doubling). A target writes the body.
+    import time
+
+    body = "function" + " " * 200_000 + "!"
+    started = time.perf_counter()
+    assert masking.reads_as_script(body) is False
+    assert time.perf_counter() - started < 1.0
+    assert masking.reads_as_script("x = function  name  (a) { return a === b; }; var y = () => 1;")
