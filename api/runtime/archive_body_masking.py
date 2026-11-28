@@ -42,6 +42,7 @@ import codecs
 import copy
 import html
 import html.entities
+import itertools
 import json
 import math
 import re
@@ -1113,7 +1114,8 @@ def mask_yaml_text(text: str) -> str:
     lines = text.split("\n")
     parsed = [_yaml_line(line) for line in lines]
     masked = [False] * len(lines)
-    script = reads_as_script(text)
+    script = script_spans(text)
+    starts = list(itertools.accumulate((len(line) + 1 for line in lines), initial=0)) if script else []
 
     # Every line below a secret-named key with no inline value (a mapping, a list or a block
     # scalar) is withheld until the indentation returns to that key's level.
@@ -1130,7 +1132,8 @@ def mask_yaml_text(text: str) -> str:
         if key is not None and is_withheld_key(key):
             if value is None or value in {"|", ">", "|-", ">-", "|+", ">+"}:
                 scope = indent
-            elif not (script and code_reference(value)):  # ``token: options.token,`` in a script
+            elif not (script and in_script(script, starts[index]) and code_reference(value)):
+                # ``token: options.token,`` in a script
                 masked[index] = True
 
     # A descriptor (``- name: api_key``) whose name is secret: every non-structural value in
@@ -1535,8 +1538,10 @@ def mask_php_info_superglobals(text: str) -> str:
 # createCache()``. A literal secret in a script is a quoted string, which the quoted passes
 # withhold; reading the expression as the value withheld words such as ``options`` and, once
 # sealed, every later echo of them in the Hunt.
+# (One optional name between ``function`` and ``(``: two adjacent blank runs around an optional
+# name rescanned every split of a long run of blanks, quadratic in a body the target writes.)
 _SCRIPT_HINT_RE = re.compile(
-    r"\bfunction\b[ \t]*[\w$]*[ \t]*\(|=>|\b(?:const|let|var)[ \t]+[\w${\[]|\breturn\b|!==|===")
+    r"\bfunction\b[ \t]*(?:[\w$]+[ \t]*)?\(|=>|\b(?:const|let|var)[ \t]+[\w${\[]|\breturn\b|!==|===")
 _SCRIPT_HINTS = 3
 # A variable, a member chain or the head of a call or an index: ``options``, ``a.b.c(``, ``x[``.
 _CODE_REFERENCE_RE = re.compile(r"[A-Za-z_$][\w$]{0,63}(?:\??\.[A-Za-z_$][\w$]{0,63}){0,8}")
@@ -1554,6 +1559,46 @@ def reads_as_script(text: str) -> bool:
         if count >= _SCRIPT_HINTS:
             return True
     return False
+
+
+_SCRIPT_TAG_RE = re.compile(r"<(/?)script\b[^>]{0,2048}>", re.I)
+# ``DB_PASSWORD=Winter2024`` at a line's start: a settings line, in a script or out of one.
+_ENV_LABEL_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
+def script_spans(text: str) -> list[tuple[int, int]]:
+    """Where in ``text`` an unquoted value is an expression: the spans that are script.
+
+    A body with no ``script`` tag is one script when it reads as one (a JavaScript file, a
+    window into one). A body with tags is script only inside them: a page's ``<pre>`` of settings
+    beside an inline script is not code, and reading it as code showed ``DB_PASSWORD=...``
+    whenever the page also carried a script. A window may open inside a script (a closing tag
+    with no opening one) or end inside one.
+    """
+    if not reads_as_script(text):
+        return []
+    spans: list[tuple[int, int]] = []
+    opened: int | None = None
+    seen = False
+    for tag in _SCRIPT_TAG_RE.finditer(text):
+        closing = bool(tag.group(1))
+        if closing and opened is None and not seen:
+            spans.append((0, tag.start()))
+        elif closing and opened is not None:
+            spans.append((opened, tag.start()))
+            opened = None
+        elif not closing and opened is None:
+            opened = tag.end()
+        seen = True
+    if not seen:
+        return [(0, len(text))]
+    if opened is not None:
+        spans.append((opened, len(text)))
+    return spans
+
+
+def in_script(spans: list[tuple[int, int]], position: int) -> bool:
+    return any(start <= position < end for start, end in spans)
 
 
 # An expression that opens with no name: a comparison read as an assignment (``key === x``
@@ -1581,7 +1626,7 @@ def mask_text_assignments(text: str) -> str:
     """Withhold the value of every secret-named assignment or labelled value in free text."""
     pieces: list[str] = []
     cursor = 0
-    script = reads_as_script(text)
+    script = script_spans(text)
     for match in _TEXT_ASSIGNMENT_RE.finditer(text):
         # ``Master key`` reads as ``master_key``; a lone neutral ``key`` stays a name.
         label = re.sub(r"[ \t]+", "_", match.group(1))
@@ -1594,7 +1639,9 @@ def mask_text_assignments(text: str) -> str:
         line_start = _at_line_start(text, match.start(1))
         if "=>" in separator and not _php_info_pair(match.group(1), separator, value, line_start):
             continue  # a JS arrow function or a PHP array entry, not ``php -i`` output
-        if script and not separator.strip(" \t:=>") and code_reference(value):
+        if (script and not separator.strip(" \t:=>") and in_script(script, match.start(1))
+                and not (line_start and separator == "=" and _ENV_LABEL_RE.fullmatch(match.group(1)))
+                and code_reference(value)):
             continue  # an expression in a script (``tokenCache = createCache()``)
         # ``Server=s;Password=Ab1&Cd2;``: a pair after ``;`` (a connection string, a cookie list)
         # runs to the next ``;``, blanks and ``&`` included.
