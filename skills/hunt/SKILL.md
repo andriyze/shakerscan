@@ -551,7 +551,11 @@ Finish with `POST /hunts/{hunt_id}/finish`, providing a concise evidence-based s
 actions. Cancel with `/cancel`; resume only when the server reports an awaiting-planner state.
 A web Hunt with open coverage and wall time and budget left is refused (409) with what is open:
 keep testing it, or finish with `force: true` and a `force_reason`; the debrief records the reason
-and the open coverage. After discovery the engine also runs its own sweep (reading every mapped
+and the open coverage. There is no minimum elapsed runtime for an explained forced finish:
+the duration is a ceiling, and the operator's objective determines when useful work is done.
+Coverage distinguishes HTTP methods and the inputs a completed check actually examined; a partial
+check, an ordinary parameterized request or a bare POST does not settle those security classes.
+After discovery the engine also runs its own sweep (reading every mapped
 endpoint, default credentials on sign-ins, function-level authorization, `sqli.verify` and
 `xss.verify` on every parameter); its candidates and findings are this Hunt's. When it has tested
 what was mapped it follows the Hunt (`sweep: following`): every route your own requests reach, and

@@ -118,7 +118,7 @@ def test_finish_with_open_coverage_and_time_left_is_refused_and_names_what_is_op
 
 
 def test_forced_finish_records_the_reason_and_the_open_coverage_in_the_debrief():
-    connection = _Connection(created_minutes_ago=40)  # a third of the 90-minute wall has passed
+    connection = _Connection(created_minutes_ago=40)
     with pytest.raises(run_router.HTTPException) as no_reason:
         asyncio.run(_service(connection).finish(str(HUNT), summary="Done", next_actions=[], force=True))
     assert "force_reason" in no_reason.value.detail
@@ -270,13 +270,13 @@ EARLY = build_coverage(actions=[], endpoints=[{"method": "GET", "path": "/search
                        allowed=["request.verify", "xss.verify", "http.request"])
 
 
-def test_the_engines_deferred_finish_is_not_held_by_the_planners_too_early_guard():
+def test_early_objective_completion_and_the_engines_deferred_finish_keep_the_debrief():
     connection = _Connection(created_minutes_ago=5)
-    with pytest.raises(run_router.HTTPException) as early:
-        asyncio.run(_service(connection, EARLY).finish(
-            str(HUNT), summary="Done", next_actions=[], force=True, force_reason="the planner finished early"))
-    assert early.value.status_code == 409 and "Too early to finish" in early.value.detail
-    assert connection.status == "active"
+    early = asyncio.run(_service(connection, EARLY).finish(
+        str(HUNT), summary="Done", next_actions=[], force=True, force_reason="the objective was answered early"))
+    assert early["status"] == "completed"
+    assert json.loads(connection.final_debrief)["coverage"]["force_reason"] == "the objective was answered early"
+    connection = _Connection(created_minutes_ago=5)
     # The same finish, completed by the engine once its sweep has ended: an unforced planner finish
     # stays unforced in the debrief, marked as the engine's, with no reason nobody gave.
     result = asyncio.run(_service(connection, EARLY).finish(

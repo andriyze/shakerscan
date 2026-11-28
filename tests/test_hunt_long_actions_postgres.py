@@ -13,6 +13,7 @@ approval-receipt validator, the standing-authorization lookup and the audit reda
 from __future__ import annotations
 
 import uuid
+import json
 
 import pytest
 from fastapi import HTTPException
@@ -100,6 +101,22 @@ def test_another_hunts_long_actions_do_not_count_against_this_one(env):
     for key, name in (("first-0001", "xss.verify"), ("first-0002", "sqli.verify")):
         assert run(env, env.call(first, key, name=name, values=CALLS[name])) == "admitted"
     assert run(env, env.call(second, "second-0001", name="templates.scan", values=CALLS["templates.scan"])) == "admitted"
+
+
+def test_automatic_checks_leave_one_long_slot_available_for_the_planner(env):
+    from hunt.engine_context import engine_work
+    hunt = run(env, env.hunt(profile="balanced", budget={"max_active_actions": 50}, policy=ACTIVE,
+                             capabilities=tuple(CALLS)))
+    with engine_work():
+        assert run(env, env.call(hunt, "auto-first", name="sqli.verify", values=CALLS["sqli.verify"])) == "admitted"
+        with pytest.raises(HTTPException) as refused:
+            run(env, env.call(hunt, "auto-second", name="xss.verify", values=CALLS["xss.verify"]))
+        assert refused.value.detail["reason_code"] == "long_actions_in_flight"
+    action = run(env, env.action(hunt, "auto-first"))
+    assert json.loads(action["input_summary"])["engine_work"] is True
+    assert run(env, env.action(hunt, "auto-second")) is None
+    assert run(env, env.call(hunt, "planner-first", name="templates.scan", values=CALLS["templates.scan"])) == "admitted"
+    assert len(run(env, _live_holds(env, hunt))) == 2
 
 
 def test_a_hold_reserved_longer_than_a_minute_counts_whatever_its_capability(env):

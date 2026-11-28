@@ -498,7 +498,7 @@ def test_the_sql_tool_follows_only_where_the_quick_sql_proof_saw_the_query_break
         {"kind": "sqli_proof", "proof_state": "verified", "finding_verdict": "verified"}]}}) is False
 
 
-def test_one_application_under_several_mounts_is_tested_once():
+def test_separate_mounts_are_tested_even_when_their_landing_pages_match():
     class Mounts(_Engine):
         async def call(self, capability, values, key):
             if capability == "http.request" and values.get("method") == "GET" and values["path"].endswith("/app.php"):
@@ -512,7 +512,7 @@ def test_one_application_under_several_mounts_is_tested_once():
     asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
                 .run(_run(), report))
     tested = sorted({v["path"].split("?")[0] for cap, v, _ in engine.calls if cap in {"sqli.verify", "xss.verify"}})
-    assert tested == ["/a/app.php", "/other/app.php"]
+    assert tested == ["/a/app.php", "/b/app.php", "/c/app.php", "/other/app.php"]
 
 
 def test_the_wire_pace_holds_the_engines_own_calls_to_its_rate():
@@ -626,7 +626,7 @@ def test_without_a_planner_signal_the_sweep_ends_when_a_round_finds_nothing_new(
     assert state["sweep"] == "done" and state["sweep_stats"]["rounds"] == 1
 
 
-def test_one_sign_in_under_several_mounts_gets_the_default_pairs_once():
+def test_separate_login_paths_are_not_merged_by_their_titles_and_field_names():
     form = [{"method": "POST", "action": "", "fields": [
         {"name": "pma_username", "type": "text"}, {"name": "pma_password", "type": "password"}]}]
 
@@ -649,7 +649,7 @@ def test_one_sign_in_under_several_mounts_gets_the_default_pairs_once():
     asyncio.run(Sweep(call=engine.call, create_candidate=engine.create, state={}, live=engine.live)
                 .run(_run(allowed=["http.request"]), report))
     tried = {v["path"] for cap, v, _ in engine.calls if cap == "http.request" and v["method"] == "POST"}
-    assert tried == {"/pma/index.php", "/crm/index.php"}
+    assert tried == {f"/{mount}/index.php" for mount in ("pma", "phpmyadmin", "dbadmin", "crm")}
 
 
 def test_a_route_that_asks_for_http_basic_gets_the_default_pairs_once_per_first_segment():

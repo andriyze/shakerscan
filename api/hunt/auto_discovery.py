@@ -513,7 +513,9 @@ class DiscoveryRunner:
 
     async def _call(self, capability: str, values: Mapping[str, Any], key: str) -> Any:
         try:
-            return await self._execute(self.hunt_id, capability, values, key)
+            from .engine_context import engine_work
+            with engine_work():
+                return await self._execute(self.hunt_id, capability, values, key)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - a refused step is skipped, never fatal

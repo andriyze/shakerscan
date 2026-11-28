@@ -14,7 +14,7 @@ data) and pairs it with the request it answers. ``TargetBackoff`` turns those an
 on the origin, which every tunnel to that origin in this worker process observes before it relays
 the next request or opens the next connection:
 
-* ``429`` (or ``503`` with ``Retry-After``): hold for the ``Retry-After`` the target asked for
+* ``429`` (or ``403``/``503`` with ``Retry-After``): hold for the ``Retry-After`` the target asked for
   (seconds or an HTTP date, at most ``MAX_HOLD_SECONDS``), or, without one, an exponential
   backoff from ``THROTTLE_BASE_SECONDS``.
 * ``423 Locked``: the request locked something (an account after failed sign-ins). Further
@@ -22,8 +22,8 @@ the next request or opens the next connection:
   sign-in attempts would only keep a real user locked out (nuclei's default-login templates try
   several passwords per account).
 * A ban: ``BAN_REPLAY_REFUSALS`` ``403`` answers to replays of requests the origin had answered
-  without one, with nothing served in between, or ``BAN_STREAK`` consecutive 403s across at least
-  ``BAN_STREAK_PATHS`` paths. A replay is the same request from the same sender: the same
+  without one, with nothing served in between. Refusals across protected paths alone do not
+  establish a ban: authorization tests expect them. A replay is the same request from the same sender: the same
   identity (``principal``: an opaque key the caller gives, anonymous distinct from every
   signed-in identity), method, whole request-target (query included) and, for a request with a
   body, the same body (``fingerprint``). So a 403 for another account reading an object the first
@@ -53,8 +53,6 @@ MAX_HOLD_SECONDS = 120.0
 THROTTLE_BASE_SECONDS = 5.0
 BAN_BASE_SECONDS = 30.0
 MAX_BAN_HOLD_SECONDS = 300.0
-BAN_STREAK = 20
-BAN_STREAK_PATHS = 3
 # Replays of served requests that must be refused, with nothing served in between, before the
 # origin is held: one 403 for one request is that request's answer (a rule that fired, a session
 # that ended), not a ban.
@@ -212,7 +210,7 @@ class ResponseReader:
 
 
 class _Origin:
-    __slots__ = ("until", "reason", "throttles", "bans", "streak", "streak_paths", "known_good", "locked",
+    __slots__ = ("until", "reason", "throttles", "bans", "known_good", "locked",
                  "silent", "outages", "replays_refused", "ban_until")
 
     def __init__(self) -> None:
@@ -220,8 +218,6 @@ class _Origin:
         self.reason = ""
         self.throttles = 0
         self.bans = 0
-        self.streak = 0
-        self.streak_paths: set[str] = set()
         # Requests the origin served: (sender identity, method, whole request-target, body print).
         self.known_good: set[tuple[str, str, str, str]] = set()
         self.locked: dict[tuple[str, str], float] = {}
@@ -313,32 +309,27 @@ class TargetBackoff:
         if status == 423 and target:
             state.locked[(method, path)] = self._clock() + LOCK_HOLD_SECONDS
             return "locked"
-        if status == 429 or (status == 503 and retry is not None):
+        if status == 429 or (status in {403, 503} and retry is not None):
             state.throttles += 1
             hold = retry if retry is not None else THROTTLE_BASE_SECONDS * 2 ** min(state.throttles - 1, 5)
             self._hold(origin, state, min(MAX_HOLD_SECONDS, max(1.0, hold)), f"{status} from the target")
             return "throttled"
         if status == 403:
-            state.streak += 1
-            state.streak_paths.add(path)
             if comparable and (key in state.known_good or key in state.replays_refused):
                 state.replays_refused[key] = state.replays_refused.get(key, 0) + 1
             refused_known = sum(state.replays_refused.values()) >= BAN_REPLAY_REFUSALS
-            if refused_known or (state.streak >= BAN_STREAK and len(state.streak_paths) >= BAN_STREAK_PATHS):
+            if refused_known:
                 now = self._clock()
                 if state.bans and now - state.ban_until > BAN_DECAY_SECONDS:
                     state.bans = 0  # a quiet period: the next ban starts from the base hold
                 state.bans += 1
-                state.streak, state.streak_paths = 0, set()
                 state.known_good.difference_update(state.replays_refused)
                 state.replays_refused = {}
                 hold = min(MAX_BAN_HOLD_SECONDS, BAN_BASE_SECONDS * 2 ** min(state.bans - 1, 4))
                 state.ban_until = max(state.ban_until, now + hold)
-                self._hold(origin, state, hold, "403 for requests the target served before" if refused_known
-                           else f"{BAN_STREAK} consecutive 403s across paths")
+                self._hold(origin, state, hold, "403 for requests the target served before")
                 return "banned"
             return None
-        state.streak, state.streak_paths = 0, set()
         if status < 500:
             state.throttles = 0
             if status < 400:

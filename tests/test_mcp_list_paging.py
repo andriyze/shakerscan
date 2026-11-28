@@ -429,7 +429,7 @@ def test_an_http_request_answer_keeps_what_the_target_said_and_drops_the_bookkee
     assert answer["result"]["receipt_id"] == "r-1" and answer["lifecycle"]["outcome"] == "completed"
     assert observation["request"] == {"method": "GET", "path": "/hub/login", "as_principal": "anonymous",
                                       "follow_redirects": False}
-    # A body excerpt of at most 2,000 characters, without the stylesheet.
+    # Keep the server's bounded response window, without the stylesheet.
     assert len(response["body_sample"]) <= mcp.HTTP_BODY_EXCERPT_CHARS + 1
     assert "color:red" not in response["body_sample"] and "Sign in" in response["body_sample"]
     assert len(response["html"]["links"]) == mcp.HTTP_LINKS_KEPT
@@ -442,7 +442,7 @@ def test_an_http_request_answer_keeps_what_the_target_said_and_drops_the_bookkee
     reduced = answer["mcp_view"]["reduced"]
     assert "result.receipt" in reduced["bookkeeping"] and "artifact.inspect" in reduced["bookkeeping"]
     assert "same idempotency_key" in answer["mcp_view"]["full_view"]
-    assert len(json.dumps(answer)) < 6_000, len(json.dumps(answer))
+    assert len(json.dumps(answer)) < mcp.MCP_ANSWER_BYTES, len(json.dumps(answer))
 
 
 def test_a_direct_origin_request_keeps_its_origin():

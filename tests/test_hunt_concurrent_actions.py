@@ -363,7 +363,7 @@ def test_a_hunts_third_long_action_is_refused_without_anything_reserved_or_recor
     assert args[0] == "hunt-1" and set(args[1]) == jobs.slot_capabilities()
     # A live reservation counts as long by its capability or by the wall it reserved.
     assert set(args[2]) == jobs.long_capabilities() and args[3] == jobs.LONG_ACTION_WALL_SECONDS
-    assert "(requested_json->>'tool_wall_seconds')::numeric > $4" in sql
+    assert "(r.requested_json->>'tool_wall_seconds')::numeric > $4" in sql
     assert "status IN ('reserved','running')" in sql and "lease_expires_at > NOW()" in sql
     assert "owner_kind='hunt'" in sql
 
@@ -427,7 +427,7 @@ def test_admission_classifies_the_call_by_the_wall_it_is_about_to_reserve():
                 and getattr(call.func, "id", None) == "require_long_action_slot"]
     assert ast.unparse(check) == (
         "require_long_action_slot(conn, run, name, charges.get('tool_wall_seconds'), "
-        "workers=live_agent_tool_workers(get_redis))")
+        "workers=live_agent_tool_workers(get_redis), engine_work=is_engine_work())")
 
 
 
