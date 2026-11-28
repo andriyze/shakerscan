@@ -15,11 +15,15 @@ It is never bulk guessing. The server enforces, whatever the planner asks:
 * **Bounded per login.** At most ``MAX_ATTEMPTS_PER_LOGIN`` attempts on one login (method,
   origin and path) in a Hunt and ``MAX_LOGINS_PER_HUNT`` logins; across all Hunts at most
   ``WINDOW_MAX`` attempts on one login per ``WINDOW``. A pair is sent to a login once, unless it
-  was accepted (signing in again with it is then allowed).
-* **Paced.** Attempts on one login are at least ``PACE_SECONDS`` apart.
+  was accepted (signing in again with it is then allowed). One login is one normalised path
+  (``login_key``): another spelling of it (a dot segment, a trailing slash, other letter case,
+  ``;parameters``, percent-encoding) is the same login under every bound here.
+* **Paced, one at a time.** Attempts on one login are at least ``PACE_SECONDS`` apart, and the
+  next is admitted only once the one before has its verdict (or ``PENDING_HOLD`` has passed).
 * **Stops at the first sign of a lockout or rate limit.** An answer of 429 or 423, a
   ``Retry-After`` header, or lockout or rate-limit wording ends the check on that login for this
-  Hunt and, for ``WINDOW``, for every Hunt.
+  Hunt and, for ``WINDOW``, for every Hunt. The worker reads the stop again just before it
+  sends: an attempt admitted before the sign arrived is settled ``not_sent``.
 * **Own host only, never a shared login.** The login must be on the Hunt's own host, and the
   logins that never receive a discovered secret (``secret_try_denied_logins.txt`` and
   ``SHAKERSCAN_SECRET_TRY_DENY``) never receive a default credential either.
@@ -58,6 +62,9 @@ MAX_LOGINS_PER_HUNT = 12
 PACE_SECONDS = 2.0
 WINDOW = timedelta(hours=1)
 WINDOW_MAX = 20
+# How long an admitted attempt with no verdict keeps the next one on its login waiting. Longer
+# than any one request may take; after it the attempt is taken for lost.
+PENDING_HOLD = timedelta(seconds=120)
 SCHEMA = "hunt-default-credentials/v1"
 
 # (reference, user name, password, where the pair comes from). Vendor defaults first, then the
@@ -276,7 +283,43 @@ def _login_target(values: Mapping[str, Any], default_origin: Any) -> tuple[str, 
 
 
 def login_key(url: str) -> str:
-    return hashlib.sha256(f"POST {url}".encode()).hexdigest()
+    """One key per login as the server routes it, not as the planner spelled it.
+
+    The wire URL resolves dot segments, and most frameworks route ``/login``, ``/login/``,
+    ``/Login``, ``/./login``, ``/a/../login``, ``/login;x`` and their percent-encoded spellings
+    to one handler. Every bound here is per key (attempts, once per pair, pace, the cross-Hunt
+    window, the lockout stop), so the key is the path normalised as the deny list normalises it.
+    Erring towards one key only tightens the bounds. A path that was already lower-case, without
+    dot segments, parameters, encoding or a trailing slash keeps the key it always had.
+    """
+    import urllib.parse
+    from .secret_try import _normal_path
+    parts = urllib.parse.urlsplit(str(url))
+    return hashlib.sha256(
+        f"POST {parts.scheme.lower()}://{parts.netloc.lower()}{_normal_path(parts.path or '/')}".encode()
+    ).hexdigest()
+
+
+async def stop_recorded(conn: Any, *, hunt_id: uuid.UUID, key: str) -> bool:
+    """Whether this login answered an attempt with a lockout or rate-limit sign: ever in this
+    Hunt, or within ``WINDOW`` in any Hunt. Read under the login's advisory lock."""
+    return bool(await conn.fetchval(
+        """SELECT 1 FROM hunt_default_credential_attempts
+           WHERE login_key=$1 AND verdict = ANY($2::text[])
+             AND (hunt_run_id=$4 OR attempted_at > NOW() - $3::interval)
+           LIMIT 1""", key, sorted(STOP_VERDICTS), WINDOW, hunt_id))
+
+
+async def answer_awaited(conn: Any, *, key: str) -> bool:
+    """Whether an attempt on this login (any Hunt) was admitted and has no verdict yet. The next
+    one waits for it: a login that answers slowly would otherwise receive every attempt admitted
+    before its first lockout or rate-limit answer was read. An attempt whose verdict never
+    arrives (a worker that died) stops holding the login after ``PENDING_HOLD``."""
+    return bool(await conn.fetchval(
+        """SELECT 1 FROM hunt_default_credential_attempts
+           WHERE login_key=$1 AND verdict='pending'
+             AND attempted_at > NOW() - $2::interval
+           LIMIT 1""", key, PENDING_HOLD))
 
 
 def _refuse(code: str, message: str, **kwargs: Any) -> HuntRefusal:
@@ -333,10 +376,7 @@ async def admit_default_credentials(
         hunt_id, key,
     )
     stopped = [row for row in rows if row["verdict"] in STOP_VERDICTS]
-    if stopped or await conn.fetchval(
-            """SELECT 1 FROM hunt_default_credential_attempts
-               WHERE login_key=$1 AND verdict = ANY($2::text[]) AND attempted_at > NOW() - $3::interval
-               LIMIT 1""", key, sorted(STOP_VERDICTS), WINDOW):
+    if stopped or await stop_recorded(conn, hunt_id=hunt_id, key=key):
         raise _refuse("default_credentials_stopped", (
             "This login answered a default-credential attempt with a lockout or rate-limit sign, so "
             "the check stopped on it. Record what was observed; do not try other passwords on it."))
@@ -354,6 +394,12 @@ async def admit_default_credentials(
         raise _refuse("default_credentials_paced", (
             f"Default-credential attempts on one login are at least {PACE_SECONDS:g} seconds apart; "
             f"send this one again in {wait} s. Nothing was sent."), headers={"Retry-After": str(wait)})
+    if await answer_awaited(conn, key=key):
+        wait = max(1, int(PACE_SECONDS + 0.999))
+        raise _refuse("default_credentials_paced", (
+            "An earlier default-credential attempt on this login has no answer yet; attempts go to "
+            f"one login one at a time. Read that action's result, then send this one again (in {wait} s "
+            "or later). Nothing was sent."), headers={"Retry-After": str(wait)})
     if not rows:
         logins = int(await conn.fetchval(
             "SELECT count(DISTINCT login_key) FROM hunt_default_credential_attempts WHERE hunt_run_id=$1",
@@ -390,14 +436,31 @@ async def record_attempt(conn: Any, *, hunt_id: Any, action_id: Any, claim: Atte
 
 async def require_admitted(conn: Any, *, hunt_id: Any, action_id: Any, pair_id: str) -> None:
     """Worker-side: the pair goes out only on the action admission recorded for it (admission
-    applied the operator's switch and every bound)."""
-    found = await conn.fetchval(
-        """SELECT 1 FROM hunt_default_credential_attempts
-           WHERE hunt_run_id=$1 AND action_id=$2 AND pair_id=$3 AND verdict='pending'""",
-        uuid.UUID(str(hunt_id)), uuid.UUID(str(action_id)), pair_id,
-    )
-    if not found:
-        raise ValueError("default_credential_not_admitted: this action was not admitted for that pair")
+    applied the operator's switch and every bound), and only while the login has not since
+    answered another attempt with a lockout or rate-limit sign. That is read again here, under
+    the login's lock, because admission and sending are apart in time; an attempt it stops is
+    settled ``not_sent`` and nothing goes out."""
+    hunt, action = uuid.UUID(str(hunt_id)), uuid.UUID(str(action_id))
+    stopped = False
+    async with conn.transaction():
+        key = await conn.fetchval(
+            """SELECT login_key FROM hunt_default_credential_attempts
+               WHERE hunt_run_id=$1 AND action_id=$2 AND pair_id=$3 AND verdict='pending'""",
+            hunt, action, pair_id,
+        )
+        if not key:
+            raise ValueError("default_credential_not_admitted: this action was not admitted for that pair")
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 7243))", str(key))
+        if await stop_recorded(conn, hunt_id=hunt, key=str(key)):
+            stopped = True
+            await conn.execute(
+                """UPDATE hunt_default_credential_attempts SET verdict='not_sent', settled_at=NOW()
+                   WHERE hunt_run_id=$1 AND action_id=$2 AND pair_id=$3 AND verdict='pending'""",
+                hunt, action, pair_id)
+    if stopped:  # raised after the transaction, so the settlement is kept
+        raise ValueError(
+            "default_credentials_stopped: this login answered another attempt with a lockout or "
+            "rate-limit sign after this one was admitted; nothing was sent")
 
 
 def _walk(value: Any, depth: int = 0) -> Sequence[tuple[str, Any]]:

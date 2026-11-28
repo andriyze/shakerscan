@@ -175,3 +175,60 @@ def test_switched_off_passive_other_host_or_shared_logins_are_refused(env, monke
         assert await rows(env, hunt) == [] and await rows(env, passive) == []
 
     run(env, scenario())
+
+
+async def bound_refusal(env, hunt, values):
+    """The check's own admission, called directly: the bound under test, whatever else the
+    lifecycle would say about an unusual path spelling."""
+    with pytest.raises(HTTPException) as caught:
+        await dc.admit_default_credentials(env.conn, run=hunt, values=values, policy=ACTIVE,
+                                           context={"target": {"url": "https://app.example.test"}})
+    return caught.value
+
+
+def test_every_spelling_of_a_login_is_one_login_for_every_bound(env):
+    async def scenario():
+        hunt = await env.hunt(policy=ACTIVE, budget=BUDGET)
+        spellings = ["/hub/login", "/hub/./login", "/hub/x/../login", "/hub/login/", "/hub/Login",
+                     "/hub/login;a=1", "/hub/%6cogin"]
+        assert await env.call(hunt, "default-cred-0001", values=attempt("dc-01", path=spellings[0])) == "admitted"
+        await settle(env, hunt, "default-cred-0001", "rejected")
+        # Once per pair, whatever the spelling.
+        for index, path in enumerate(spellings[1:]):
+            again = await bound_refusal(env, hunt, attempt("dc-01", path=path))
+            assert again.detail["reason_code"] == "default_credentials_invalid", path
+        assert await env.call(hunt, "default-cred-0002", values=attempt("dc-02", path="/hub/Login")) == "admitted"
+        assert len({row["login_key"] for row in await rows(env, hunt)}) == 1
+        # A lockout answer stops every spelling, in this Hunt and in another.
+        await settle(env, hunt, "default-cred-0002", "locked")
+        other = await env.hunt(policy=ACTIVE, budget=BUDGET)
+        for index, path in enumerate(spellings):
+            for at in (hunt, other):
+                stopped = await bound_refusal(env, at, attempt("dc-03", path=path))
+                assert stopped.detail["reason_code"] == "default_credentials_stopped", path
+        assert len(await rows(env, hunt)) == 2 and await rows(env, other) == []
+
+    run(env, scenario())
+
+
+def test_an_unanswered_attempt_holds_its_login_and_the_worker_reads_the_stop_again(env):
+    async def scenario():
+        hunt = await env.hunt(policy=ACTIVE, budget=BUDGET)
+        assert await env.call(hunt, "default-cred-0001", values=attempt("dc-01")) == "admitted"
+        waiting = await bound_refusal(env, hunt, attempt("dc-02", path="/hub/login/"))
+        assert waiting.status_code == 429 and waiting.detail["reason_code"] == "default_credentials_paced"
+        other = await env.hunt(policy=ACTIVE, budget=BUDGET)
+        assert (await refused(env, other, "default-cred-0001", attempt("dc-03"))).detail[
+            "reason_code"] == "default_credentials_paced"
+        # An attempt whose verdict never arrived stops holding the login after PENDING_HOLD.
+        await env.conn.execute(
+            "UPDATE hunt_default_credential_attempts SET attempted_at = NOW() - $1::interval", dc.PENDING_HOLD * 2)
+        assert await env.call(hunt, "default-cred-0003", values=attempt("dc-02")) == "admitted"
+        # The older one is answered with a lockout before the worker sends the newer one.
+        await settle(env, hunt, "default-cred-0001", "locked")
+        action_id = uuid.uuid5(uuid.UUID(str(hunt["id"])), "hunt-capability:default-cred-0003")
+        with pytest.raises(ValueError, match="default_credentials_stopped"):
+            await dc.require_admitted(env.conn, hunt_id=hunt["id"], action_id=action_id, pair_id="dc-02")
+        assert [row["verdict"] for row in await rows(env, hunt) if row["action_id"] == action_id] == ["not_sent"]
+
+    run(env, scenario())

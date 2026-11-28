@@ -103,7 +103,7 @@ ALLOWED_PLAIN_DIGESTS = {
     # installation-keyed digests, counted across a Scan's attempts (auth_endpoint_probe).
     ("api/scan/auth_endpoint_probe.py", "key"): "canonical",
     # The default-credential ledger's login id: a digest of "POST " and the login URL the request
-    # names (method, scheme, host, port, path), counted and stopped per login (default_credentials).
+    # names (method, scheme, host, port, normalised path), counted and stopped per login (default_credentials).
     ("api/hunt/default_credentials.py", "login_key"): "request",
     # The verified default-credential finding's fingerprint: the Scan's templated finding identity.
     ("api/hunt/default_credential_proof.py", "finding_record"): "finding",

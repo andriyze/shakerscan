@@ -166,6 +166,33 @@ def test_an_attempt_is_a_login_not_a_state_changing_write():
         require_http_request_authority(login(), {"active_testing": False})
 
 
+# --- one key per login ------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("spelling", [
+    "/hub/login/", "/hub/./login", "/hub/x/../login", "//hub//login", "/hub/Login", "/HUB/LOGIN",
+    "/hub/login;jsessionid=1", "/hub;v=1/login", "/hub/%6cogin", "/hub/%2e/login", "/hub/x/%2e%2e/login",
+    "/hub/%256cogin", "/a/../hub/login",
+])
+def test_every_spelling_of_one_login_shares_its_key_and_so_its_bounds(spelling):
+    from hunt.saved_logins import request_login_url
+    plain = dc.login_key(request_login_url(login(), None))
+    assert dc.login_key(request_login_url(login(path=spelling), None)) == plain
+
+
+def test_the_key_of_an_ordinary_path_is_unchanged_and_other_logins_keep_their_own():
+    import hashlib
+    # Rows recorded before the key was normalised stay the same login for an ordinary path.
+    assert dc.login_key("https://app.example.test:443/hub/login") == hashlib.sha256(
+        b"POST https://app.example.test:443/hub/login").hexdigest()
+    assert dc.login_key("https://app.example.test:443/") == hashlib.sha256(
+        b"POST https://app.example.test:443/").hexdigest()
+    keys = {dc.login_key(url) for url in (
+        "https://app.example.test:443/hub/login", "https://app.example.test:443/admin/login",
+        "https://app.example.test:8443/hub/login", "http://app.example.test:443/hub/login",
+        "https://other.example.test:443/hub/login")}
+    assert len(keys) == 5
+
+
 # --- verdicts --------------------------------------------------------------------------------------
 
 def verdict(status, body=b"", *, headers=None, cookies=(), location=None, path="/hub/login"):

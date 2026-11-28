@@ -7,7 +7,9 @@ on that candidate runs this proof, inside the verification action, under the Hun
 1. It finds the cited attempt in this Hunt's attempts ledger: accepted, with the login request's
    recorded shape (login URL, body kind, literal body fields and the two field pointers).
 2. It sends that login twice on the same login URL, by the server's own values: the accepted pair
-   again, then a control with the pair's user name and a fresh random password no list holds.
+   again, then a control with the pair's user name and a fresh random password no list holds. The
+   control has the pair's password's length and character classes, so only the value differs (a
+   login that checks a password's form before authenticating cannot refuse it for its form).
    Both are ordinary default-credential attempts: admitted by the same bounds (attempts per
    login, the cross-Hunt window, pacing, the lockout and rate-limit stop), recorded in the ledger
    and archived as this action's HTTP evidence; redirects are not followed.
@@ -18,7 +20,14 @@ sign at either step stops the check on that login (as for any attempt) and leave
 inconclusive; so does a control that is not clearly refused, a request whose shape cannot be
 replayed (it carried values captured from a page), or a login the bounds no longer admit. A
 control that is accepted refutes the candidate (the login accepts any password, not this pair).
-The proof's evidence names the pair by reference and user name only; no password is stored.
+The proof's evidence names the pair by reference and user name only; no password is stored. When
+the planner bound only the pair's password and wrote its own user name into the body, the proof
+names no user: the pair's user name was never sent.
+
+Authority and accounting are the attempt's own (runtime/hunt_http_contract.py): a login needs
+active_testing, not the state-changing permission, and is not charged as a state-changing
+request. The proof's ``traffic`` counts every request it sends, the form page's GET included, and
+names its login POSTs separately.
 """
 from __future__ import annotations
 
@@ -136,21 +145,54 @@ def build_request(shape: Mapping[str, Any], *, username: str | None, secret: str
     return request
 
 
-async def _admit(conn: Any, *, run: Mapping[str, Any], login_key: str, pair_id: str, reserve: int) -> None:
-    """The same bounds as an attempt, for ``reserve`` more attempts on this login."""
+def control_secret(password: str, *, avoid: Any = ()) -> str:
+    """A random password of the same length and character classes as ``password``: a lower-case
+    letter for each lower-case letter, a digit for each digit, and so on (any other character is
+    kept). Never ``password`` itself, a listed password or a value in ``avoid``."""
+    import string
+    classes = (string.ascii_lowercase, string.ascii_uppercase, string.digits)
+    taken = {password, *(listed for _id, _user, listed, _source in dc.PAIRS), *(str(v) for v in avoid)}
+    for _ in range(64):
+        value = "".join(
+            next((secrets.choice(alphabet) for alphabet in classes if char in alphabet), char)
+            for char in password)
+        if value not in taken:
+            return value
+    # No such value exists (a password of other characters only): a longer one of the same alphabet.
+    return password + secrets.choice(string.ascii_lowercase) + secrets.token_hex(4)
+
+
+def step_requests(shape: Mapping[str, Any]) -> int:
+    """The requests one proof step sends: the login, and the form's page first when it is read."""
+    return 2 if shape.get("form_prefetch") is True and shape.get("body_kind") == "form" else 1
+
+
+async def _admit(conn: Any, *, run: Mapping[str, Any], login_key: str, pair_id: str, reserve: int,
+                 first: bool = False) -> None:
+    """The same bounds as an attempt, for ``reserve`` more attempts on this login. The first step
+    is also paced against the Hunt's last attempt there and waits for an attempt that has no
+    answer yet; the proof paces its own second step."""
     await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 7243))", login_key)
     hunt_id = uuid.UUID(str(run["id"]))
     rows = await conn.fetch(
         """SELECT pair_id, verdict, EXTRACT(EPOCH FROM (NOW() - attempted_at)) AS age
            FROM hunt_default_credential_attempts WHERE hunt_run_id=$1 AND login_key=$2
            ORDER BY attempted_at DESC""", hunt_id, login_key)
-    if any(row["verdict"] in dc.STOP_VERDICTS for row in rows) or await conn.fetchval(
-            """SELECT 1 FROM hunt_default_credential_attempts
-               WHERE login_key=$1 AND verdict = ANY($2::text[]) AND attempted_at > NOW() - $3::interval
-               LIMIT 1""", login_key, sorted(dc.STOP_VERDICTS), dc.WINDOW):
+    if any(row["verdict"] in dc.STOP_VERDICTS for row in rows) or await dc.stop_recorded(
+            conn, hunt_id=hunt_id, key=login_key):
         raise DefaultCredentialProofRefused(
             "default_credentials_stopped",
             "This login answered with a lockout or rate-limit sign; the proof sends nothing more to it.")
+    if first and rows and rows[0]["age"] is not None and float(rows[0]["age"]) < dc.PACE_SECONDS:
+        raise DefaultCredentialProofRefused(
+            "default_credentials_paced",
+            f"Default-credential attempts on one login are at least {dc.PACE_SECONDS:g} seconds apart; "
+            "verify again in a moment. Nothing was sent.")
+    if await dc.answer_awaited(conn, key=login_key):
+        raise DefaultCredentialProofRefused(
+            "default_credentials_paced",
+            "An earlier default-credential attempt on this login has no answer yet; verify again once "
+            "it has. Nothing was sent.")
     if len(rows) + reserve > dc.MAX_ATTEMPTS_PER_LOGIN:
         raise DefaultCredentialProofRefused(
             "default_credentials_exhausted",
@@ -185,9 +227,11 @@ async def run_proof(
     pair = dc.pair(attempt["pair_id"])
     if pair is None:
         raise DefaultCredentialProofRefused("default_credentials_evidence_missing", "Unknown pair reference.")
+    # The pair's user name is named only when the proof sends it (the planner may have bound the
+    # password alone and written another user name into the body).
     username = pair[0] if shape.get("user_pointer") or shape.get("body_kind") == dc.BASIC_FIELD else None
-    control_secret = "shakerscan-control-" + secrets.token_urlsafe(18)
-    steps = (("pair", attempt["pair_id"], pair[1]), ("control", CONTROL_PAIR, control_secret))
+    steps = (("pair", attempt["pair_id"], pair[1]),
+             ("control", CONTROL_PAIR, control_secret(pair[1], avoid=(pair[0],))))
     send = send or _worker_sender(pool, run=run, context=context, policy=policy, action_id=action_id)
     sleep = sleep or asyncio.sleep
     outcome: dict[str, str] = {}
@@ -196,7 +240,7 @@ async def run_proof(
             async with conn.transaction():
                 try:
                     await _admit(conn, run=run, login_key=attempt["login_key"], pair_id=pair_id,
-                                 reserve=len(steps) - index)
+                                 reserve=len(steps) - index, first=not index)
                 except DefaultCredentialProofRefused:
                     if not index:
                         raise  # nothing was sent: a refusal, not a verdict
@@ -219,11 +263,13 @@ async def run_proof(
                 uuid.UUID(str(run["id"])), uuid.UUID(str(action_id)), pair_id, verdict)
         if verdict in dc.STOP_VERDICTS or (label == "pair" and verdict != "accepted"):
             break
-    return evaluate(outcome, attempt=attempt, username=pair[0])
+    return evaluate(outcome, attempt=attempt, username=username, requests_per_step=step_requests(shape))
 
 
-def evaluate(outcome: Mapping[str, str], *, attempt: Mapping[str, Any], username: str) -> dict[str, Any]:
-    """The family-proof verdict from the two steps' verdicts."""
+def evaluate(outcome: Mapping[str, str], *, attempt: Mapping[str, Any], username: str | None,
+             requests_per_step: int = 1) -> dict[str, Any]:
+    """The family-proof verdict from the two steps' verdicts. ``username`` is the user name the
+    proof sent, or None when the login's user name was the planner's own."""
     try:
         from family_proof import evaluate_family_proof
     except ModuleNotFoundError:  # package import layout
@@ -247,9 +293,21 @@ def evaluate(outcome: Mapping[str, str], *, attempt: Mapping[str, Any], username
         "pair": str(attempt["pair_id"]), "username": username,
         "login_url": str(attempt["request_shape"].get("login_url")),
         "source_action_id": str(attempt["action_id"]),
-        "traffic": {"http_requests": sum(1 for value in outcome.values() if value != "not_sent"),
-                    "state_changing_requests": 0},
+        "traffic": _traffic(outcome, attempt=attempt, requests_per_step=requests_per_step),
     }
+
+
+def _traffic(outcome: Mapping[str, str], *, attempt: Mapping[str, Any], requests_per_step: int) -> dict[str, int]:
+    """What the proof sent. ``http_requests`` is every request (each step's login and the form
+    page read before it); ``login_posts`` the logins sent with a body. ``state_changing_requests``
+    is the Hunt's budget dimension and stays 0, as for the attempt this proof repeats: a login is
+    admitted on active_testing and not charged as a state-changing request
+    (runtime/hunt_http_contract.require_http_request_authority)."""
+    sent = sum(1 for value in outcome.values() if value != "not_sent")
+    basic = (attempt.get("request_shape") or {}).get("body_kind") == dc.BASIC_FIELD
+    return {"http_requests": sent * max(1, int(requests_per_step)),
+            "login_posts": 0 if basic else sent, "state_changing_requests": 0}
+
 
 
 def finding_record(proof: Mapping[str, Any], *, hunt_id: Any, action_id: Any) -> dict[str, Any]:
@@ -260,17 +318,18 @@ def finding_record(proof: Mapping[str, Any], *, hunt_id: Any, action_id: Any) ->
         from scanner.findings import templated_finding_identity
     import hashlib
     url = str(proof["login_url"])
+    username = str(proof["username"]) if proof.get("username") else ""
     identity = templated_finding_identity({
         "cwe": "CWE-1392", "tool": "shakerscan_default_credentials", "url": url,
-        "evidence": {"method": "POST", "param": str(proof.get("username") or "")[:80]},
-    }) or f"default_credentials|{url}|{proof.get('username')}"
+        "evidence": {"method": "POST", "param": username[:80]},
+    }) or f"default_credentials|{url}|{username}"
     evidence = {
         "schema_version": "hunt-deterministic-finding/v1", "authoritative": True,
         "proof_state": "verified", "finding_verdict": "verified",
         "canonical_capability": "candidate.verify", "proof_contract": PROOF_CONTRACT,
         "hunt_id": str(hunt_id), "source_action_id": str(proof.get("source_action_id")),
         "verification_action_id": str(action_id), "url": url, "method": "POST",
-        "default_credential": {"pair": proof.get("pair"), "username": proof.get("username")},
+        "default_credential": {"pair": proof.get("pair"), **({"username": username} if username else {})},
         "steps": dict(proof.get("steps") or {}),
         "proof_producer": "shakerscan", "evidence_type": "deterministic_differential",
         "secret_values_visible": False,
@@ -278,10 +337,14 @@ def finding_record(proof: Mapping[str, Any], *, hunt_id: Any, action_id: Any) ->
     return {
         "fingerprint": "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16],
         "url": url, "evidence": evidence,
-        "title": f"Verified default credentials accepted for user {str(proof.get('username'))[:60]}",
+        "title": (f"Verified default credentials accepted for user {username[:60]}" if username
+                  else "Verified default password accepted on a login"),
         "description": ("The login accepted a well-known default or common credential pair, sent "
                         "again by the server, while a random-password control for the same user was "
-                        "refused."),
+                        "refused." if username else
+                        "The login accepted a well-known default or common password for the user name "
+                        "the Hunt supplied, sent again by the server, while a random-password control "
+                        "for the same user name was refused."),
         "tool": "shakerscan_default_credentials", "cwe": "CWE-1392",
         "finding_type": "default_credentials",
         "verdict_reason": "Accepted pair re-authenticated; random-password control refused",

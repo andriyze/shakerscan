@@ -243,9 +243,12 @@ scope, approvals and budget are exactly those of an unseeded start.
 A Hunt may try a small built-in list of vendor-default and common credential pairs (20 pairs) on a
 sign-in form it found on its own host, by reference (`request_bindings` entries with
 `default_credential: dc-NN`). It needs active testing. The server allows at most 20 attempts per
-login and 4 logins per Hunt, 2 seconds apart, at most 20 attempts on one login per hour across
+login and 12 logins per Hunt, 2 seconds apart, at most 20 attempts on one login per hour across
 Hunts, each pair once per login, and stops on a login at the first lockout or rate-limit sign
-(429, 423, `Retry-After`, lockout or rate-limit wording). The logins that never receive a
+(429, 423, `Retry-After`, lockout or rate-limit wording). One login is one path however it is
+spelled (`/login`, `/a/../login` and `/Login/` are counted together), no attempt is admitted while
+another on that login is still unanswered, and an attempt already admitted is not sent once the
+stop is recorded. The logins that never receive a
 discovered secret never receive these either. Every attempt is an ordinary `http.request` action
 with its evidence; the answer carries `login_attempt.verdict` (`accepted`, `rejected`, `unclear`, or stopped) and
 the briefing's `default_credentials` section lists the references and what was used. An accepted
